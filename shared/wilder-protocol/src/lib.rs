@@ -22,6 +22,10 @@ pub enum C2S {
     MoveTo { seq: u32, x: f32, z: f32 },
     /// Stop any current click-to-move path.
     StopMove { seq: u32 },
+    /// Dodge roll: a short server-side dash along a normalized XZ direction.
+    Roll { seq: u32, dx: f32, dz: f32 },
+    /// Toggle crouching (slower movement, crouch animations).
+    SetCrouch { on: bool },
     /// Context interaction with an entity (loot, extract, gather...).
     Interact { entity_id: EntityId },
     /// Inventory manipulation.

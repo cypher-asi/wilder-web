@@ -235,6 +235,9 @@ pub enum AnimState {
     Attack,
     Death,
     Gather,
+    Roll,
+    Crouch,
+    CrouchWalk,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

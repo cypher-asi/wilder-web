@@ -17,7 +17,10 @@ use wilder_combat::{armor_multiplier, weapon_stats, FIST};
 use wilder_inventory as inv;
 use wilder_pathfinding::find_path;
 use wilder_persistence::{CharacterStore, RocksStore, Stash, WorldStore};
-use wilder_physics::{position_clear, step_move, CollisionWorld, RUN_SPEED};
+use wilder_physics::{
+    position_clear, step_move, step_move_speed, CollisionWorld, CROUCH_SPEED, ROLL_COOLDOWN,
+    ROLL_DURATION, ROLL_SPEED, RUN_SPEED,
+};
 use wilder_protocol::*;
 use wilder_replication::{diff_view, view_set};
 use wilder_terrain::TerrainGenerator;
@@ -161,6 +164,12 @@ struct Player {
     ran_this_tick: bool,
     attacked_this_tick: bool,
     attack_cooldown: f32,
+    /// Crouch toggle: slower movement + crouch anims until cleared.
+    crouching: bool,
+    /// Dodge roll dash: seconds left + normalized XZ direction.
+    roll_time: f32,
+    roll_dir: (f32, f32),
+    roll_cooldown: f32,
     /// Active extraction channel: (extraction point entity, seconds left).
     extracting: Option<(EntityId, f32)>,
     /// Known blueprint recipe ids.
@@ -196,14 +205,20 @@ impl ProductionJobState {
 
 impl Player {
     fn anim(&self) -> AnimState {
-        if self.attacked_this_tick {
+        if self.roll_time > 0.0 {
+            AnimState::Roll
+        } else if self.attacked_this_tick {
             AnimState::Attack
         } else if self.moved_this_tick {
-            if self.ran_this_tick {
+            if self.crouching {
+                AnimState::CrouchWalk
+            } else if self.ran_this_tick {
                 AnimState::Run
             } else {
                 AnimState::Walk
             }
+        } else if self.crouching {
+            AnimState::Crouch
         } else {
             AnimState::Idle
         }
@@ -433,6 +448,10 @@ impl World {
             ran_this_tick: false,
             attacked_this_tick: false,
             attack_cooldown: 0.0,
+            crouching: false,
+            roll_time: 0.0,
+            roll_dir: (1.0, 0.0),
+            roll_cooldown: 0.0,
             extracting: None,
             blueprints,
             production: HashMap::new(),
@@ -512,6 +531,34 @@ impl World {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.last_input_seq = player.last_input_seq.max(seq);
                     player.path.clear();
+                }
+            }
+            C2S::Roll { seq, dx, dz } => {
+                if let Some(player) = self.players.get_mut(&entity) {
+                    player.last_input_seq = player.last_input_seq.max(seq);
+                    let len = (dx * dx + dz * dz).sqrt();
+                    if player.character.health <= 0.0
+                        || player.roll_time > 0.0
+                        || player.roll_cooldown > 0.0
+                        || len < 1e-3
+                    {
+                        return;
+                    }
+                    player.path.clear();
+                    player.extracting = None;
+                    player.crouching = false;
+                    player.roll_time = ROLL_DURATION;
+                    player.roll_dir = (dx / len, dz / len);
+                    player.roll_cooldown = ROLL_COOLDOWN;
+                    player.character.yaw = dz.atan2(dx);
+                }
+            }
+            C2S::SetCrouch { on } => {
+                if let Some(player) = self.players.get_mut(&entity) {
+                    if player.roll_time <= 0.0 {
+                        player.crouching = on;
+                        player.dirty = true;
+                    }
                 }
             }
             C2S::Attack { seq, tx, tz } => self.player_attack(entity, seq, tx, tz),
@@ -1405,16 +1452,44 @@ impl World {
             if player.character.health <= 0.0 {
                 continue;
             }
+            player.roll_cooldown = (player.roll_cooldown - TICK_DT).max(0.0);
             let before = player.character.position;
+
+            if player.roll_time > 0.0 {
+                // Dodge roll dash: overrides direct input (drained but only
+                // acked so client reconciliation stays in sync).
+                let (dx, dz) = player.roll_dir;
+                let next = step_move_speed(
+                    &self.chunks,
+                    player.character.position,
+                    dx,
+                    dz,
+                    ROLL_SPEED,
+                    TICK_DT,
+                );
+                player.character.position = next;
+                player.roll_time -= TICK_DT;
+                for (seq, ..) in std::mem::take(&mut player.pending_inputs) {
+                    player.last_input_seq = player.last_input_seq.max(seq);
+                }
+            }
 
             let inputs = std::mem::take(&mut player.pending_inputs);
             for (seq, dx, dz, run, dt) in inputs {
                 player.last_input_seq = player.last_input_seq.max(seq);
-                let next = step_move(&self.chunks, player.character.position, dx, dz, run, dt);
+                let speed = if player.crouching {
+                    CROUCH_SPEED
+                } else if run {
+                    RUN_SPEED
+                } else {
+                    wilder_physics::WALK_SPEED
+                };
+                let next =
+                    step_move_speed(&self.chunks, player.character.position, dx, dz, speed, dt);
                 player.character.position = next;
                 if dx != 0.0 || dz != 0.0 {
                     player.character.yaw = dz.atan2(dx);
-                    player.ran_this_tick = run;
+                    player.ran_this_tick = run && !player.crouching;
                 }
             }
 

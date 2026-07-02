@@ -7,7 +7,13 @@ use wilder_types::*;
 
 pub const WALK_SPEED: f32 = 3.0; // m/s
 pub const RUN_SPEED: f32 = 6.0; // m/s
+pub const CROUCH_SPEED: f32 = 1.6; // m/s
 pub const PLAYER_RADIUS: f32 = 0.4; // meters
+
+// Dodge roll: a fixed-length dash simulated identically on client + server.
+pub const ROLL_SPEED: f32 = 7.5; // m/s
+pub const ROLL_DURATION: f32 = 0.5; // seconds
+pub const ROLL_COOLDOWN: f32 = 0.9; // seconds (from roll start)
 
 /// Provides walkability lookups in world space (implemented by the world's
 /// chunk cache on the server and by streamed chunks on the client).
@@ -26,11 +32,23 @@ pub fn step_move<W: CollisionWorld>(
     run: bool,
     dt: f32,
 ) -> Vec3 {
+    let speed = if run { RUN_SPEED } else { WALK_SPEED };
+    step_move_speed(world, pos, dx, dz, speed, dt)
+}
+
+/// Like [`step_move`] but with an explicit speed (crouch, roll dash).
+pub fn step_move_speed<W: CollisionWorld>(
+    world: &W,
+    pos: Vec3,
+    dx: f32,
+    dz: f32,
+    speed: f32,
+    dt: f32,
+) -> Vec3 {
     let len = (dx * dx + dz * dz).sqrt();
     if len < 1e-5 || dt <= 0.0 {
         return pos;
     }
-    let speed = if run { RUN_SPEED } else { WALK_SPEED };
     // Clamp dt to avoid huge teleports from bad clients.
     let dt = dt.min(0.25);
     let step = speed * dt / len;

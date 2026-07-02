@@ -381,7 +381,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
         {(market?.listings ?? []).map((l) => {
           const mine = l.seller === characterName;
           const cost = l.price_each * l.count;
-          const canBuy = !mine && (market?.wallet ?? 0) >= cost;
+          const canBuy = (market?.wallet ?? 0) >= cost;
           return (
             <div
               key={l.id}
@@ -402,19 +402,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
               <span style={{ color: "var(--text-dim)" }}>
                 {l.price_each} ea · {mine ? "you" : l.seller}
               </span>
-              {mine ? (
-                <span
-                  style={{ color: "#ff5d7a", cursor: "pointer" }}
-                  onClick={() =>
-                    connection.send({
-                      t: "Market",
-                      d: { t: "Cancel", d: { listing_id: l.id } },
-                    })
-                  }
-                >
-                  CANCEL
-                </span>
-              ) : (
+              <span style={{ display: "flex", gap: 8 }}>
                 <span
                   style={{
                     color: canBuy ? "#1affc4" : "var(--text-dim)",
@@ -430,7 +418,20 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
                 >
                   BUY {cost}
                 </span>
-              )}
+                {mine && (
+                  <span
+                    style={{ color: "#ff5d7a", cursor: "pointer" }}
+                    onClick={() =>
+                      connection.send({
+                        t: "Market",
+                        d: { t: "Cancel", d: { listing_id: l.id } },
+                      })
+                    }
+                  >
+                    CANCEL
+                  </span>
+                )}
+              </span>
             </div>
           );
         })}

@@ -207,6 +207,7 @@ export const CAR_MODELS = [
 ];
 
 export const CHARACTER_MODEL = "character_main";
+export const PISTOL_MODEL = "weapon_pistol";
 
 export async function getAudioUrl(id: string): Promise<string | null> {
   await loadManifest();

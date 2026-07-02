@@ -6,8 +6,15 @@ import { useFrame } from "@react-three/fiber";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { setFootsteps } from "../assets/audio";
-import { CHARACTER_MODEL, useAssetModel } from "../assets/catalog";
+import { CHARACTER_MODEL, PISTOL_MODEL, useAssetModel } from "../assets/catalog";
+import {
+  CROUCH_SPEED,
+  ROLL_DURATION,
+  RUN_SPEED,
+  WALK_SPEED,
+} from "../game/collision";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
+import { AnimState } from "../net/protocol";
 import { game, GameEntity, useGame } from "../state/game";
 import { groundHeightAt } from "./Ground";
 
@@ -41,45 +48,214 @@ function sampleTransform(entity: GameEntity, renderTime: number) {
   entity.anim = newer.anim;
 }
 
+// ---------------------------------------------------------------------------
+// Cyberpunk mannequin (Quaternius Universal Animation Library rig)
+// ---------------------------------------------------------------------------
+
+const CROSSFADE = 0.15;
+
+/** Clips that play once and then hand control back to locomotion. */
+const ONE_SHOTS = new Set([
+  "Pistol_Shoot",
+  "Punch_Cross",
+  "Roll",
+  "Hit_Chest",
+  "Interact",
+  "Death01",
+]);
+
+/**
+ * World speed (m/s) each locomotion clip was authored around; playback rate
+ * is scaled by actual movement speed so feet don't slide.
+ */
+const CLIP_REF_SPEED: Record<string, number> = {
+  Walk_Loop: 1.6,
+  Jog_Fwd_Loop: 3.5,
+  Sprint_Loop: 5.5,
+  Crouch_Fwd_Loop: 1.2,
+};
+
+interface ClipChoice {
+  name: string;
+  timeScale: number;
+}
+
+/** Map a replicated anim state to a clip for this entity. */
+function chooseClip(
+  anim: AnimState,
+  isNpc: boolean,
+  gunIdle: boolean,
+): ClipChoice {
+  switch (anim) {
+    case "Death":
+      return { name: "Death01", timeScale: 1 };
+    case "Roll":
+      // Sync the roll animation to the dash duration exactly.
+      return { name: "Roll", timeScale: 1 };
+    case "Attack":
+      return isNpc
+        ? { name: "Punch_Cross", timeScale: 1.15 }
+        : { name: "Pistol_Shoot", timeScale: 1.4 };
+    case "Gather":
+      return { name: "Interact", timeScale: 1 };
+    case "Crouch":
+      return { name: "Crouch_Idle_Loop", timeScale: 1 };
+    case "CrouchWalk":
+      return {
+        name: "Crouch_Fwd_Loop",
+        timeScale: CROUCH_SPEED / CLIP_REF_SPEED.Crouch_Fwd_Loop,
+      };
+    case "Run":
+      return {
+        name: "Sprint_Loop",
+        timeScale: RUN_SPEED / CLIP_REF_SPEED.Sprint_Loop,
+      };
+    case "Walk":
+      // NPCs patrol slowly; players "walk" at a brisk 3 m/s (jog cadence).
+      return isNpc
+        ? { name: "Walk_Loop", timeScale: 1 }
+        : { name: "Jog_Fwd_Loop", timeScale: WALK_SPEED / CLIP_REF_SPEED.Jog_Fwd_Loop };
+    default:
+      return gunIdle
+        ? { name: "Pistol_Idle_Loop", timeScale: 1 }
+        : { name: "Idle_Loop", timeScale: 1 };
+  }
+}
+
+/** Apply the cyberpunk restyle: gunmetal body, emissive neon joints. */
+function restyleMannequin(scene: THREE.Group, tint: number, hostile: boolean) {
+  const joints = new THREE.Color(hostile ? 0xff3040 : tint || 0x40e8ff);
+  const restyle = (mat: THREE.Material): THREE.Material => {
+    const m = (mat as THREE.MeshStandardMaterial).clone();
+    if (m.name === "M_Joints") {
+      m.color.set(0x101318);
+      m.emissive.copy(joints);
+      m.emissiveIntensity = 1.6;
+      m.roughness = 0.35;
+      m.metalness = 0.5;
+    } else {
+      // M_Main: dark gunmetal shell.
+      m.color.set(hostile ? 0x2c2126 : 0x232936);
+      m.roughness = 0.5;
+      m.metalness = 0.65;
+    }
+    return m;
+  };
+  scene.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    // Skinned meshes animate outside their static bounds; skip culling.
+    mesh.frustumCulled = false;
+    mesh.material = Array.isArray(mesh.material)
+      ? mesh.material.map(restyle)
+      : restyle(mesh.material);
+  });
+}
+
+/** Sidearm mesh parented to the right hand bone. */
+function attachPistol(rig: THREE.Group, pistol: THREE.Group): THREE.Group | null {
+  const hand = rig.getObjectByName("DEF-handR") ?? rig.getObjectByName("DEF-hand.R");
+  if (!hand) return null;
+  const holder = new THREE.Group();
+  holder.add(pistol);
+  // Tuned for the UAL hand bone (Y along the fingers): grip in the palm,
+  // barrel out past the knuckles.
+  pistol.scale.setScalar(0.35);
+  pistol.position.set(0, 0.06, 0.02);
+  pistol.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
+  hand.add(holder);
+  return holder;
+}
+
 function CharacterModel({ entity }: { entity: GameEntity }) {
+  const isNpc = entity.kind === "Npc";
   const model = useAssetModel(CHARACTER_MODEL);
+  const pistolModel = useAssetModel(isNpc ? undefined : PISTOL_MODEL);
   const mixer = useRef<THREE.AnimationMixer | null>(null);
   const actions = useRef<Record<string, THREE.AnimationAction>>({});
   const current = useRef<string>("");
+  /** Name of the one-shot currently holding the pose (cleared on finish). */
+  const oneShot = useRef<string>("");
 
   useEffect(() => {
     if (!model || model.animations.length === 0) return;
+    restyleMannequin(model.scene, entity.tint, isNpc);
     const m = new THREE.AnimationMixer(model.scene);
     mixer.current = m;
     actions.current = {};
     for (const clip of model.animations) {
-      actions.current[clip.name.toLowerCase()] = m.clipAction(clip);
+      const action = m.clipAction(clip);
+      if (ONE_SHOTS.has(clip.name)) {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+      }
+      actions.current[clip.name] = action;
     }
+    const onFinished = (e: { action: THREE.AnimationAction }) => {
+      if (e.action.getClip().name === oneShot.current) oneShot.current = "";
+    };
+    m.addEventListener("finished", onFinished);
     current.current = "";
+    oneShot.current = "";
     return () => {
+      m.removeEventListener("finished", onFinished);
       m.stopAllAction();
     };
-  }, [model]);
+  }, [model, entity.tint, isNpc]);
+
+  useEffect(() => {
+    if (!model || !pistolModel) return;
+    const holder = attachPistol(model.scene, pistolModel.scene);
+    return () => {
+      holder?.removeFromParent();
+    };
+  }, [model, pistolModel]);
 
   useFrame((_, dt) => {
     if (!mixer.current) return;
     mixer.current.update(dt);
-    const want =
-      entity.anim === "Run" ? "run" : entity.anim === "Walk" ? "walk" : "idle";
-    if (current.current.indexOf(want) === -1) {
-      const names = Object.keys(actions.current);
-      const match =
-        names.find((n) => n.includes(want)) ??
-        names.find((n) => n.includes("idle")) ??
-        names[0];
-      if (match && match !== current.current) {
-        const prev = actions.current[current.current];
-        const next = actions.current[match];
-        prev?.fadeOut(0.15);
-        next?.reset().fadeIn(0.15).play();
-        current.current = match;
+
+    const isLocal = entity.id === game.localEntityId;
+    let anim = entity.anim;
+    if (isLocal) {
+      // Instant local feedback; the server confirms a tick later.
+      if (game.roll) anim = "Roll";
+      else if (game.crouching && anim === "Idle") anim = "Crouch";
+      else if (game.crouching && (anim === "Walk" || anim === "Run")) {
+        anim = "CrouchWalk";
       }
     }
+    const gunIdle = isLocal ? game.gun.drawn : false;
+    const want = chooseClip(anim, isNpc, gunIdle);
+    const action = actions.current[want.name];
+    if (!action) return;
+
+    // Death latches at the last frame.
+    if (current.current === "Death01" && want.name === "Death01") return;
+
+    // A running one-shot holds the pose until it finishes; only death or a
+    // roll preempts it.
+    if (oneShot.current && want.name !== "Death01" && want.name !== "Roll") {
+      return;
+    }
+
+    if (current.current !== want.name) {
+      const prev = actions.current[current.current];
+      prev?.fadeOut(CROSSFADE);
+      action.reset().fadeIn(CROSSFADE).play();
+      current.current = want.name;
+      oneShot.current = ONE_SHOTS.has(want.name) ? want.name : "";
+    } else if (ONE_SHOTS.has(want.name) && !oneShot.current) {
+      // Same one-shot requested again after finishing (e.g. rapid fire).
+      action.reset().play();
+      oneShot.current = want.name;
+    }
+
+    action.timeScale =
+      want.name === "Roll"
+        ? // Finish the roll clip exactly when the dash ends.
+          action.getClip().duration / ROLL_DURATION
+        : want.timeScale;
   });
 
   if (!model) return <ProceduralCharacter entity={entity} />;
@@ -388,8 +564,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
       }
     }
 
-    // Twin-stick facing: the local player always points at the mouse.
-    if (isLocal && game.aim.active) {
+    // Twin-stick facing: the local player always points at the mouse
+    // (except mid-roll, where the body follows the dash direction).
+    if (isLocal && game.aim.active && !game.roll) {
       entity.yaw = game.aim.yaw;
     }
 
@@ -403,6 +580,7 @@ function EntityView({ entity }: { entity: GameEntity }) {
     group.current.rotation.y = -entity.yaw + Math.PI / 2;
 
     if (isLocal) {
+      // Crouch-walking and rolling stay quiet (sneaking / tumbling).
       const moving = entity.anim === "Walk" || entity.anim === "Run";
       void setFootsteps(moving, entity.anim === "Run");
     }
@@ -436,7 +614,7 @@ function EntityView({ entity }: { entity: GameEntity }) {
           onPointerOver={() => (document.body.style.cursor = "crosshair")}
           onPointerOut={() => (document.body.style.cursor = "default")}
         >
-          <ProceduralCharacter entity={entity} />
+          <CharacterModel entity={entity} />
           <HealthBar entity={entity} />
         </group>
       );

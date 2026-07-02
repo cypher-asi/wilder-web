@@ -25,16 +25,39 @@ context so early architecture decisions do not paint us into a corner.
 
 ---
 
-## 2. Roadmap
+## 2. Roadmap and status
 
-| Phase | Name | MVP gate |
-|---|---|---|
-| 0 | Technical Foundation | One player logs in, creates a character, and walks a persistent high-fidelity city forever; relog restores position and world state. |
-| 0.5 | Economy Simulator | Standalone sim runs ~10k agents at 100x speed and emits balance reports (prices, inflation, sinks). |
-| 1 | Extraction Prototype | Spawn -> fight NPCs -> loot -> extract -> stash -> repeat is fully playable; dying loses carried items. |
-| 2 | Resource Economy | Loot is replaced by resources; players gather, refine, and craft the gear they take into the next breach. |
-| 3 | Manufacturing | Buildings, production queues, blueprints, power, professions, and a working market. |
-| 4-10 | (Future) | Regional economy, guilds, territory, factions, living economy, endgame industry, live ops. |
+All phase 0-3 MVP gates are **implemented, verified end-to-end in the browser, and
+committed** (statuses last updated 2026-07-02).
+
+| Phase | Name | MVP gate | Status |
+|---|---|---|---|
+| 0 | Technical Foundation | One player logs in, creates a character, and walks a persistent high-fidelity city forever; relog restores position and world state. | [x] Done (`43d18f2`) |
+| 0.5 | Economy Simulator | Standalone sim runs ~10k agents at 100x speed and emits balance reports (prices, inflation, sinks). | [x] Done (`ce00cc2`) |
+| 1 | Extraction Prototype | Spawn -> fight NPCs -> loot -> extract -> stash -> repeat is fully playable; dying loses carried items. | [x] Done (`53805c6`) |
+| 2 | Resource Economy | Loot is replaced by resources; players gather, refine, and craft the gear they take into the next breach. | [x] Done (`943ba4f`) |
+| 3 | Manufacturing | Buildings, production queues, blueprints, power, professions, and a working market. | [x] Done (`f9ce414`, professions deferred) |
+| — | Visual fidelity pass | Rainy neon night city reads as a modern game: AO/SMAA post stack, env reflections, parallax window interiors, animated neon/steam. | [x] Done (`65873b8`) |
+| 4-10 | (Future) | Regional economy, guilds, territory, factions, living economy, endgame industry, live ops. | [ ] Not started |
+
+### Delivered feature checklist
+
+- [x] Login/register + one-click dev login (`/dev/login`, dev builds only)
+- [x] Character creation, selection, persistence (position/appearance/stats restore on relog)
+- [x] Authoritative 20 Hz world sim, WebSocket protocol, client prediction + reconciliation
+- [x] Deterministic city generation, chunk streaming, interest-managed entity replication, world save (RocksDB)
+- [x] Click-to-move (server A* pathfinding) + WASD, isometric orbit camera
+- [x] Inventory + equipment, persistent stash, real CC0 art (KayKit/Kenney/Quaternius/ambientCG) + audio
+- [x] Combat (melee/ranged/ammo), NPC AI (patrol/aggro/attack), death drops, loot containers
+- [x] Extraction points with channel timer banking loot to stash
+- [x] Resource nodes (gather/deplete/respawn) + refinery/factory crafting chain
+- [x] Production queues with power budget, laboratory blueprint research (fragment costs)
+- [x] Market: listings, buy/cancel, WILD wallet with fee burn
+- [x] Economy simulator (`wilder-sim`): 10k agents, sinks/faucets, CSV/JSON balance reports
+- [ ] Crafting professions/specialization (deferred from Phase 3)
+- [ ] Market transaction history (stub)
+- [ ] Production queues persistence (currently in-memory per character, inputs refunded on disconnect)
+- [ ] Production infra migration: PostgreSQL / Redis / S3 behind existing storage traits (optional, post-MVP)
 
 ---
 

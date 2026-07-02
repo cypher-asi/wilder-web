@@ -80,7 +80,7 @@ app.post("/lab/optimize/:id", (req, res) => {
 
 app.post("/lab/promote/:id", (req, res) => {
   try {
-    res.json(promoteAsset(req.params.id));
+    res.json(promoteAsset(req.params.id, req.body?.variant ?? null));
   } catch (err) {
     res.status(400).json({ error: String(err.message ?? err) });
   }

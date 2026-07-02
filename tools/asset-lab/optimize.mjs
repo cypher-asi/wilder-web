@@ -2,7 +2,11 @@
 //   imported preview.glb
 //     -> Blender deterministic processing (weld, decimate, normals, pivot)
 //     -> glTF Transform (prune, dedup, texture resize + WebP, meshopt compression)
-//     -> validation gates -> content/gameready/<kit>/<id>/<id>.glb + report.json
+//     -> validation gates
+//
+// Every run produces a NEW derivative (variant) rather than overwriting:
+//   content/gameready/<kit>/<id>/<variant>/<id>.glb + report.json
+// so different recipes can be compared side by side in the Asset Lab viewer.
 //
 // CLI: node tools/asset-lab/optimize.mjs <assetId> [--category prop] [--decimate 0.5]
 import { NodeIO, getBounds } from "@gltf-transform/core";
@@ -65,7 +69,12 @@ export async function optimizeAsset(assetId, recipeOverrides = {}, { log = conso
 
   const recipe = resolveRecipe({ category: asset.category, ...recipeOverrides });
   const previewGlb = path.join(IMPORTED_DIR, asset.kit, assetId, "preview.glb");
-  const outDir = path.join(GAMEREADY_DIR, asset.kit, assetId);
+
+  // Allocate the next variant id (v1, v2, ...) — runs never overwrite.
+  const priorVariants = asset.variants ?? [];
+  const maxN = priorVariants.reduce((m, v) => Math.max(m, Number(v.id.slice(1)) || 0), 0);
+  const variantId = `v${maxN + 1}`;
+  const outDir = path.join(GAMEREADY_DIR, asset.kit, assetId, variantId);
   const outGlb = path.join(outDir, `${assetId}.glb`);
   mkdirSync(outDir, { recursive: true });
 
@@ -138,6 +147,7 @@ export async function optimizeAsset(assetId, recipeOverrides = {}, { log = conso
     const passed = checks.every((c) => c.pass);
     const report = {
       assetId,
+      variantId,
       recipe,
       startedAt,
       finishedAt: new Date().toISOString(),
@@ -148,26 +158,41 @@ export async function optimizeAsset(assetId, recipeOverrides = {}, { log = conso
     };
     writeFileSync(path.join(outDir, "report.json"), JSON.stringify(report, null, 2));
 
+    const variant = {
+      id: variantId,
+      createdAt: report.finishedAt,
+      passed,
+      recipe,
+      report: { passed, before: report.before, after: report.after, checks },
+    };
+    // Re-read so we don't clobber variants appended while Blender was running.
+    const current = loadRegistry().assets[assetId];
+    const variants = [...(current.variants ?? []), variant];
+    const anyPassed = variants.some((v) => v.passed);
     updateAsset(assetId, {
-      status: passed ? "gameready" : "imported",
+      status: current.status === "promoted" ? "promoted" : anyPassed ? "gameready" : "imported",
       optimizedAt: report.finishedAt,
       recipe,
-      report: {
-        passed,
-        before: report.before,
-        after: report.after,
-        checks,
-      },
-      error: passed ? null : "Validation failed: " + checks.filter((c) => !c.pass).map((c) => c.name).join(", "),
+      variants,
+      error: passed
+        ? null
+        : `${variantId} validation failed: ` +
+          checks.filter((c) => !c.pass).map((c) => c.name).join(", "),
     });
     log(
-      `${assetId}: ${passed ? "PASSED" : "FAILED"} ` +
+      `${assetId} ${variantId}: ${passed ? "PASSED" : "FAILED"} ` +
         `(${report.before.triangles} -> ${report.after.triangles} tris, ` +
         `${(report.before.fileBytes / 1e6).toFixed(2)} -> ${(report.after.fileBytes / 1e6).toFixed(2)} MB)`,
     );
     return report;
   } catch (err) {
-    updateAsset(assetId, { status: "imported", error: String(err.message ?? err) });
+    const current = loadRegistry().assets[assetId];
+    const anyPassed = (current.variants ?? []).some((v) => v.passed);
+    updateAsset(assetId, {
+      status: current.status === "promoted" ? "promoted" : anyPassed ? "gameready" : "imported",
+      error: String(err.message ?? err),
+    });
+    rmSync(outDir, { recursive: true, force: true });
     throw err;
   } finally {
     rmSync(work, { recursive: true, force: true });

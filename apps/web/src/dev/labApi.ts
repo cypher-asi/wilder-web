@@ -63,6 +63,15 @@ export interface ReportSummary {
   checks: { name: string; pass: boolean; detail: string }[];
 }
 
+/** One output of the game-ready pipeline; each run appends a new derivative. */
+export interface Variant {
+  id: string;
+  createdAt: string;
+  passed: boolean;
+  recipe: Recipe;
+  report: ReportSummary;
+}
+
 export interface LabAsset {
   id: string;
   name: string;
@@ -75,10 +84,11 @@ export interface LabAsset {
   importedAt?: string;
   optimizedAt?: string;
   promotedAt?: string;
+  promotedVariant?: string;
   manifestId?: string;
   meta?: AssetMeta;
   recipe?: Recipe;
-  report?: ReportSummary;
+  variants?: Variant[];
   error?: string | null;
 }
 
@@ -117,7 +127,12 @@ export const labApi = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(recipe),
     }),
-  promote: (id: string) => request<LabAsset>(`/lab/promote/${id}`, { method: "POST" }),
+  promote: (id: string, variant?: string) =>
+    request<LabAsset>(`/lab/promote/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ variant: variant ?? null }),
+    }),
 };
 
 export function thumbUrl(asset: LabAsset, index = 0): string {
@@ -128,6 +143,11 @@ export function previewGlbUrl(asset: LabAsset): string {
   return `/content/imported/${asset.kit}/${asset.id}/preview.glb`;
 }
 
-export function gameReadyGlbUrl(asset: LabAsset): string {
-  return `/content/gameready/${asset.kit}/${asset.id}/${asset.id}.glb`;
+export function variantGlbUrl(asset: LabAsset, variantId: string): string {
+  return `/content/gameready/${asset.kit}/${asset.id}/${variantId}/${asset.id}.glb`;
+}
+
+/** Short human label for a derivative chip, e.g. "v2 · prop · 0.5x · 1024px". */
+export function variantLabel(v: Variant): string {
+  return `${v.id} · ${v.recipe.category} · ${v.recipe.decimate_ratio}x · ${v.recipe.texture_max_size}px`;
 }

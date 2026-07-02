@@ -355,6 +355,52 @@
   background: #10141c;
 }
 
+.lab-variant-chip.failed {
+  border-color: rgba(255, 45, 120, 0.4);
+  color: #ff5d7a;
+}
+
+.sk-variant {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sk-variant:hover {
+  background: rgba(64, 232, 255, 0.06);
+}
+
+.sk-variant.active {
+  border-color: var(--accent);
+  background: rgba(64, 232, 255, 0.1);
+}
+
+.sk-variant-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sk-variant-size {
+  color: var(--text-dim);
+}
+
+.sk-variant-star {
+  color: var(--accent-warm);
+}
+
 .lab-toast {
   position: absolute;
   bottom: 20px;

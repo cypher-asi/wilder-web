@@ -9,10 +9,10 @@ import {
   LabAsset,
   Recipe,
   Registry,
-  gameReadyGlbUrl,
   labApi,
   previewGlbUrl,
   thumbUrl,
+  variantGlbUrl,
 } from "./labApi";
 import "./assetlab.css";
 
@@ -32,7 +32,8 @@ export function AssetLab() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | AssetStatus>("all");
-  const [viewMode, setViewMode] = useState<"preview" | "gameready">("preview");
+  // What's in the viewport: the imported original, or one derivative by id.
+  const [view, setView] = useState<string>("original");
   const [wireframe, setWireframe] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -96,14 +97,17 @@ export function AssetLab() {
     }
   }
 
+  const viewedVariant = useMemo(
+    () => selected?.variants?.find((v) => v.id === view) ?? null,
+    [selected, view],
+  );
+
   const viewportUrl = useMemo(() => {
     if (!selected) return null;
-    if (viewMode === "gameready" && (selected.status === "gameready" || selected.status === "promoted")) {
-      return gameReadyGlbUrl(selected);
-    }
+    if (viewedVariant) return variantGlbUrl(selected, viewedVariant.id);
     if (selected.status === "raw" || selected.status === "importing") return null;
     return previewGlbUrl(selected);
-  }, [selected, viewMode]);
+  }, [selected, viewedVariant]);
 
   return (
     <div className="lab-root">
@@ -148,9 +152,7 @@ export function AssetLab() {
                 className={`lab-asset-card ${selectedId === a.id ? "active" : ""}`}
                 onClick={() => {
                   setSelectedId(a.id);
-                  setViewMode(
-                    a.status === "gameready" || a.status === "promoted" ? "gameready" : "preview",
-                  );
+                  setView("original"); // always show the source asset first
                 }}
               >
                 {a.status !== "raw" && a.status !== "importing" ? (
@@ -175,19 +177,23 @@ export function AssetLab() {
           <div className="lab-viewport-bar">
             <div className="lab-viewport-toggles">
               <button
-                className={`lab-filter ${viewMode === "preview" ? "active" : ""}`}
-                onClick={() => setViewMode("preview")}
+                className={`lab-filter ${view === "original" ? "active" : ""}`}
+                onClick={() => setView("original")}
                 disabled={!selected || selected.status === "raw"}
               >
-                imported
+                original
               </button>
-              <button
-                className={`lab-filter ${viewMode === "gameready" ? "active" : ""}`}
-                onClick={() => setViewMode("gameready")}
-                disabled={!selected || (selected.status !== "gameready" && selected.status !== "promoted")}
-              >
-                game-ready
-              </button>
+              {(selected?.variants ?? []).map((v) => (
+                <button
+                  key={v.id}
+                  className={`lab-filter lab-variant-chip ${view === v.id ? "active" : ""} ${v.passed ? "" : "failed"}`}
+                  title={`${v.recipe.category} · decimate ${v.recipe.decimate_ratio} · ${v.recipe.texture_max_size}px · ${v.passed ? "passed" : "failed"}`}
+                  onClick={() => setView(v.id)}
+                >
+                  {v.id}
+                  {selected?.promotedVariant === v.id ? " ★" : ""}
+                </button>
+              ))}
               <button
                 className={`lab-filter ${wireframe ? "active" : ""}`}
                 onClick={() => setWireframe((w) => !w)}
@@ -195,7 +201,12 @@ export function AssetLab() {
                 wireframe
               </button>
             </div>
-            {selected && <span className="lab-viewport-label">{selected.name}</span>}
+            {selected && (
+              <span className="lab-viewport-label">
+                {selected.name}
+                {viewedVariant ? ` — derivative ${viewedVariant.id}` : " — original"}
+              </span>
+            )}
           </div>
           <AssetViewport url={viewportUrl} wireframe={wireframe} />
         </main>
@@ -204,12 +215,14 @@ export function AssetLab() {
           asset={selected}
           presets={presets}
           busy={busy}
+          view={view}
+          onSelectView={setView}
           onImport={(id) => runAction(() => labApi.import(id), "Import")}
           onOptimize={(id, recipe) => runAction(() => labApi.optimize(id, recipe), "Optimize")}
-          onPromote={(id) =>
+          onPromote={(id, variant) =>
             runAction(async () => {
-              await labApi.promote(id);
-              showToast("Promoted into game manifest");
+              await labApi.promote(id, variant);
+              showToast(`Promoted ${variant} into game manifest`);
             }, "Promote")
           }
         />

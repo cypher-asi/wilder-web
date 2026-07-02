@@ -7,15 +7,27 @@ import { fileURLToPath } from "node:url";
 import { GAMEREADY_DIR, GAME_IMPORTED_MODELS_DIR, GAME_MANIFEST_PATH } from "./paths.mjs";
 import { loadRegistry, updateAsset } from "./registry.mjs";
 
-export function promoteAsset(assetId) {
+export function promoteAsset(assetId, variantId = null) {
   const registry = loadRegistry();
   const asset = registry.assets[assetId];
   if (!asset) throw new Error(`Unknown asset: ${assetId}`);
-  if (!["gameready", "promoted"].includes(asset.status)) {
-    throw new Error(`Asset ${assetId} is not game-ready (status: ${asset.status})`);
+
+  const variants = asset.variants ?? [];
+  const variant = variantId
+    ? variants.find((v) => v.id === variantId)
+    : [...variants].reverse().find((v) => v.passed);
+  if (!variant) {
+    throw new Error(
+      variantId
+        ? `Variant ${variantId} not found for ${assetId}`
+        : `No passing derivative for ${assetId} — run the game-ready pipeline first`,
+    );
+  }
+  if (!variant.passed) {
+    throw new Error(`Variant ${variant.id} of ${assetId} failed validation; cannot promote`);
   }
 
-  const srcGlb = path.join(GAMEREADY_DIR, asset.kit, assetId, `${assetId}.glb`);
+  const srcGlb = path.join(GAMEREADY_DIR, asset.kit, assetId, variant.id, `${assetId}.glb`);
   if (!existsSync(srcGlb)) throw new Error(`Optimized GLB missing: ${srcGlb}`);
 
   mkdirSync(GAME_IMPORTED_MODELS_DIR, { recursive: true });
@@ -37,6 +49,7 @@ export function promoteAsset(assetId) {
   return updateAsset(assetId, {
     status: "promoted",
     promotedAt: new Date().toISOString(),
+    promotedVariant: variant.id,
     manifestId: entryId,
   });
 }
@@ -45,9 +58,11 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   const id = process.argv[2];
   if (!id) {
-    console.error("Usage: node promote.mjs <assetId>");
+    console.error("Usage: node promote.mjs <assetId> [variantId]");
     process.exit(1);
   }
-  const asset = promoteAsset(id);
-  console.log(`Promoted ${id} -> assets/models/imported/${id}.glb (manifest id: ${asset.manifestId})`);
+  const asset = promoteAsset(id, process.argv[3] ?? null);
+  console.log(
+    `Promoted ${id} (${asset.promotedVariant}) -> assets/models/imported/${id}.glb (manifest id: ${asset.manifestId})`,
+  );
 }

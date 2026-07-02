@@ -1,7 +1,8 @@
 // Right panel: everything known about the selected asset plus the manual
-// game-ready pipeline controls (recipe editor, optimize, promote).
+// game-ready pipeline controls (recipe editor, optimize, promote). Derivatives
+// (one per pipeline run) are listed here and selectable into the viewport.
 import { useEffect, useState } from "react";
-import { LabAsset, Recipe, labApi, thumbUrl } from "./labApi";
+import { LabAsset, Recipe, thumbUrl, variantLabel } from "./labApi";
 
 function fmtBytes(n?: number): string {
   if (!n && n !== 0) return "—";
@@ -36,6 +37,8 @@ export function Sidekick({
   asset,
   presets,
   busy,
+  view,
+  onSelectView,
   onImport,
   onOptimize,
   onPromote,
@@ -43,9 +46,12 @@ export function Sidekick({
   asset: LabAsset | null;
   presets: Record<string, Recipe>;
   busy: boolean;
+  /** "original" or a derivative id — mirrors what's in the viewport. */
+  view: string;
+  onSelectView: (view: string) => void;
   onImport: (id: string) => void;
   onOptimize: (id: string, recipe: Partial<Recipe>) => void;
-  onPromote: (id: string) => void;
+  onPromote: (id: string, variant: string) => void;
 }) {
   const [recipe, setRecipe] = useState<Partial<Recipe>>({});
 
@@ -66,7 +72,9 @@ export function Sidekick({
   }
 
   const meta = asset.meta;
-  const report = asset.report;
+  const variants = asset.variants ?? [];
+  const viewedVariant = variants.find((v) => v.id === view) ?? null;
+  const report = viewedVariant?.report ?? null;
 
   function setField<K extends keyof Recipe>(key: K, value: Recipe[K]) {
     setRecipe((r) => ({ ...r, [key]: value }));
@@ -195,14 +203,34 @@ export function Sidekick({
               disabled={busy || asset.status === "optimizing"}
               onClick={() => onOptimize(asset.id, recipe)}
             >
-              {asset.status === "optimizing" ? "OPTIMIZING…" : "RUN GAME-READY PIPELINE"}
+              {asset.status === "optimizing"
+                ? "OPTIMIZING…"
+                : `RUN PIPELINE → NEW DERIVATIVE (v${variants.length + 1})`}
             </button>
+          </Section>
+
+          <Section title={`Derivatives (${variants.length})`}>
+            {variants.length === 0 && (
+              <div className="sk-empty">none yet — run the pipeline to create v1</div>
+            )}
+            {variants.map((v) => (
+              <button
+                key={v.id}
+                className={`sk-variant ${view === v.id ? "active" : ""}`}
+                onClick={() => onSelectView(view === v.id ? "original" : v.id)}
+              >
+                <span className={v.passed ? "sk-pass" : "sk-fail"}>{v.passed ? "✓" : "✗"}</span>
+                <span className="sk-variant-label">{variantLabel(v)}</span>
+                <span className="sk-variant-size">{fmtBytes(v.report.after.fileBytes)}</span>
+                {asset.promotedVariant === v.id && <span className="sk-variant-star">★</span>}
+              </button>
+            ))}
           </Section>
         </>
       )}
 
-      {report && (
-        <Section title={`Pipeline Report — ${report.passed ? "PASSED" : "FAILED"}`}>
+      {viewedVariant && report && (
+        <Section title={`${viewedVariant.id} Report — ${report.passed ? "PASSED" : "FAILED"}`}>
           <Row
             label="Triangles"
             value={`${report.before.triangles.toLocaleString()} → ${report.after.triangles.toLocaleString()}`}
@@ -230,9 +258,15 @@ export function Sidekick({
         </Section>
       )}
 
-      {(asset.status === "gameready" || asset.status === "promoted") && (
-        <button className="btn btn-dev" disabled={busy} onClick={() => onPromote(asset.id)}>
-          {asset.status === "promoted" ? "RE-PROMOTE TO GAME" : "PROMOTE TO GAME"}
+      {viewedVariant && viewedVariant.passed && (
+        <button
+          className="btn btn-dev"
+          disabled={busy}
+          onClick={() => onPromote(asset.id, viewedVariant.id)}
+        >
+          {asset.promotedVariant === viewedVariant.id
+            ? `RE-PROMOTE ${viewedVariant.id} TO GAME`
+            : `PROMOTE ${viewedVariant.id} TO GAME`}
         </button>
       )}
     </aside>

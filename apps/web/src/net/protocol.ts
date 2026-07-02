@@ -86,7 +86,11 @@ export type EntityKind =
   | "LootContainer"
   | "ExtractionPoint"
   | "ResourceNode"
-  | "Building";
+  | "Building"
+  | "Refinery"
+  | "Factory"
+  | "Laboratory"
+  | "MarketTerminal";
 
 export type AnimState = "Idle" | "Walk" | "Run" | "Attack" | "Death" | "Gather";
 

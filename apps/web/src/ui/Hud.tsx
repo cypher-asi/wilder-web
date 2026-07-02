@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { RECIPES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
 import { game, useGame } from "../state/game";
 
@@ -29,8 +30,110 @@ export function Hud({ connection }: { connection: GameConnection }) {
           </div>
           <Chat lines={chat} connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
+          <CraftingPanel connection={connection} />
         </>
       )}
+    </div>
+  );
+}
+
+function CraftingPanel({ connection }: { connection: GameConnection }) {
+  const nearStation = useGame((s) => s.nearStation);
+  const craftOpen = useGame((s) => s.craftOpen);
+  const inventory = useGame((s) => s.inventory);
+  const set = useGame((s) => s.set);
+
+  if (!nearStation) return null;
+  if (!craftOpen) {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          bottom: 96,
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontSize: 12,
+          letterSpacing: "0.15em",
+          color: "#ffb347",
+          textShadow: "0 0 10px rgba(255,179,71,0.5)",
+          cursor: "pointer",
+          pointerEvents: "auto",
+          background: "rgba(10,12,18,0.75)",
+          border: "1px solid rgba(255,179,71,0.4)",
+          borderRadius: 6,
+          padding: "6px 14px",
+        }}
+        onClick={() => set({ craftOpen: true })}
+      >
+        {nearStation.kind.toUpperCase()} — CLICK TO CRAFT
+      </div>
+    );
+  }
+
+  const count = (kind: string) =>
+    (inventory?.slots ?? [])
+      .filter((s) => s && s.kind === kind)
+      .reduce((n, s) => n + s!.count, 0);
+  const recipes = RECIPES.filter((r) => r.station === nearStation.kind);
+
+  return (
+    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 340 }}>
+      <h3>
+        {nearStation.kind}
+        <span
+          style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }}
+          onClick={() => set({ craftOpen: false })}
+        >
+          ✕
+        </span>
+      </h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {recipes.map((r) => {
+          const canCraft = r.inputs.every(([kind, n]) => count(kind) >= n);
+          return (
+            <div
+              key={r.id}
+              onClick={() => {
+                if (!canCraft) return;
+                connection.send({
+                  t: "Craft",
+                  d: { recipe: r.id, station: nearStation.id },
+                });
+              }}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                padding: "6px 8px",
+                borderRadius: 4,
+                border: `1px solid ${canCraft ? "rgba(26,255,196,0.35)" : "rgba(120,130,150,0.2)"}`,
+                cursor: canCraft ? "pointer" : "default",
+                opacity: canCraft ? 1 : 0.55,
+              }}
+              title={canCraft ? "Click to craft" : "Missing inputs"}
+            >
+              <div>
+                <div style={{ fontSize: 12, color: canCraft ? "#e8f4ff" : "var(--text-dim)" }}>
+                  {shortName(r.output[0])}
+                  {r.output[1] > 1 ? ` x${r.output[1]}` : ""}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                  {r.inputs
+                    .map(([kind, n]) => {
+                      const have = count(kind);
+                      return `${shortName(kind)} ${have}/${n}`;
+                    })
+                    .join(" · ")}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: canCraft ? "#1affc4" : "var(--text-dim)" }}>
+                {canCraft ? "CRAFT" : "—"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -137,24 +240,38 @@ function ExtractHint() {
   );
 }
 
+const STATION_KINDS = ["Refinery", "Factory", "Laboratory"] as const;
+
 function PositionReadout() {
   const [pos, setPos] = useState({ x: 0, z: 0 });
   useEffect(() => {
     const timer = setInterval(() => {
       setPos({ x: game.predicted.x, z: game.predicted.z });
-      // Track stash proximity for the deposit/withdraw UI.
+      // Track stash/station proximity for context UIs.
       let near = false;
+      let station: { kind: (typeof STATION_KINDS)[number]; id: number } | null = null;
+      let stationDist = 3.5;
       for (const entity of game.entities.values()) {
-        if (entity.kind === "Building") {
-          const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
-          if (d < 3.5) {
-            near = true;
-            break;
-          }
+        const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
+        if (entity.kind === "Building" && d < 3.5) {
+          near = true;
+        }
+        const kind = entity.kind as (typeof STATION_KINDS)[number];
+        if (STATION_KINDS.includes(kind) && d < stationDist) {
+          station = { kind, id: entity.id };
+          stationDist = d;
         }
       }
-      if (near !== useGame.getState().nearStash) {
-        useGame.getState().set({ nearStash: near });
+      const state = useGame.getState();
+      if (near !== state.nearStash) {
+        state.set({ nearStash: near });
+      }
+      if ((station?.id ?? null) !== (state.nearStation?.id ?? null)) {
+        state.set({
+          nearStation: station,
+          // Leaving the station closes the panel.
+          ...(station ? {} : { craftOpen: false }),
+        });
       }
     }, 300);
     return () => clearInterval(timer);

@@ -21,3 +21,6 @@ Thumbs.db
 # Env
 .env
 .env.*
+
+.tmp_assets/
+.tmp_textures/

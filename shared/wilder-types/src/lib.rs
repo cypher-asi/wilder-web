@@ -216,7 +216,12 @@ pub enum EntityKind {
     LootContainer,
     ExtractionPoint,
     ResourceNode,
+    /// Stash terminal.
     Building,
+    Refinery,
+    Factory,
+    Laboratory,
+    MarketTerminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

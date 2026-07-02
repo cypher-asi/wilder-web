@@ -40,6 +40,10 @@ const EXTRACT_SECONDS: f32 = 5.0;
 const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
 const LOOT_TTL_SECONDS: f32 = 120.0;
+/// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
+const NODE_CHARGES: u32 = 5;
+const NODE_RESPAWN_SECONDS: f32 = 60.0;
+const NODE_GATHER_COOLDOWN: f32 = 1.2;
 
 pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
     coord.x.abs() <= SAFE_RADIUS && coord.z.abs() <= SAFE_RADIUS
@@ -147,6 +151,24 @@ struct StaticEntity {
     variant: u32,
 }
 
+struct ResourceNode {
+    entity: EntityId,
+    position: Vec3,
+    /// Resource variant (indexes wilder_economy::RESOURCES).
+    variant: u32,
+    charges: u32,
+    /// Seconds until the node respawns once depleted (0 = active).
+    respawn_in: f32,
+    /// Seconds until it can be gathered again.
+    cooldown: f32,
+}
+
+impl ResourceNode {
+    fn active(&self) -> bool {
+        self.charges > 0
+    }
+}
+
 pub struct World {
     store: Arc<RocksStore>,
     chunks: ChunkCache,
@@ -156,6 +178,7 @@ pub struct World {
     npc_seeded_chunks: HashSet<ChunkCoord>,
     loot: HashMap<EntityId, LootContainer>,
     statics: HashMap<EntityId, StaticEntity>,
+    nodes: HashMap<EntityId, ResourceNode>,
     static_seeded_chunks: HashSet<ChunkCoord>,
     next_entity: EntityId,
     tick: u64,
@@ -185,6 +208,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         npc_seeded_chunks: HashSet::new(),
         loot: HashMap::new(),
         statics: HashMap::new(),
+        nodes: HashMap::new(),
         static_seeded_chunks: HashSet::new(),
         next_entity: 1,
         tick: 0,
@@ -344,10 +368,11 @@ impl World {
                     let _ = p.tx.send(S2C::Chat { from: from.clone(), text: text.clone() });
                 }
             }
+            C2S::Craft { recipe, station } => self.craft(entity, &recipe, station),
             C2S::Pong { .. } => {}
             C2S::Authenticate { .. } | C2S::JoinWorld { .. } => {}
-            // Phase 2/3 messages: inert for now.
-            C2S::Craft { .. } | C2S::QueueProduction { .. } | C2S::Market(_) => {}
+            // Phase 3 messages: inert for now.
+            C2S::QueueProduction { .. } | C2S::Market(_) => {}
         }
     }
 
@@ -377,6 +402,12 @@ impl World {
                     "chemicals" => ItemKind::Chemicals,
                     "electronics" => ItemKind::Electronics,
                     "biomass" => ItemKind::Biomass,
+                    "steel" => ItemKind::SteelPlate,
+                    "wire" => ItemKind::CopperWire,
+                    "polymer" => ItemKind::Polymer,
+                    "circuit" => ItemKind::CircuitBoard,
+                    "biogel" => ItemKind::BioGel,
+                    "fragment" => ItemKind::BlueprintFragment,
                     _ => {
                         let _ = player.tx.send(S2C::Error { message: format!("unknown item {item}") });
                         return;
@@ -578,6 +609,37 @@ impl World {
             return;
         }
 
+        // Resource node?
+        if let Some(node) = self.nodes.get_mut(&target) {
+            let Some(player) = self.players.get_mut(&entity) else { return };
+            if !node.active() {
+                return;
+            }
+            if (node.position - player.character.position).length() > 3.0 {
+                let _ = player.tx.send(S2C::Error { message: "too far away".into() });
+                return;
+            }
+            if node.cooldown > 0.0 {
+                return;
+            }
+            node.cooldown = NODE_GATHER_COOLDOWN;
+            node.charges -= 1;
+            if node.charges == 0 {
+                node.respawn_in = NODE_RESPAWN_SECONDS;
+            }
+            use rand::Rng;
+            let kind = wilder_economy::node_yield(node.variant);
+            let count = self.rng.random_range(2..=5u32);
+            let leftover = inv::add_items(&mut player.inventory.slots, kind, count);
+            let gained = count - leftover;
+            player.dirty = true;
+            let _ = player.tx.send(S2C::GatherResult {
+                gained: (gained > 0).then_some(ItemStack { kind, count: gained }),
+            });
+            let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+            return;
+        }
+
         // Static entity (extraction point / stash terminal)?
         let Some(static_entity) = self.statics.get(&target) else { return };
         let kind = static_entity.kind;
@@ -598,6 +660,62 @@ impl World {
                 let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
             }
             _ => {}
+        }
+    }
+
+    /// Instant crafting at a nearby station (Phase 2; queued production in Phase 3).
+    fn craft(&mut self, entity: EntityId, recipe_id: &str, station: Option<EntityId>) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let fail = |player: &Player, error: &str| {
+            let _ = player.tx.send(S2C::CraftResult {
+                ok: false,
+                error: Some(error.into()),
+                produced: None,
+            });
+        };
+        let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
+            fail(player, "unknown recipe");
+            return;
+        };
+        let station_kind = match recipe.station {
+            wilder_crafting::Station::Refinery => EntityKind::Refinery,
+            wilder_crafting::Station::Factory => EntityKind::Factory,
+            wilder_crafting::Station::Laboratory => EntityKind::Laboratory,
+        };
+        // The right kind of station must be within reach (explicit id or nearest).
+        let near_station = self.statics.values().any(|s| {
+            s.kind == station_kind
+                && station.map(|id| s.entity == id).unwrap_or(true)
+                && (s.position - player.character.position).length() < 3.5
+        });
+        if !near_station {
+            fail(player, &format!("no {:?} in reach", recipe.station));
+            return;
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        // Verify + consume inputs.
+        for &(kind, count) in recipe.inputs {
+            if inv::count_items(&player.inventory.slots, kind) < count {
+                let _ = player.tx.send(S2C::CraftResult {
+                    ok: false,
+                    error: Some(format!("need {}x {}", count, kind.display_name())),
+                    produced: None,
+                });
+                return;
+            }
+        }
+        for &(kind, count) in recipe.inputs {
+            inv::remove_items(&mut player.inventory.slots, kind, count);
+        }
+        let (out_kind, out_count) = recipe.output;
+        let leftover = inv::add_items(&mut player.inventory.slots, out_kind, out_count);
+        player.dirty = true;
+        let produced = ItemStack { kind: out_kind, count: out_count - leftover };
+        let _ = player.tx.send(S2C::CraftResult { ok: true, error: None, produced: Some(produced) });
+        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+        if leftover > 0 {
+            let pos = player.character.position;
+            self.spawn_loot(pos, vec![ItemStack { kind: out_kind, count: leftover }]);
         }
     }
 
@@ -695,6 +813,7 @@ impl World {
         self.tick_extraction();
         self.tick_npcs();
         self.tick_loot();
+        self.tick_nodes();
         self.tick_regen();
         self.update_interest();
         self.replicate();
@@ -897,6 +1016,19 @@ impl World {
         }
     }
 
+    fn tick_nodes(&mut self) {
+        for node in self.nodes.values_mut() {
+            node.cooldown = (node.cooldown - TICK_DT).max(0.0);
+            if !node.active() {
+                node.respawn_in -= TICK_DT;
+                if node.respawn_in <= 0.0 {
+                    node.charges = NODE_CHARGES;
+                    node.respawn_in = 0.0;
+                }
+            }
+        }
+    }
+
     fn tick_regen(&mut self) {
         for player in self.players.values_mut() {
             let coord = ChunkCoord::from_world(player.character.position);
@@ -931,17 +1063,56 @@ impl World {
         if !self.static_seeded_chunks.contains(&coord) {
             self.static_seeded_chunks.insert(coord);
             if coord.x == 0 && coord.z == 0 {
-                let entity = self.alloc_entity();
-                self.statics.insert(
-                    entity,
-                    StaticEntity {
+                // Hub statics: stash terminal + crafting stations along the road.
+                let hub: &[(EntityKind, f32, f32, &str)] = &[
+                    (EntityKind::Building, 9.0, 3.0, "Stash Terminal"),
+                    (EntityKind::Refinery, 15.0, 3.0, "Refinery"),
+                    (EntityKind::Factory, 21.0, 3.0, "Factory"),
+                ];
+                for &(kind, x, z, name) in hub {
+                    let entity = self.alloc_entity();
+                    self.statics.insert(
                         entity,
-                        kind: EntityKind::Building,
-                        position: Vec3::new(9.0, 0.0, 3.0),
-                        name: "Stash Terminal".into(),
-                        variant: 0,
-                    },
-                );
+                        StaticEntity {
+                            entity,
+                            kind,
+                            position: Vec3::new(x, 0.0, z),
+                            name: name.into(),
+                            variant: 0,
+                        },
+                    );
+                }
+            }
+            // Resource nodes: roughly every other hostile chunk gets one.
+            let nh = (coord.x.wrapping_mul(198491317) ^ coord.z.wrapping_mul(6542989)) as u32;
+            if !is_safe_chunk(coord) && nh % 2 == 0 {
+                let chunk = self.chunks.get(coord);
+                let variant = (nh >> 8) % wilder_economy::RESOURCES.len() as u32;
+                // Deterministic walkable spot (offset scan so nodes don't stack
+                // on the extraction beacon which scans from (2,2)).
+                'node: for tz in (3..TILES_PER_CHUNK).step_by(2) {
+                    for tx in (4..TILES_PER_CHUNK).step_by(2) {
+                        if chunk.tile(tx, tz).walkable() {
+                            let entity = self.alloc_entity();
+                            self.nodes.insert(
+                                entity,
+                                ResourceNode {
+                                    entity,
+                                    position: Vec3::new(
+                                        coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
+                                        0.0,
+                                        coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
+                                    ),
+                                    variant,
+                                    charges: NODE_CHARGES,
+                                    respawn_in: 0.0,
+                                    cooldown: 0.0,
+                                },
+                            );
+                            break 'node;
+                        }
+                    }
+                }
             }
             let h = (coord.x.wrapping_mul(2654435761u32 as i32)
                 ^ coord.z.wrapping_mul(40503)) as u32;
@@ -1051,6 +1222,35 @@ impl World {
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: 1.0,
+                },
+            });
+        }
+        for node in self.nodes.values() {
+            if !node.active() {
+                continue;
+            }
+            let kind = wilder_economy::node_yield(node.variant);
+            let health = node.charges as f32 / NODE_CHARGES as f32;
+            all.push(Replicated {
+                id: node.entity,
+                chunk: ChunkCoord::from_world(node.position),
+                spawn: EntitySpawnData {
+                    id: node.entity,
+                    kind: EntityKind::ResourceNode,
+                    name: format!("{} Deposit", kind.display_name()),
+                    appearance: Appearance::default(),
+                    position: node.position,
+                    yaw: 0.0,
+                    anim: AnimState::Idle,
+                    health_pct: health,
+                    variant: node.variant,
+                },
+                snap: EntitySnapshot {
+                    id: node.entity,
+                    position: node.position,
+                    yaw: 0.0,
+                    anim: AnimState::Idle,
+                    health_pct: health,
                 },
             });
         }

@@ -191,6 +191,30 @@ export class GameConnection {
       }
       case "GatherResult": {
         void playSfx("sfx_pickup", 0.45);
+        if (msg.d.gained) {
+          ui.pushChat({
+            from: "system",
+            text: `+${msg.d.gained.count} ${msg.d.gained.kind}`,
+            system: true,
+          });
+        }
+        break;
+      }
+      case "CraftResult": {
+        if (msg.d.ok && msg.d.produced) {
+          void playSfx("sfx_pickup", 0.5);
+          ui.pushChat({
+            from: "system",
+            text: `Crafted ${msg.d.produced.count}x ${msg.d.produced.kind}.`,
+            system: true,
+          });
+        } else if (!msg.d.ok) {
+          ui.pushChat({
+            from: "system",
+            text: `Craft failed: ${msg.d.error ?? "unknown error"}`,
+            system: true,
+          });
+        }
         break;
       }
       case "Error": {

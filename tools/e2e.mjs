@@ -27,14 +27,21 @@ class Client {
     if (!res.ok) throw new Error(`dev login failed: ${res.status}`);
     const { token } = await res.json();
     this.token = token;
-    const chars = await (
-      await fetch(`${BASE}/api/characters`, {
-        headers: { authorization: `Bearer ${token}` },
-      })
-    ).json();
-    if (!chars.length) throw new Error("no characters");
-    this.characterId = chars[0].id;
-    log("logged in, character", chars[0].name, this.characterId);
+    const headers = { authorization: `Bearer ${token}` };
+    let chars = await (await fetch(`${BASE}/api/characters`, { headers })).json();
+    // Use a dedicated character so a browser session on "Dev" doesn't conflict.
+    let me = chars.find((c) => c.name === "E2E");
+    if (!me) {
+      const res = await fetch(`${BASE}/api/characters`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ name: "E2E" }),
+      });
+      if (!res.ok) throw new Error("character create failed");
+      me = await res.json();
+    }
+    this.characterId = me.id;
+    log("logged in, character", me.name, this.characterId);
   }
 
   connect() {
@@ -333,8 +340,86 @@ async function scenarioExtraction() {
   c.ws.close();
 }
 
+async function scenarioEconomy() {
+  const c = new Client();
+  await c.login();
+  await c.connect();
+  await sleep(600);
+
+  // 1. Find a resource node in hostile chunks.
+  let node = null;
+  outer: for (let cx = 2; cx < 10; cx++) {
+    for (let cz = 2; cz < 10; cz++) {
+      c.tp(cx * 32 + 8, cz * 32 + 8);
+      await sleep(600);
+      const nodes = c.findEntities("ResourceNode");
+      if (nodes.length) {
+        node = nodes[0];
+        break outer;
+      }
+    }
+  }
+  if (!node) throw new Error("no resource node found");
+  log("found node", node.id, node.name, "at", node.x.toFixed(1), node.z.toFixed(1));
+
+  // 2. Gather it to depletion (5 charges, 1.2s cooldown).
+  c.tp(node.x + 1, node.z);
+  await sleep(500);
+  let gained = 0;
+  for (let i = 0; i < 8; i++) {
+    c.interact(node.id);
+    try {
+      const res = await c.waitFor((m) => m.t === "GatherResult", 2500, "GatherResult");
+      if (res.d.gained) gained += res.d.gained.count;
+    } catch {
+      break; // depleted (no more responses)
+    }
+    await sleep(1400);
+    if (!c.entities.has(node.id)) break; // despawned = depleted
+  }
+  if (gained < 4) throw new Error(`gathered too little: ${gained}`);
+  const depleted = !c.entities.has(node.id);
+  log(`PASS gather: ${gained} units gathered, node depleted=${depleted}`);
+  if (!depleted) throw new Error("node did not deplete after 5+ gathers");
+
+  // 3. Refine iron -> steel plates at the hub refinery.
+  c.chat("/give iron 16");
+  await sleep(300);
+  c.tp(15, 4); // refinery at (15,3)
+  await sleep(600);
+  // Wrong-station check: pipe (factory recipe) at refinery must fail.
+  c.send({ t: "Craft", d: { recipe: "pipe", station: null } });
+  const bad = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
+  if (bad.d.ok) throw new Error("factory recipe crafted at refinery!");
+  log("PASS station gating:", bad.d.error);
+  for (let i = 0; i < 4; i++) {
+    c.send({ t: "Craft", d: { recipe: "steel_plate", station: null } });
+    const r = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
+    if (!r.d.ok) throw new Error("steel_plate craft failed: " + r.d.error);
+  }
+  if (c.invCount("SteelPlate") < 4) throw new Error("missing steel plates");
+  log("PASS refine: 4x SteelPlate from 16 iron");
+
+  // 4. Craft + equip a pipe at the factory.
+  c.tp(21, 4); // factory at (21,3)
+  await sleep(600);
+  c.send({ t: "Craft", d: { recipe: "pipe", station: null } });
+  const made = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
+  if (!made.d.ok) throw new Error("pipe craft failed: " + made.d.error);
+  await sleep(300);
+  const pipeSlot = c.slotOf("Pipe");
+  if (pipeSlot < 0) throw new Error("no pipe in inventory");
+  c.send({ t: "InventoryAction", d: { t: "Equip", d: { slot: pipeSlot } } });
+  await sleep(300);
+  if (c.inventory.equipped_weapon !== "Pipe") throw new Error("pipe not equipped");
+  log("PASS factory: pipe crafted and equipped");
+
+  log("ALL PHASE 2 CHECKS PASSED");
+  c.ws.close();
+}
+
 const scenario = process.argv[2] ?? "extraction";
-const scenarios = { extraction: scenarioExtraction };
+const scenarios = { extraction: scenarioExtraction, economy: scenarioEconomy };
 if (!scenarios[scenario]) {
   console.error("unknown scenario", scenario);
   process.exit(1);

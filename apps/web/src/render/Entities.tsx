@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { setFootsteps } from "../assets/audio";
 import { CHARACTER_MODEL, useAssetModel } from "../assets/catalog";
+import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { game, GameEntity, useGame } from "../state/game";
 
 /** Render remote entities this many ms in the past for smooth interpolation. */
@@ -191,6 +192,101 @@ function ExtractionBeacon({ entity }: { entity: GameEntity }) {
   );
 }
 
+/** Crystal cluster resource node, colored by resource variant. */
+function ResourceNodeView({ entity }: { entity: GameEntity }) {
+  const color = RESOURCE_COLORS[NODE_RESOURCES[entity.variant % 5]] ?? "#ffffff";
+  const glow = useRef<THREE.Group>(null);
+  useFrame(({ clock }) => {
+    if (!glow.current) return;
+    const pulse = 0.9 + Math.sin(clock.elapsedTime * 2 + entity.id) * 0.25;
+    glow.current.scale.setScalar(pulse * (0.6 + 0.4 * entity.healthPct));
+  });
+  const shards: [number, number, number, number][] = [
+    [0, 0.4, 0, 0.5],
+    [0.35, 0.28, 0.15, 0.34],
+    [-0.3, 0.24, -0.2, 0.3],
+    [0.1, 0.2, -0.35, 0.26],
+    [-0.2, 0.3, 0.3, 0.28],
+  ];
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <group ref={glow}>
+        {shards.map(([x, y, z, s], i) => (
+          <mesh key={i} position={[x, y, z]} rotation={[x, i * 1.3, z]} castShadow>
+            <octahedronGeometry args={[s, 0]} />
+            <meshStandardMaterial
+              color={color}
+              emissive={color}
+              emissiveIntensity={1.4}
+              roughness={0.25}
+              metalness={0.3}
+            />
+          </mesh>
+        ))}
+      </group>
+      <mesh position={[0, 0.05, 0]}>
+        <cylinderGeometry args={[0.7, 0.85, 0.12, 8]} />
+        <meshStandardMaterial color="#20242e" roughness={0.9} />
+      </mesh>
+      <pointLight color={color} intensity={2.2} distance={5} position={[0, 0.8, 0]} />
+    </group>
+  );
+}
+
+/** Industrial crafting station (refinery = amber, factory = magenta, lab = cyan). */
+function StationView({ entity }: { entity: GameEntity }) {
+  const accent =
+    entity.kind === "Refinery" ? "#ffb347" : entity.kind === "Factory" ? "#ff2d78" : "#40e8ff";
+  const fan = useRef<THREE.Mesh>(null);
+  useFrame(({ clock }) => {
+    if (fan.current) fan.current.rotation.y = clock.elapsedTime * 2.2;
+  });
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        useGame.getState().set({ craftOpen: true });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      {/* main housing */}
+      <mesh position={[0, 0.8, 0]} castShadow>
+        <boxGeometry args={[1.8, 1.6, 1.3]} />
+        <meshStandardMaterial color="#1a1f2a" roughness={0.45} metalness={0.7} />
+      </mesh>
+      {/* stack */}
+      <mesh position={[0.55, 2.0, -0.3]} castShadow>
+        <cylinderGeometry args={[0.16, 0.2, 1.2, 10]} />
+        <meshStandardMaterial color="#242b38" roughness={0.5} metalness={0.6} />
+      </mesh>
+      {/* rooftop fan */}
+      <mesh ref={fan} position={[-0.4, 1.68, 0.2]}>
+        <boxGeometry args={[0.7, 0.06, 0.12]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.8} />
+      </mesh>
+      {/* glowing control panel */}
+      <mesh position={[0, 0.95, 0.67]}>
+        <planeGeometry args={[1.2, 0.55]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.8} />
+      </mesh>
+      {/* accent piping */}
+      <mesh position={[-0.92, 0.6, 0]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.07, 0.07, 0.5, 8]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
+      </mesh>
+      <pointLight color={accent} intensity={2.5} distance={6} position={[0, 1.4, 1]} />
+    </group>
+  );
+}
+
 function StashTerminal({ entity }: { entity: GameEntity }) {
   return (
     <group
@@ -263,6 +359,14 @@ function EntityView({ entity }: { entity: GameEntity }) {
       break;
     case "Building":
       body = <StashTerminal entity={entity} />;
+      break;
+    case "ResourceNode":
+      body = <ResourceNodeView entity={entity} />;
+      break;
+    case "Refinery":
+    case "Factory":
+    case "Laboratory":
+      body = <StationView entity={entity} />;
       break;
     case "Npc":
       body = (

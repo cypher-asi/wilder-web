@@ -132,6 +132,10 @@ interface UiState {
   extracting: { seconds: number; startedAt: number } | null;
   /** Near a stash terminal (enables deposit/withdraw UI). */
   nearStash: boolean;
+  /** Nearest crafting station in interact range, if any. */
+  nearStation: { kind: "Refinery" | "Factory" | "Laboratory"; id: number } | null;
+  /** Crafting panel visibility (auto-closes when leaving the station). */
+  craftOpen: boolean;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
@@ -156,6 +160,8 @@ export const useGame: import("zustand").UseBoundStore<
   chunkVersion: 0,
   extracting: null,
   nearStash: false,
+  nearStation: null,
+  craftOpen: false,
 
   set: (partial) => set(partial),
   pushChat: (line) =>

@@ -8,7 +8,9 @@ dist/
 
 # Local runtime data
 data/
+sim_out/
 *.log
+*.tsbuildinfo
 
 # Editor/OS
 .DS_Store

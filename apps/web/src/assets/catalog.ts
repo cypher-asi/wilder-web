@@ -17,6 +17,10 @@ export interface ManifestEntry {
 export interface LoadedModel {
   scene: THREE.Group;
   animations: THREE.AnimationClip[];
+  /** Bounding-box size of the un-scaled scene, in the model's local space. */
+  size: THREE.Vector3;
+  /** Bounding-box minimum Y of the un-scaled scene (for ground snapping). */
+  minY: number;
 }
 
 let manifest: Map<string, ManifestEntry> | null = null;
@@ -50,7 +54,9 @@ async function loadModel(id: string): Promise<LoadedModel | null> {
         obj.receiveShadow = true;
       }
     });
-    return { scene: gltf.scene, animations: gltf.animations };
+    const bbox = new THREE.Box3().setFromObject(gltf.scene);
+    const size = bbox.getSize(new THREE.Vector3());
+    return { scene: gltf.scene, animations: gltf.animations, size, minY: bbox.min.y };
   } catch {
     return null;
   }
@@ -80,6 +86,8 @@ export function useAssetModel(id: string | undefined): LoadedModel | null {
         setModel({
           scene: cloneSkinned(loaded.scene) as THREE.Group,
           animations: loaded.animations,
+          size: loaded.size,
+          minY: loaded.minY,
         });
       }
     });
@@ -98,6 +106,7 @@ export const PROP_MODELS: Record<number, string> = {
   3: "prop_hydrant",
   5: "prop_vent",
   9: "prop_box",
+  10: "prop_trafficlight",
 };
 
 /** Car archetype rotates between model variants for street variety. */

@@ -7,5 +7,8 @@
   "scripts": {
     "dev": "npm run dev -w apps/web",
     "build": "npm run build -w apps/web"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.3.0"
   }
 }

@@ -18,6 +18,8 @@ export const TREE = 6;
 export const CAR = 7;
 export const BARRIER = 8;
 export const KIOSK = 9;
+export const TRAFFIC_LIGHT = 10;
+export const STOP_SIGN = 11;
 
 const lampGlow = new THREE.MeshStandardMaterial({
   color: "#ffd9a0",
@@ -32,19 +34,79 @@ const treeCrown = new THREE.MeshStandardMaterial({ color: "#1c3524", roughness: 
 function Streetlight() {
   return (
     <group>
-      <mesh material={poleMat} position={[0, 2.4, 0]} castShadow>
-        <cylinderGeometry args={[0.06, 0.09, 4.8, 6]} />
+      <mesh material={poleMat} position={[0, 3.5, 0]} castShadow>
+        <cylinderGeometry args={[0.06, 0.1, 7.0, 6]} />
       </mesh>
-      <mesh material={poleMat} position={[0.45, 4.7, 0]}>
-        <boxGeometry args={[1.0, 0.08, 0.08]} />
+      <mesh material={poleMat} position={[0.55, 6.85, 0]}>
+        <boxGeometry args={[1.2, 0.08, 0.08]} />
       </mesh>
-      <mesh material={lampGlow} position={[0.9, 4.62, 0]}>
-        <boxGeometry args={[0.35, 0.1, 0.16]} />
+      <mesh material={lampGlow} position={[1.1, 6.77, 0]}>
+        <boxGeometry args={[0.4, 0.1, 0.18]} />
       </mesh>
       {/* Fake light pool on the ground. */}
-      <mesh position={[0.9, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[1.5, 20]} />
+      <mesh position={[1.1, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[1.8, 20]} />
         <meshBasicMaterial color="#7a6038" transparent opacity={0.07} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
+
+const trafficRed = new THREE.MeshStandardMaterial({
+  color: "#3a0d0d",
+  emissive: "#ff2a1e",
+  emissiveIntensity: 2.5,
+});
+const trafficAmber = new THREE.MeshStandardMaterial({
+  color: "#3a2a0d",
+  emissive: "#ffab1e",
+  emissiveIntensity: 1.2,
+});
+const trafficGreen = new THREE.MeshStandardMaterial({
+  color: "#0d3a1a",
+  emissive: "#2aff6e",
+  emissiveIntensity: 1.2,
+});
+
+function TrafficLight() {
+  return (
+    <group>
+      <mesh material={poleMat} position={[0, 2.6, 0]} castShadow>
+        <cylinderGeometry args={[0.06, 0.1, 5.2, 6]} />
+      </mesh>
+      {/* 3-lamp head near the top of the pole. */}
+      <mesh material={darkMetal} position={[0, 4.55, 0]} castShadow>
+        <boxGeometry args={[0.32, 0.95, 0.26]} />
+      </mesh>
+      {[
+        { y: 4.85, mat: trafficRed },
+        { y: 4.55, mat: trafficAmber },
+        { y: 4.25, mat: trafficGreen },
+      ].map(({ y, mat }) => (
+        <mesh key={y} material={mat} position={[0, y, -0.135]} rotation={[0, Math.PI, 0]}>
+          <circleGeometry args={[0.09, 12]} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+const stopSignFace = new THREE.MeshStandardMaterial({
+  color: "#7a1418",
+  emissive: "#c01a20",
+  emissiveIntensity: 0.35,
+  roughness: 0.4,
+});
+
+function StopSign() {
+  return (
+    <group>
+      <mesh material={poleMat} position={[0, 1.05, 0]} castShadow>
+        <cylinderGeometry args={[0.04, 0.05, 2.1, 6]} />
+      </mesh>
+      {/* Octagonal plate at the top of the pole. */}
+      <mesh material={stopSignFace} position={[0, 2.1, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+        <cylinderGeometry args={[0.38, 0.38, 0.04, 8]} />
       </mesh>
     </group>
   );
@@ -144,6 +206,10 @@ function Fallback({ prop }: { prop: PropInstance }) {
       return <Car seed={Math.floor(prop.x * 31 + prop.z * 17)} />;
     case KIOSK:
       return <Kiosk seed={Math.floor(prop.x * 13 + prop.z * 7)} />;
+    case TRAFFIC_LIGHT:
+      return <TrafficLight />;
+    case STOP_SIGN:
+      return <StopSign />;
     default:
       return (
         <mesh material={darkMetal} position={[0, 0.3, 0]}>
@@ -153,15 +219,20 @@ function Fallback({ prop }: { prop: PropInstance }) {
   }
 }
 
-/** KayKit city bits are authored at half our street scale; upscale. */
-const PROP_SCALE: Record<number, number> = {
-  [STREETLIGHT]: 2.0,
-  [BENCH]: 1.6,
-  [TRASH]: 1.6,
-  [HYDRANT]: 1.6,
-  [VENT]: 1.6,
-  [CAR]: 2.0,
-  [KIOSK]: 1.6,
+/**
+ * Real-world target dimension per archetype, used to normalize loaded models
+ * of unknown authoring scale. "height" measures the bbox Y extent; "length"
+ * measures the longest horizontal bbox axis (max of X/Z).
+ */
+const PROP_TARGETS: Record<number, { size: number; axis: "height" | "length" }> = {
+  [STREETLIGHT]: { size: 7.0, axis: "height" },
+  [BENCH]: { size: 1.8, axis: "length" },
+  [TRASH]: { size: 1.1, axis: "height" },
+  [HYDRANT]: { size: 0.75, axis: "height" },
+  [VENT]: { size: 1.3, axis: "height" }, // dumpster model
+  [CAR]: { size: 4.5, axis: "length" },
+  [KIOSK]: { size: 2.4, axis: "height" },
+  [TRAFFIC_LIGHT]: { size: 5.2, axis: "height" },
 };
 
 export function PropMesh({ prop }: { prop: PropInstance }) {
@@ -170,11 +241,25 @@ export function PropMesh({ prop }: { prop: PropInstance }) {
       ? CAR_MODELS[Math.abs(Math.floor(prop.x * 7 + prop.z * 13)) % CAR_MODELS.length]
       : PROP_MODELS[prop.archetype];
   const model = useAssetModel(assetId);
-  const scale = PROP_SCALE[prop.archetype] ?? 1.5;
+
+  // Uniform scale from measured bbox -> real-world target, plus a Y offset
+  // that snaps the (scaled) model bottom to ground level.
+  const { scale, yOffset } = useMemo(() => {
+    if (!model) return { scale: 1, yOffset: 0 };
+    const target = PROP_TARGETS[prop.archetype];
+    let scale = 1;
+    if (target) {
+      const measured =
+        target.axis === "height" ? model.size.y : Math.max(model.size.x, model.size.z);
+      if (measured > 1e-4) scale = target.size / measured;
+    }
+    return { scale, yOffset: -model.minY * scale };
+  }, [model, prop.archetype]);
+
   return (
     <group position={[prop.x, 0, prop.z]} rotation={[0, prop.rotation, 0]}>
       {model ? (
-        <primitive object={model.scene} scale={scale} />
+        <primitive object={model.scene} scale={scale} position={[0, yOffset, 0]} />
       ) : (
         <Fallback prop={prop} />
       )}

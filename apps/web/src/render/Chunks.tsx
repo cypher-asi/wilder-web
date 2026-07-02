@@ -75,7 +75,8 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
 function Building({ building }: { building: BuildingInstance }) {
   const width = (building.tx1 - building.tx0) * TILE_SIZE;
   const depth = (building.tz1 - building.tz0) * TILE_SIZE;
-  const height = building.stories * 3;
+  // 4.5m ground floor (future storefront) + 3m per upper story.
+  const height = 4.5 + (building.stories - 1) * 3;
   const x = building.tx0 * TILE_SIZE + width / 2;
   const z = building.tz0 * TILE_SIZE + depth / 2;
 

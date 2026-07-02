@@ -22,6 +22,10 @@ const fragment = /* glsl */ `
   varying vec3 vLocal;
   varying vec3 vNormal2;
 
+  // Storefront ground floor: taller than upper stories, windowless for now.
+  const float GROUND_FLOOR = 4.5;
+  const float STORY_HEIGHT = 3.0;
+
   float hash(vec2 p) {
     return fract(sin(dot(p + uSeed, vec2(127.1, 311.7))) * 43758.5453);
   }
@@ -45,21 +49,27 @@ const fragment = /* glsl */ `
       vec3 fdx = dFdx(vLocal);
       float useX = step(abs(fdx.x), abs(fdx.z));
       float u = mix(vLocal.x, vLocal.z, useX);
-      float v = vLocal.y + uSize.y * 0.5;
+      float v = vLocal.y + uSize.y * 0.5; // 0 at street level
 
-      // Window cells: 1.4m wide, 3m per story.
-      vec2 cell = vec2(floor(u / 1.4), floor(v / 3.0));
-      vec2 f = vec2(fract(u / 1.4), fract(v / 3.0));
-      float inWindow = step(0.28, f.x) * step(f.x, 0.72) * step(0.3, f.y) * step(f.y, 0.68);
+      if (v < GROUND_FLOOR) {
+        // Ground floor becomes a storefront later; darker and windowless.
+        base *= 0.75;
+      } else {
+        // Window cells: 1.4m wide, 3m per story, starting above the ground floor.
+        float vs = v - GROUND_FLOOR;
+        vec2 cell = vec2(floor(u / 1.4), floor(vs / STORY_HEIGHT));
+        vec2 f = vec2(fract(u / 1.4), fract(vs / STORY_HEIGHT));
+        float inWindow = step(0.28, f.x) * step(f.x, 0.72) * step(0.3, f.y) * step(f.y, 0.68);
 
-      float lit = step(1.0 - uLitRatio, hash(cell));
-      float flicker = 0.8 + 0.2 * hash(cell + 7.0);
-      // Vary per-window warmth and brightness so facades feel inhabited.
-      vec3 warm = mix(uWindowColor, vec3(1.0, 0.82, 0.55), hash(cell + 3.0) * 0.7);
-      float brightness = 0.5 + 0.9 * hash(cell + 11.0);
-      emissive = warm * inWindow * lit * flicker * brightness;
-      // Dark glass for unlit windows.
-      base = mix(base, base * 0.4, inWindow * (1.0 - lit));
+        float lit = step(1.0 - uLitRatio, hash(cell));
+        float flicker = 0.8 + 0.2 * hash(cell + 7.0);
+        // Vary per-window warmth and brightness so facades feel inhabited.
+        vec3 warm = mix(uWindowColor, vec3(1.0, 0.82, 0.55), hash(cell + 3.0) * 0.7);
+        float brightness = 0.5 + 0.9 * hash(cell + 11.0);
+        emissive = warm * inWindow * lit * flicker * brightness;
+        // Dark glass for unlit windows.
+        base = mix(base, base * 0.4, inWindow * (1.0 - lit));
+      }
     } else {
       base *= 0.5; // roof
     }

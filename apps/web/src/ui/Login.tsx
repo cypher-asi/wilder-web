@@ -8,6 +8,7 @@ interface AuthResponse {
 
 export function Login() {
   const setAuth = useSession((s) => s.setAuth);
+  const enterAssetLab = useSession((s) => s.enterAssetLab);
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -75,9 +76,14 @@ export function Login() {
           {mode === "login" ? "Need an account? Register" : "Have an account? Log in"}
         </button>
         {import.meta.env.DEV && (
-          <button className="btn btn-dev" type="button" disabled={busy} onClick={devLogin}>
-            ⚡ DEV LOGIN
-          </button>
+          <>
+            <button className="btn btn-dev" type="button" disabled={busy} onClick={devLogin}>
+              ⚡ DEV LOGIN
+            </button>
+            <button className="btn btn-ghost" type="button" onClick={enterAssetLab}>
+              🔧 ASSET LAB
+            </button>
+          </>
         )}
       </form>
     </div>

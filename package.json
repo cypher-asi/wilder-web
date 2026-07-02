@@ -6,9 +6,18 @@
   ],
   "scripts": {
     "dev": "npm run dev -w apps/web",
-    "build": "npm run build -w apps/web"
+    "build": "npm run build -w apps/web",
+    "lab": "node tools/asset-lab/server.mjs",
+    "lab:extract": "node tools/asset-lab/extract.mjs",
+    "lab:import": "node tools/asset-lab/import.mjs"
   },
   "devDependencies": {
-    "puppeteer": "^25.3.0"
+    "@gltf-transform/core": "^4.4.1",
+    "@gltf-transform/extensions": "^4.4.1",
+    "@gltf-transform/functions": "^4.4.1",
+    "express": "^5.2.1",
+    "meshoptimizer": "^1.2.0",
+    "puppeteer": "^25.3.0",
+    "sharp": "^0.35.3"
   }
 }

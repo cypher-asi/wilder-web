@@ -1,31 +1,182 @@
 [
-  { "id": "character_main", "path": "models/character.glb", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_streetlight", "path": "models/streetlight.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_bench", "path": "models/bench.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_trash", "path": "models/trash_A.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_hydrant", "path": "models/firehydrant.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_vent", "path": "models/dumpster.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_car_sedan", "path": "models/car_sedan.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_car_hatchback", "path": "models/car_hatchback.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_car_taxi", "path": "models/car_taxi.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_car_police", "path": "models/car_police.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_car_stationwagon", "path": "models/car_stationwagon.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_trafficlight", "path": "models/trafficlight_A.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_watertower", "path": "models/watertower.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "prop_box", "path": "models/box_A.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "mk_ac_unit", "path": "models/megakit/Prop_ACUnit.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_bollard", "path": "models/megakit/Prop_Bollard.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_drain", "path": "models/megakit/Prop_Drain.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_manhole", "path": "models/megakit/Prop_ManholeCover.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_planter", "path": "models/megakit/Prop_Planter_Single.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_door_1", "path": "models/megakit/Door_1.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_door_2", "path": "models/megakit/Door_2.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "mk_door_3", "path": "models/megakit/Door_3.gltf", "type": "model", "license": "CC0 Quaternius" },
-  { "id": "prop_bush", "path": "models/bush.gltf", "type": "model", "license": "CC0 KayKit" },
-  { "id": "sfx_footsteps", "path": "audio/footsteps.ogg", "type": "audio", "license": "CC0 Kenney" },
-  { "id": "sfx_pickup", "path": "audio/pickup.ogg", "type": "audio", "license": "CC0 Kenney" },
-  { "id": "sfx_ui_click", "path": "audio/ui_click.ogg", "type": "audio", "license": "CC0 Kenney" },
-  { "id": "sfx_shoot", "path": "audio/shoot.ogg", "type": "audio", "license": "CC0 Kenney" },
-  { "id": "sfx_hit", "path": "audio/hit.ogg", "type": "audio", "license": "CC0 Kenney" },
-  { "id": "sfx_death", "path": "audio/death.ogg", "type": "audio", "license": "CC0 Kenney" }
+  {
+    "id": "character_main",
+    "path": "models/character.glb",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_streetlight",
+    "path": "models/streetlight.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_bench",
+    "path": "models/bench.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_trash",
+    "path": "models/trash_A.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_hydrant",
+    "path": "models/firehydrant.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_vent",
+    "path": "models/dumpster.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_car_sedan",
+    "path": "models/car_sedan.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_car_hatchback",
+    "path": "models/car_hatchback.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_car_taxi",
+    "path": "models/car_taxi.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_car_police",
+    "path": "models/car_police.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_car_stationwagon",
+    "path": "models/car_stationwagon.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_trafficlight",
+    "path": "models/trafficlight_A.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_watertower",
+    "path": "models/watertower.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "prop_box",
+    "path": "models/box_A.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "mk_ac_unit",
+    "path": "models/megakit/Prop_ACUnit.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_bollard",
+    "path": "models/megakit/Prop_Bollard.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_drain",
+    "path": "models/megakit/Prop_Drain.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_manhole",
+    "path": "models/megakit/Prop_ManholeCover.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_planter",
+    "path": "models/megakit/Prop_Planter_Single.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_door_1",
+    "path": "models/megakit/Door_1.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_door_2",
+    "path": "models/megakit/Door_2.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "mk_door_3",
+    "path": "models/megakit/Door_3.gltf",
+    "type": "model",
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "prop_bush",
+    "path": "models/bush.gltf",
+    "type": "model",
+    "license": "CC0 KayKit"
+  },
+  {
+    "id": "sfx_footsteps",
+    "path": "audio/footsteps.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "sfx_pickup",
+    "path": "audio/pickup.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "sfx_ui_click",
+    "path": "audio/ui_click.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "sfx_shoot",
+    "path": "audio/shoot.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "sfx_hit",
+    "path": "audio/hit.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "sfx_death",
+    "path": "audio/death.ogg",
+    "type": "audio",
+    "license": "CC0 Kenney"
+  },
+  {
+    "id": "lab_sm_barrier01",
+    "path": "models/imported/sm_barrier01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  }
 ]

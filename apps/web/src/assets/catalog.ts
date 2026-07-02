@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 
 export interface ManifestEntry {
@@ -40,6 +41,8 @@ async function loadManifest(): Promise<void> {
 }
 
 const loader = new GLTFLoader();
+// Asset Lab game-ready GLBs use EXT_meshopt_compression.
+loader.setMeshoptDecoder(MeshoptDecoder);
 const modelCache = new Map<string, Promise<LoadedModel | null>>();
 
 async function loadModel(id: string): Promise<LoadedModel | null> {

@@ -26,3 +26,11 @@ Thumbs.db
 .tmp_textures/
 
 tools/screens/
+
+# Asset Lab content (derived / large source data)
+content/raw/
+content/imported/
+content/gameready/
+content/registry.json
+assets/purchased/
+assets/models/imported/

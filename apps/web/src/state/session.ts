@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { CharacterSummary } from "../net/protocol";
 
-export type Screen = "login" | "characters" | "game";
+export type Screen = "login" | "characters" | "game" | "assetlab";
 
 interface SessionState {
   token: string | null;
@@ -13,6 +13,8 @@ interface SessionState {
   setAuth: (token: string, username: string) => void;
   setCharacters: (chars: CharacterSummary[]) => void;
   enterGame: (character: CharacterSummary) => void;
+  enterAssetLab: () => void;
+  exitAssetLab: () => void;
   logout: () => void;
 }
 
@@ -30,6 +32,8 @@ export const useSession = create<SessionState>((set) => ({
   },
   setCharacters: (characters) => set({ characters }),
   enterGame: (character) => set({ activeCharacter: character, screen: "game" }),
+  enterAssetLab: () => set({ screen: "assetlab" }),
+  exitAssetLab: () => set({ screen: "login" }),
   logout: () => {
     sessionStorage.removeItem("wilder_token");
     sessionStorage.removeItem("wilder_user");

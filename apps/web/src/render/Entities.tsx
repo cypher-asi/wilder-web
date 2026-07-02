@@ -253,6 +253,8 @@ function StationView({ entity }: { entity: GameEntity }) {
       onClick={(e) => {
         e.stopPropagation();
         useGame.getState().set({ craftOpen: true });
+        // Fetch this station's production queue state.
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
       }}
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
@@ -306,6 +308,48 @@ function StashTerminal({ entity }: { entity: GameEntity }) {
         <planeGeometry args={[0.8, 0.5]} />
         <meshStandardMaterial color="#40e8ff" emissive="#40e8ff" emissiveIntensity={1.6} />
       </mesh>
+    </group>
+  );
+}
+
+function MarketTerminal({ entity }: { entity: GameEntity }) {
+  const holo = useRef<THREE.Mesh>(null);
+  useFrame(({ clock }) => {
+    if (holo.current) {
+      holo.current.rotation.y = clock.elapsedTime * 0.8;
+      holo.current.position.y = 2.1 + Math.sin(clock.elapsedTime * 1.5) * 0.08;
+    }
+  });
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+        useGame.getState().set({ marketOpen: true });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <boxGeometry args={[1.2, 1.8, 0.8]} />
+        <meshStandardMaterial color="#1a1508" roughness={0.4} metalness={0.6} />
+      </mesh>
+      <mesh position={[0, 1.25, 0.41]}>
+        <planeGeometry args={[0.9, 0.55]} />
+        <meshStandardMaterial color="#ffd700" emissive="#ffd700" emissiveIntensity={1.4} />
+      </mesh>
+      {/* Rotating holographic "coin" above the terminal. */}
+      <mesh ref={holo} position={[0, 2.1, 0]}>
+        <cylinderGeometry args={[0.28, 0.28, 0.05, 16]} />
+        <meshStandardMaterial
+          color="#ffd700"
+          emissive="#ffb700"
+          emissiveIntensity={2}
+          transparent
+          opacity={0.85}
+        />
+      </mesh>
+      <pointLight color="#ffd700" intensity={2} distance={5} position={[0, 1.6, 0.6]} />
     </group>
   );
 }
@@ -367,6 +411,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
     case "Factory":
     case "Laboratory":
       body = <StationView entity={entity} />;
+      break;
+    case "MarketTerminal":
+      body = <MarketTerminal entity={entity} />;
       break;
     case "Npc":
       body = (

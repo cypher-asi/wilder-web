@@ -13,6 +13,8 @@ import {
   EntitySpawnData,
   Inventory,
   ItemStack,
+  MarketListing,
+  ProductionJob,
   Vec3,
 } from "../net/protocol";
 
@@ -136,6 +138,16 @@ interface UiState {
   nearStation: { kind: "Refinery" | "Factory" | "Laboratory"; id: number } | null;
   /** Crafting panel visibility (auto-closes when leaving the station). */
   craftOpen: boolean;
+  /** Known blueprint recipe ids (server-authoritative). */
+  blueprints: string[];
+  /** Production queues per building entity id (+ receive time for interpolation). */
+  production: Record<number, { jobs: ProductionJob[]; at: number }>;
+  /** Market snapshot (listings + wallet), refreshed by the server. */
+  market: { listings: MarketListing[]; wallet: number } | null;
+  /** Near the market terminal (enables the market panel). */
+  nearMarket: boolean;
+  /** Market panel visibility (auto-closes when leaving the terminal). */
+  marketOpen: boolean;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
@@ -162,6 +174,11 @@ export const useGame: import("zustand").UseBoundStore<
   nearStash: false,
   nearStation: null,
   craftOpen: false,
+  blueprints: [],
+  production: {},
+  market: null,
+  nearMarket: false,
+  marketOpen: false,
 
   set: (partial) => set(partial),
   pushChat: (line) =>

@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { RECIPES } from "../game/recipes";
+import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
+import { ItemKind } from "../net/protocol";
 import { game, useGame } from "../state/game";
 
 export function Hud({ connection }: { connection: GameConnection }) {
@@ -31,19 +32,42 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <Chat lines={chat} connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
+          <MarketPanel connection={connection} />
         </>
       )}
     </div>
   );
 }
 
+/** Sum of an item kind across inventory slots. */
+function invCount(
+  inventory: { slots: ({ kind: string; count: number } | null)[] } | null,
+  kind: string,
+): number {
+  return (inventory?.slots ?? [])
+    .filter((s) => s && s.kind === kind)
+    .reduce((n, s) => n + s!.count, 0);
+}
+
 function CraftingPanel({ connection }: { connection: GameConnection }) {
   const nearStation = useGame((s) => s.nearStation);
   const craftOpen = useGame((s) => s.craftOpen);
   const inventory = useGame((s) => s.inventory);
+  const blueprints = useGame((s) => s.blueprints);
+  const production = useGame((s) => s.production);
   const set = useGame((s) => s.set);
+  const [, force] = useState(0);
+
+  // Animate queue progress between (sparse) server updates.
+  useEffect(() => {
+    if (!craftOpen) return;
+    const timer = setInterval(() => force((n) => n + 1), 200);
+    return () => clearInterval(timer);
+  }, [craftOpen]);
 
   if (!nearStation) return null;
+  const isLab = nearStation.kind === "Laboratory";
+
   if (!craftOpen) {
     return (
       <div
@@ -63,43 +87,153 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           borderRadius: 6,
           padding: "6px 14px",
         }}
-        onClick={() => set({ craftOpen: true })}
+        onClick={() => {
+          set({ craftOpen: true });
+          // Ask the server for this station's queue state.
+          connection.send({ t: "Interact", d: { entity_id: nearStation.id } });
+        }}
       >
-        {nearStation.kind.toUpperCase()} — CLICK TO CRAFT
+        {nearStation.kind.toUpperCase()} — {isLab ? "CLICK TO RESEARCH" : "CLICK TO PRODUCE"}
       </div>
     );
   }
 
-  const count = (kind: string) =>
-    (inventory?.slots ?? [])
-      .filter((s) => s && s.kind === kind)
-      .reduce((n, s) => n + s!.count, 0);
+  const count = (kind: string) => invCount(inventory, kind);
+  const queueState = production[nearStation.id];
+  const jobs = queueState?.jobs ?? [];
+
+  const header = (
+    <h3>
+      {nearStation.kind}
+      <span
+        style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }}
+        onClick={() => set({ craftOpen: false })}
+      >
+        ✕
+      </span>
+    </h3>
+  );
+
+  if (isLab) {
+    const locked = RECIPES.filter((r) => !blueprints.includes(r.id));
+    const fragments = count("BlueprintFragment");
+    return (
+      <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 360 }}>
+        {header}
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
+          Research unlocks blueprints. Cost per unlock: {RESEARCH_FRAGMENTS}x Blueprint
+          Fragment ({fragments} held)
+          {RESEARCH_RESOURCES.map(([k, n]) => ` · ${n}x ${shortName(k)}`).join("")}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {locked.length === 0 && (
+            <div style={{ fontSize: 12, color: "#1affc4" }}>
+              All blueprints researched.
+            </div>
+          )}
+          {locked.map((r) => {
+            const canResearch =
+              fragments >= RESEARCH_FRAGMENTS &&
+              RESEARCH_RESOURCES.every(([k, n]) => count(k) >= n);
+            return (
+              <div
+                key={r.id}
+                onClick={() => {
+                  if (!canResearch) return;
+                  connection.send({
+                    t: "Craft",
+                    d: { recipe: `research_${r.id}`, station: nearStation.id },
+                  });
+                }}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "6px 8px",
+                  borderRadius: 4,
+                  border: `1px solid ${canResearch ? "rgba(64,232,255,0.4)" : "rgba(120,130,150,0.2)"}`,
+                  cursor: canResearch ? "pointer" : "default",
+                  opacity: canResearch ? 1 : 0.55,
+                }}
+                title={canResearch ? "Click to research" : "Missing fragments/resources"}
+              >
+                <div>
+                  <div style={{ fontSize: 12, color: "#e8f4ff" }}>{shortName(r.output[0])}</div>
+                  <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                    {r.station} blueprint
+                  </div>
+                </div>
+                <div style={{ fontSize: 10, color: canResearch ? "#40e8ff" : "var(--text-dim)" }}>
+                  {canResearch ? "RESEARCH" : "—"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   const recipes = RECIPES.filter((r) => r.station === nearStation.kind);
+  const now = performance.now();
 
   return (
-    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 340 }}>
-      <h3>
-        {nearStation.kind}
-        <span
-          style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }}
-          onClick={() => set({ craftOpen: false })}
-        >
-          ✕
-        </span>
-      </h3>
+    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 360 }}>
+      {header}
+      {jobs.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>QUEUE</div>
+          {jobs.map((job, i) => {
+            const recipe = RECIPES.find((r) => r.id === job.recipe);
+            const seconds = recipe?.seconds ?? 1;
+            const head = i === 0;
+            // Interpolate the head job's countdown between server updates.
+            const elapsed = head && job.powered ? (now - (queueState?.at ?? now)) / 1000 : 0;
+            const remaining = Math.max(0, Math.min(job.remaining - elapsed, seconds));
+            const unitPct = head ? 1 - remaining / seconds : 0;
+            const pct = (job.done + unitPct) / job.count;
+            return (
+              <div key={job.id} style={{ marginBottom: 6 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: 11,
+                    color: "#e8f4ff",
+                  }}
+                >
+                  <span>
+                    {recipe ? shortName(recipe.output[0]) : job.recipe} {job.done}/{job.count}
+                  </span>
+                  <span style={{ color: job.powered || !head ? "#1affc4" : "#ff5d7a" }}>
+                    {head ? (job.powered ? "POWERED" : "NO POWER — WAITING") : "QUEUED"}
+                  </span>
+                </div>
+                <div className="hp-bar" style={{ height: 6 }}>
+                  <div
+                    className="hp-fill"
+                    style={{
+                      width: `${pct * 100}%`,
+                      background: job.powered
+                        ? "linear-gradient(90deg, #0fbf93, #1affc4)"
+                        : "linear-gradient(90deg, #7a3040, #ff5d7a)",
+                      transition: "none",
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {recipes.map((r) => {
-          const canCraft = r.inputs.every(([kind, n]) => count(kind) >= n);
+          const known = blueprints.includes(r.id);
+          const canQueue = known && r.inputs.every(([kind, n]) => count(kind) >= n);
           return (
             <div
               key={r.id}
-              onClick={() => {
-                if (!canCraft) return;
-                connection.send({
-                  t: "Craft",
-                  d: { recipe: r.id, station: nearStation.id },
-                });
-              }}
               style={{
                 display: "flex",
                 justifyContent: "space-between",
@@ -107,33 +241,236 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                 gap: 10,
                 padding: "6px 8px",
                 borderRadius: 4,
-                border: `1px solid ${canCraft ? "rgba(26,255,196,0.35)" : "rgba(120,130,150,0.2)"}`,
-                cursor: canCraft ? "pointer" : "default",
-                opacity: canCraft ? 1 : 0.55,
+                border: `1px solid ${canQueue ? "rgba(26,255,196,0.35)" : "rgba(120,130,150,0.2)"}`,
+                opacity: known ? (canQueue ? 1 : 0.7) : 0.4,
               }}
-              title={canCraft ? "Click to craft" : "Missing inputs"}
+              title={
+                !known
+                  ? "Blueprint not researched (Laboratory)"
+                  : canQueue
+                    ? "Queue production"
+                    : "Missing inputs"
+              }
             >
               <div>
-                <div style={{ fontSize: 12, color: canCraft ? "#e8f4ff" : "var(--text-dim)" }}>
+                <div style={{ fontSize: 12, color: canQueue ? "#e8f4ff" : "var(--text-dim)" }}>
                   {shortName(r.output[0])}
                   {r.output[1] > 1 ? ` x${r.output[1]}` : ""}
+                  {!known && " 🔒"}
                 </div>
                 <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
                   {r.inputs
-                    .map(([kind, n]) => {
-                      const have = count(kind);
-                      return `${shortName(kind)} ${have}/${n}`;
-                    })
+                    .map(([kind, n]) => `${shortName(kind)} ${count(kind)}/${n}`)
                     .join(" · ")}
+                  {` · ${r.seconds}s`}
                 </div>
               </div>
-              <div style={{ fontSize: 10, color: canCraft ? "#1affc4" : "var(--text-dim)" }}>
-                {canCraft ? "CRAFT" : "—"}
+              <div style={{ display: "flex", gap: 6 }}>
+                {[1, 5].map((n) => (
+                  <div
+                    key={n}
+                    onClick={() => {
+                      if (!canQueue) return;
+                      connection.send({
+                        t: "QueueProduction",
+                        d: { building: nearStation.id, recipe: r.id, count: n },
+                      });
+                    }}
+                    style={{
+                      fontSize: 10,
+                      color: canQueue ? "#1affc4" : "var(--text-dim)",
+                      border: `1px solid ${canQueue ? "rgba(26,255,196,0.4)" : "rgba(120,130,150,0.2)"}`,
+                      borderRadius: 3,
+                      padding: "2px 6px",
+                      cursor: canQueue ? "pointer" : "default",
+                    }}
+                  >
+                    x{n}
+                  </div>
+                ))}
               </div>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function MarketPanel({ connection }: { connection: GameConnection }) {
+  const nearMarket = useGame((s) => s.nearMarket);
+  const marketOpen = useGame((s) => s.marketOpen);
+  const market = useGame((s) => s.market);
+  const inventory = useGame((s) => s.inventory);
+  const characterName = useGame((s) => s.characterName);
+  const set = useGame((s) => s.set);
+  const [listKind, setListKind] = useState<string>("");
+  const [listCount, setListCount] = useState("1");
+  const [listPrice, setListPrice] = useState("10");
+
+  if (!nearMarket) return null;
+  if (!marketOpen) {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          bottom: 128,
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontSize: 12,
+          letterSpacing: "0.15em",
+          color: "#ffd700",
+          textShadow: "0 0 10px rgba(255,215,0,0.5)",
+          cursor: "pointer",
+          pointerEvents: "auto",
+          background: "rgba(10,12,18,0.75)",
+          border: "1px solid rgba(255,215,0,0.4)",
+          borderRadius: 6,
+          padding: "6px 14px",
+        }}
+        onClick={() => {
+          set({ marketOpen: true });
+          connection.send({ t: "Market", d: { t: "Refresh" } });
+        }}
+      >
+        MARKET — CLICK TO TRADE
+      </div>
+    );
+  }
+
+  // Distinct sellable kinds currently in the inventory.
+  const kinds = [
+    ...new Set(
+      (inventory?.slots ?? []).filter((s) => s !== null).map((s) => s!.kind),
+    ),
+  ];
+  const selectedKind = kinds.includes(listKind as ItemKind) ? listKind : (kinds[0] ?? "");
+  const have = invCount(inventory, selectedKind);
+
+  function submitListing(event: FormEvent) {
+    event.preventDefault();
+    const count = Math.max(1, parseInt(listCount, 10) || 1);
+    const price = Math.max(1, parseInt(listPrice, 10) || 1);
+    if (!selectedKind) return;
+    connection.send({
+      t: "Market",
+      d: {
+        t: "List",
+        d: { kind: selectedKind as ItemKind, count, price_each: price },
+      },
+    });
+  }
+
+  return (
+    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 420, bottom: 16, top: "auto" }}>
+      <h3>
+        Market
+        <span style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }} onClick={() => set({ marketOpen: false })}>
+          ✕
+        </span>
+      </h3>
+      <div style={{ fontSize: 12, color: "#ffd700", marginBottom: 10 }}>
+        Wallet: {market?.wallet ?? 0} WILD
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>LISTINGS</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
+        {(market?.listings ?? []).length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>No listings.</div>
+        )}
+        {(market?.listings ?? []).map((l) => {
+          const mine = l.seller === characterName;
+          const cost = l.price_each * l.count;
+          const canBuy = !mine && (market?.wallet ?? 0) >= cost;
+          return (
+            <div
+              key={l.id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                padding: "4px 8px",
+                borderRadius: 4,
+                border: "1px solid rgba(255,215,0,0.2)",
+                fontSize: 11,
+              }}
+            >
+              <span style={{ color: "#e8f4ff" }}>
+                {shortName(l.kind)} x{l.count}
+              </span>
+              <span style={{ color: "var(--text-dim)" }}>
+                {l.price_each} ea · {mine ? "you" : l.seller}
+              </span>
+              {mine ? (
+                <span
+                  style={{ color: "#ff5d7a", cursor: "pointer" }}
+                  onClick={() =>
+                    connection.send({
+                      t: "Market",
+                      d: { t: "Cancel", d: { listing_id: l.id } },
+                    })
+                  }
+                >
+                  CANCEL
+                </span>
+              ) : (
+                <span
+                  style={{
+                    color: canBuy ? "#1affc4" : "var(--text-dim)",
+                    cursor: canBuy ? "pointer" : "default",
+                  }}
+                  onClick={() => {
+                    if (!canBuy) return;
+                    connection.send({
+                      t: "Market",
+                      d: { t: "Buy", d: { listing_id: l.id, count: l.count } },
+                    });
+                  }}
+                >
+                  BUY {cost}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
+        SELL AN ITEM {selectedKind ? `(${have} held)` : ""}
+      </div>
+      <form onSubmit={submitListing} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <select
+          value={selectedKind}
+          onChange={(e) => setListKind(e.target.value)}
+          style={{ background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px", flex: 1 }}
+        >
+          {kinds.map((k) => (
+            <option key={k} value={k}>
+              {shortName(k)}
+            </option>
+          ))}
+        </select>
+        <input
+          value={listCount}
+          onChange={(e) => setListCount(e.target.value)}
+          style={{ width: 40, background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px" }}
+          title="Count"
+        />
+        <input
+          value={listPrice}
+          onChange={(e) => setListPrice(e.target.value)}
+          style={{ width: 50, background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px" }}
+          title="Price each (WILD)"
+        />
+        <button
+          type="submit"
+          disabled={!selectedKind}
+          style={{ background: "rgba(255,215,0,0.15)", color: "#ffd700", border: "1px solid rgba(255,215,0,0.4)", borderRadius: 4, fontSize: 11, padding: "3px 10px", cursor: "pointer" }}
+        >
+          LIST
+        </button>
+      </form>
     </div>
   );
 }
@@ -247,14 +584,18 @@ function PositionReadout() {
   useEffect(() => {
     const timer = setInterval(() => {
       setPos({ x: game.predicted.x, z: game.predicted.z });
-      // Track stash/station proximity for context UIs.
+      // Track stash/station/market proximity for context UIs.
       let near = false;
+      let nearMarket = false;
       let station: { kind: (typeof STATION_KINDS)[number]; id: number } | null = null;
       let stationDist = 3.5;
       for (const entity of game.entities.values()) {
         const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
         if (entity.kind === "Building" && d < 3.5) {
           near = true;
+        }
+        if (entity.kind === "MarketTerminal" && d < 3.5) {
+          nearMarket = true;
         }
         const kind = entity.kind as (typeof STATION_KINDS)[number];
         if (STATION_KINDS.includes(kind) && d < stationDist) {
@@ -265,6 +606,13 @@ function PositionReadout() {
       const state = useGame.getState();
       if (near !== state.nearStash) {
         state.set({ nearStash: near });
+      }
+      if (nearMarket !== state.nearMarket) {
+        state.set({
+          nearMarket,
+          // Leaving the terminal closes the panel.
+          ...(nearMarket ? {} : { marketOpen: false }),
+        });
       }
       if ((station?.id ?? null) !== (state.nearStation?.id ?? null)) {
         state.set({

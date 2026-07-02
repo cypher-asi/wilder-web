@@ -23,19 +23,49 @@ class Client {
   }
 
   async login() {
+    return this.loginAs("E2E");
+  }
+
+  /** Register-or-login a dedicated account (own wallet/character limit). */
+  async loginAccount(username, name) {
+    const creds = { username, password: "e2e-password-1" };
+    let res = await fetch(`${BASE}/api/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(creds),
+    });
+    if (!res.ok) {
+      res = await fetch(`${BASE}/api/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(creds),
+      });
+    }
+    if (!res.ok) throw new Error(`login ${username} failed: ${res.status}`);
+    const { token } = await res.json();
+    this.token = token;
+    await this.pickCharacter(name);
+  }
+
+  async loginAs(name) {
     const res = await fetch(`${BASE}/dev/login`, { method: "POST" });
     if (!res.ok) throw new Error(`dev login failed: ${res.status}`);
     const { token } = await res.json();
     this.token = token;
+    await this.pickCharacter(name);
+  }
+
+  async pickCharacter(name) {
+    const token = this.token;
     const headers = { authorization: `Bearer ${token}` };
     let chars = await (await fetch(`${BASE}/api/characters`, { headers })).json();
     // Use a dedicated character so a browser session on "Dev" doesn't conflict.
-    let me = chars.find((c) => c.name === "E2E");
+    let me = chars.find((c) => c.name === name);
     if (!me) {
       const res = await fetch(`${BASE}/api/characters`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ name: "E2E" }),
+        body: JSON.stringify({ name }),
       });
       if (!res.ok) throw new Error("character create failed");
       me = await res.json();
@@ -418,8 +448,209 @@ async function scenarioEconomy() {
   c.ws.close();
 }
 
+async function scenarioManufacturing() {
+  const c = new Client();
+  await c.login();
+  const bp = c.waitFor((m) => m.t === "BlueprintsUpdate", 8000, "BlueprintsUpdate on join");
+  await c.connect();
+  const known = (await bp).d.known;
+  if (!known.includes("steel_plate") || !known.includes("knife")) {
+    throw new Error("default blueprints missing: " + JSON.stringify(known));
+  }
+  if (known.includes("polymer") && known.includes("pistol")) {
+    log("NOTE: advanced blueprints already researched on this character (persisted)");
+  }
+  log("PASS blueprints: defaults known on join:", known.sort().join(","));
+  await sleep(600);
+
+  // Stock up.
+  c.chat("/give fragment 8");
+  c.chat("/give electronics 20");
+  c.chat("/give chemicals 30");
+  c.chat("/give iron 40");
+  c.chat("/give biomass 10");
+  await sleep(500);
+
+  // 1. Unknown-recipe rejection: queue an unresearched advanced recipe.
+  const factory = c.findEntities("Factory")[0];
+  const refinery = c.findEntities("Refinery")[0];
+  const lab = c.findEntities("Laboratory")[0];
+  const market = c.findEntities("MarketTerminal")[0];
+  if (!factory || !refinery || !lab || !market) {
+    throw new Error("hub stations missing: " + JSON.stringify([factory, refinery, lab, market]));
+  }
+  log("hub stations:", `factory=${factory.id} refinery=${refinery.id} lab=${lab.id} market=${market.id}`);
+
+  if (!known.includes("polymer")) {
+    c.tp(refinery.x + 1, refinery.z);
+    await sleep(500);
+    c.send({ t: "QueueProduction", d: { building: refinery.id, recipe: "polymer", count: 1 } });
+    const rej = await c.waitFor((m) => m.t === "CraftResult", 4000, "queue rejection");
+    if (rej.d.ok || !/blueprint/.test(rej.d.error ?? "")) {
+      throw new Error("unresearched recipe was not rejected: " + JSON.stringify(rej.d));
+    }
+    log("PASS blueprint gating: queue rejected:", rej.d.error);
+
+    // 2. Research polymer at the Laboratory (2 fragments + 5 electronics + 5 chemicals).
+    c.tp(lab.x + 1, lab.z);
+    await sleep(500);
+    const fragsBefore = c.invCount("BlueprintFragment");
+    const resP = c.waitFor((m) => m.t === "CraftResult", 4000, "research result");
+    const updP = c.waitFor((m) => m.t === "BlueprintsUpdate", 4000, "BlueprintsUpdate");
+    c.send({ t: "Craft", d: { recipe: "research_polymer", station: lab.id } });
+    const res = await resP;
+    if (!res.d.ok) throw new Error("research failed: " + res.d.error);
+    const upd = await updP;
+    if (!upd.d.known.includes("polymer")) throw new Error("polymer not in known blueprints");
+    await sleep(300);
+    if (c.invCount("BlueprintFragment") !== fragsBefore - 2) {
+      throw new Error("fragments not consumed by research");
+    }
+    log("PASS research: polymer blueprint unlocked at the lab, fragments consumed");
+  } else {
+    log("SKIP research (polymer already known); researching another if available");
+  }
+
+  // 3. Queue timed production at the refinery: 3x steel_plate (4s each, 4 iron each).
+  c.tp(refinery.x + 1, refinery.z);
+  await sleep(500);
+  const ironBefore = c.invCount("Iron");
+  const steelBefore = c.invCount("SteelPlate");
+  c.send({ t: "QueueProduction", d: { building: refinery.id, recipe: "steel_plate", count: 3 } });
+  const ps = await c.waitFor((m) => m.t === "ProductionState", 4000, "ProductionState");
+  const job = ps.d.jobs[0];
+  if (!job || job.recipe !== "steel_plate" || job.count !== 3) {
+    throw new Error("bad production state: " + JSON.stringify(ps.d));
+  }
+  await sleep(300);
+  if (c.invCount("Iron") !== ironBefore - 12) throw new Error("inputs not consumed on queue");
+  // The initial reply may predate the first sim tick; wait for power-on.
+  const poweredOn = [...c.events].some(
+    (m) => m.t === "ProductionState" && m.d.jobs.some((j) => j.powered),
+  )
+    ? true
+    : (
+        await c.waitFor(
+          (m) => m.t === "ProductionState" && m.d.jobs.some((j) => j.powered),
+          4000,
+          "job powered",
+        )
+      ).d.jobs[0].powered;
+  if (!poweredOn) throw new Error("solo job should be powered");
+  log("PASS queue: 3x steel_plate queued, 12 iron consumed up-front, job powered");
+
+  // Wait for all three units (12s + slack), watching progress ticks.
+  const doneState = await c.waitFor(
+    (m) => m.t === "ProductionState" && m.d.building === refinery.id && m.d.jobs.length === 0,
+    20000,
+    "queue drained",
+  );
+  await sleep(300);
+  const gainedSteel = c.invCount("SteelPlate") - steelBefore;
+  if (gainedSteel !== 3) throw new Error(`expected 3 steel plates, got ${gainedSteel}`);
+  log("PASS production: queue drained, 3x SteelPlate delivered to inventory");
+
+  // 4. Power budget: 5 helpers + us queue factory jobs (6 x 20 kW = 120 > 100).
+  log("spawning 5 helper clients to saturate the power budget...");
+  const helpers = [];
+  for (let i = 1; i <= 5; i++) {
+    const h = new Client();
+    await h.loginAccount(`e2ehelper${i}`, `Helper${i}`);
+    await h.connect();
+    helpers.push(h);
+  }
+  await sleep(500);
+  for (const h of helpers) {
+    h.chat("/give steel 20");
+    h.chat("/give chemicals 40");
+  }
+  c.chat("/give steel 20");
+  c.chat("/give chemicals 40");
+  await sleep(500);
+  const powered = [];
+  for (const h of helpers) {
+    const hf = h.findEntities("Factory")[0];
+    h.tp(hf.x + 1, hf.z);
+  }
+  await sleep(500);
+  for (const h of helpers) {
+    const hf = h.findEntities("Factory")[0];
+    h.send({ t: "QueueProduction", d: { building: hf.id, recipe: "ammo_9mm", count: 10 } });
+  }
+  c.tp(factory.x + 1, factory.z);
+  await sleep(500);
+  c.send({ t: "QueueProduction", d: { building: factory.id, recipe: "ammo_9mm", count: 10 } });
+  await sleep(1500);
+  // Collect the latest power state each client saw for its job.
+  const states = [];
+  for (const h of [...helpers, c]) {
+    const last = [...h.events].reverse().find((m) => m.t === "ProductionState" && m.d.jobs.length);
+    if (last) states.push(last.d.jobs[0].powered);
+  }
+  const poweredCount = states.filter(Boolean).length;
+  const waitingCount = states.filter((p) => p === false).length;
+  log(`power states across 6 factory jobs: powered=${poweredCount} waiting=${waitingCount}`);
+  if (waitingCount < 1) throw new Error("expected at least one job waiting for power (6x20 > 100)");
+  if (poweredCount !== 5) throw new Error(`expected exactly 5 powered jobs, got ${poweredCount}`);
+  log("PASS power: budget of 100 kW powers 5 factory jobs, 6th waits");
+  for (const h of helpers) h.ws.close();
+
+  // 5. Market: list steel plates, buy our own listing, then list + cancel.
+  c.tp(market.x + 1, market.z);
+  await sleep(500);
+  c.interact(market.id);
+  const ms0 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState");
+  const wallet0 = ms0.d.wallet;
+  log("market open: wallet", wallet0, "WILD,", ms0.d.listings.length, "listings");
+  if (wallet0 <= 0) throw new Error("no WILD grant on wallet");
+
+  const steelHeld = c.invCount("SteelPlate");
+  c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 2, price_each: 10 } } });
+  const mr1 = await c.waitFor((m) => m.t === "MarketResult", 4000, "list result");
+  if (!mr1.d.ok) throw new Error("list failed: " + mr1.d.error);
+  const ms1 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after list");
+  const listing = ms1.d.listings.find((l) => l.kind === "SteelPlate" && l.count === 2);
+  if (!listing) throw new Error("listing not found after List");
+  await sleep(300);
+  if (c.invCount("SteelPlate") !== steelHeld - 2) throw new Error("items not escrowed on list");
+  log("PASS market list: 2x SteelPlate escrowed at 10 WILD each (listing", listing.id + ")");
+
+  // Buy our own listing (single-player verification; 5% fee burned).
+  c.send({ t: "Market", d: { t: "Buy", d: { listing_id: listing.id, count: 2 } } });
+  const mr2 = await c.waitFor((m) => m.t === "MarketResult", 4000, "buy result");
+  if (!mr2.d.ok) throw new Error("buy failed: " + mr2.d.error);
+  const ms2 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after buy");
+  await sleep(300);
+  if (c.invCount("SteelPlate") !== steelHeld) throw new Error("items not delivered on buy");
+  if (ms2.d.listings.some((l) => l.id === listing.id)) throw new Error("listing still present");
+  const fee = Math.floor((20 * 5) / 100);
+  if (ms2.d.wallet !== wallet0 - fee) {
+    throw new Error(`wallet ${ms2.d.wallet}, expected ${wallet0 - fee} (fee burn ${fee})`);
+  }
+  log(`PASS market buy: bought own listing, ${fee} WILD fee burned (wallet ${wallet0} -> ${ms2.d.wallet})`);
+
+  // Cancel round-trip.
+  c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 1, price_each: 5 } } });
+  await c.waitFor((m) => m.t === "MarketResult", 4000, "list2");
+  const ms3 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState");
+  const l2 = ms3.d.listings.find((l) => l.kind === "SteelPlate" && l.price_each === 5);
+  c.send({ t: "Market", d: { t: "Cancel", d: { listing_id: l2.id } } });
+  const mr3 = await c.waitFor((m) => m.t === "MarketResult", 4000, "cancel result");
+  if (!mr3.d.ok) throw new Error("cancel failed: " + mr3.d.error);
+  await sleep(300);
+  if (c.invCount("SteelPlate") !== steelHeld) throw new Error("items not returned on cancel");
+  log("PASS market cancel: listing cancelled, items returned");
+
+  log("ALL PHASE 3 CHECKS PASSED");
+  c.ws.close();
+}
+
 const scenario = process.argv[2] ?? "extraction";
-const scenarios = { extraction: scenarioExtraction, economy: scenarioEconomy };
+const scenarios = {
+  extraction: scenarioExtraction,
+  economy: scenarioEconomy,
+  manufacturing: scenarioManufacturing,
+};
 if (!scenarios[scenario]) {
   console.error("unknown scenario", scenario);
   process.exit(1);

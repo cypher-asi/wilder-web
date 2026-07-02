@@ -153,6 +153,12 @@ export type InventoryActionMsg =
   | Tagged<"Deposit", { slot: number }>
   | Tagged<"Withdraw", { stash_slot: number }>;
 
+export type MarketActionMsg =
+  | Tagged<"List", { kind: ItemKind; count: number; price_each: number }>
+  | Tagged<"Buy", { listing_id: number; count: number }>
+  | Tagged<"Cancel", { listing_id: number }>
+  | TaggedUnit<"Refresh">;
+
 export type C2S =
   | Tagged<"Authenticate", { token: string }>
   | Tagged<"JoinWorld", { character_id: string }>
@@ -165,8 +171,27 @@ export type C2S =
   | Tagged<"UseItem", { slot: number }>
   | Tagged<"Craft", { recipe: string; station: number | null }>
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
+  | Tagged<"Market", MarketActionMsg>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
+
+export interface ProductionJob {
+  id: number;
+  recipe: string;
+  count: number;
+  done: number;
+  /** Seconds remaining for the current unit. */
+  remaining: number;
+  powered: boolean;
+}
+
+export interface MarketListing {
+  id: number;
+  seller: string;
+  kind: ItemKind;
+  count: number;
+  price_each: number;
+}
 
 export type CombatEvent =
   | Tagged<"Hit", { attacker: number; target: number; damage: number }>
@@ -206,6 +231,10 @@ export type S2C =
       "CraftResult",
       { ok: boolean; error: string | null; produced: ItemStack | null }
     >
+  | Tagged<"ProductionState", { building: number; jobs: ProductionJob[] }>
+  | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
+  | Tagged<"MarketResult", { ok: boolean; error: string | null }>
+  | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>
   | Tagged<"Error", { message: string }>;

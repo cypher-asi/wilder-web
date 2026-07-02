@@ -44,6 +44,29 @@ const LOOT_TTL_SECONDS: f32 = 120.0;
 const NODE_CHARGES: u32 = 5;
 const NODE_RESPAWN_SECONDS: f32 = 60.0;
 const NODE_GATHER_COOLDOWN: f32 = 1.2;
+/// Chance for a blueprint fragment to drop from NPC kills / node gathers.
+const FRAGMENT_CHANCE: f64 = 0.10;
+/// Global hub power budget (kW) shared by all production jobs.
+const POWER_BUDGET: f32 = 100.0;
+/// Market fee (percent) burned on every sale.
+const MARKET_FEE_PCT: u32 = 5;
+/// WILD granted to every account once.
+const WALLET_GRANT: u32 = 200;
+/// Recipes every character knows from the start; the rest need lab research.
+const DEFAULT_BLUEPRINTS: &[&str] =
+    &["steel_plate", "copper_wire", "pipe", "knife", "ammo_9mm", "medkit"];
+/// Research cost: fragments + resources consumed to unlock any blueprint.
+const RESEARCH_FRAGMENTS: u32 = 2;
+const RESEARCH_RESOURCES: &[(ItemKind, u32)] =
+    &[(ItemKind::Electronics, 5), (ItemKind::Chemicals, 5)];
+
+fn station_power(station: wilder_crafting::Station) -> f32 {
+    match station {
+        wilder_crafting::Station::Refinery => 10.0,
+        wilder_crafting::Station::Factory => 20.0,
+        wilder_crafting::Station::Laboratory => 30.0,
+    }
+}
 
 pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
     coord.x.abs() <= SAFE_RADIUS && coord.z.abs() <= SAFE_RADIUS
@@ -89,7 +112,35 @@ struct Player {
     attack_cooldown: f32,
     /// Active extraction channel: (extraction point entity, seconds left).
     extracting: Option<(EntityId, f32)>,
+    /// Known blueprint recipe ids.
+    blueprints: HashSet<String>,
+    /// Production queues per building entity (personal queues, Phase 3).
+    production: HashMap<EntityId, Vec<ProductionJobState>>,
+    /// Cached account wallet (write-through to the store).
+    wallet: u32,
     dirty: bool,
+}
+
+struct ProductionJobState {
+    id: u64,
+    recipe: &'static wilder_crafting::Recipe,
+    count: u32,
+    done: u32,
+    remaining: f32,
+    powered: bool,
+}
+
+impl ProductionJobState {
+    fn to_wire(&self) -> ProductionJob {
+        ProductionJob {
+            id: self.id,
+            recipe: self.recipe.id.to_string(),
+            count: self.count,
+            done: self.done,
+            remaining: self.remaining,
+            powered: self.powered,
+        }
+    }
 }
 
 impl Player {
@@ -185,6 +236,10 @@ pub struct World {
     seed: u64,
     rng: SmallRng,
     rx: mpsc::UnboundedReceiver<WorldCmd>,
+    /// Market listings (persisted in world meta).
+    market: Vec<wilder_market::Listing>,
+    next_listing_id: u64,
+    next_job_id: u64,
 }
 
 /// Create the world and spawn its tick loop. Returns a handle for connections.
@@ -199,10 +254,17 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         }
     };
 
+    let market: Vec<wilder_market::Listing> =
+        store.meta("market_listings").ok().flatten().unwrap_or_default();
+    let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
+
     let (tx, rx) = mpsc::unbounded_channel();
     let world = World {
         store: store.clone(),
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
+        market,
+        next_listing_id,
+        next_job_id: 1,
         players: HashMap::new(),
         npcs: HashMap::new(),
         npc_seeded_chunks: HashSet::new(),
@@ -274,6 +336,31 @@ impl World {
         let inventory = self.store.inventory(character_id).unwrap_or_default();
         let stash = self.store.stash(character_id).unwrap_or_else(|_| Stash::new());
 
+        // Blueprints: defaults are always known.
+        let mut blueprints: HashSet<String> = self
+            .store
+            .blueprints(character_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for id in DEFAULT_BLUEPRINTS {
+            blueprints.insert((*id).to_string());
+        }
+
+        // One-time WILD grant per account (tracked in world meta).
+        let mut wallet = self
+            .store
+            .account_by_id(account)
+            .map(|a| a.wallet)
+            .unwrap_or(0);
+        let grant_key = format!("wallet_granted_{account}");
+        let granted: bool = self.store.meta(&grant_key).ok().flatten().unwrap_or(false);
+        if !granted {
+            wallet += WALLET_GRANT;
+            let _ = self.store.update_wallet(account, wallet);
+            let _ = self.store.save_meta(&grant_key, &true);
+        }
+
         let entity = self.alloc_entity();
         let mut character = character;
         if !position_clear(&self.chunks, character.position.x, character.position.z) {
@@ -296,6 +383,9 @@ impl World {
             attacked_this_tick: false,
             attack_cooldown: 0.0,
             extracting: None,
+            blueprints,
+            production: HashMap::new(),
+            wallet,
             dirty: true,
         };
 
@@ -307,6 +397,9 @@ impl World {
             world_seed: self.seed,
         });
         let _ = tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
+        let _ = tx.send(S2C::BlueprintsUpdate {
+            known: player.blueprints.iter().cloned().collect(),
+        });
 
         self.players.insert(entity, player);
         tracing::info!(entity, "player joined");
@@ -314,7 +407,22 @@ impl World {
     }
 
     fn leave(&mut self, entity: EntityId) {
-        if let Some(player) = self.players.remove(&entity) {
+        if let Some(mut player) = self.players.remove(&entity) {
+            // Refund inputs for unfinished production so items aren't lost
+            // (queues are in-memory; jobs only run while the player is online).
+            let queues = std::mem::take(&mut player.production);
+            for jobs in queues.into_values() {
+                for job in jobs {
+                    let pending = job.count - job.done;
+                    for &(kind, count) in job.recipe.inputs {
+                        let refund = count * pending;
+                        let leftover = inv::add_items(&mut player.inventory.slots, kind, refund);
+                        if leftover > 0 {
+                            inv::add_items(&mut player.stash.slots, kind, leftover);
+                        }
+                    }
+                }
+            }
             self.persist_player(&player);
             tracing::info!(entity, name = %player.character.name, "player left");
         }
@@ -369,10 +477,12 @@ impl World {
                 }
             }
             C2S::Craft { recipe, station } => self.craft(entity, &recipe, station),
+            C2S::QueueProduction { building, recipe, count } => {
+                self.queue_production(entity, building, &recipe, count)
+            }
+            C2S::Market(action) => self.market_action(entity, action),
             C2S::Pong { .. } => {}
             C2S::Authenticate { .. } | C2S::JoinWorld { .. } => {}
-            // Phase 3 messages: inert for now.
-            C2S::QueueProduction { .. } | C2S::Market(_) => {}
         }
     }
 
@@ -568,6 +678,10 @@ impl World {
                     let weapon = if rng.random_bool(0.3) { ItemKind::Pistol } else { ItemKind::Pipe };
                     items.push(ItemStack { kind: weapon, count: 1 });
                 }
+                // Rare blueprint fragments feed Laboratory research (Phase 3).
+                if rng.random_bool(FRAGMENT_CHANCE) {
+                    items.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
+                }
             }
             self.spawn_loot(drop_pos, items);
         }
@@ -632,6 +746,10 @@ impl World {
             let count = self.rng.random_range(2..=5u32);
             let leftover = inv::add_items(&mut player.inventory.slots, kind, count);
             let gained = count - leftover;
+            // Rare blueprint fragments feed Laboratory research (Phase 3).
+            if self.rng.random_bool(FRAGMENT_CHANCE) {
+                inv::add_items(&mut player.inventory.slots, ItemKind::BlueprintFragment, 1);
+            }
             player.dirty = true;
             let _ = player.tx.send(S2C::GatherResult {
                 gained: (gained > 0).then_some(ItemStack { kind, count: gained }),
@@ -659,12 +777,29 @@ impl World {
                 // Stash terminal: just push current stash state (opens the UI).
                 let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
             }
+            EntityKind::Refinery | EntityKind::Factory | EntityKind::Laboratory => {
+                // Push this player's queue for the station (opens the UI).
+                let jobs: Vec<ProductionJob> = player
+                    .production
+                    .get(&target)
+                    .map(|jobs| jobs.iter().map(|j| j.to_wire()).collect())
+                    .unwrap_or_default();
+                let _ = player.tx.send(S2C::ProductionState { building: target, jobs });
+            }
+            EntityKind::MarketTerminal => {
+                self.send_market_state(entity);
+            }
             _ => {}
         }
     }
 
-    /// Instant crafting at a nearby station (Phase 2; queued production in Phase 3).
+    /// Instant crafting at a nearby station, and `research_<id>` unlocks at the
+    /// Laboratory. (Timed production queues are the Phase 3 path for stations.)
     fn craft(&mut self, entity: EntityId, recipe_id: &str, station: Option<EntityId>) {
+        if let Some(research_id) = recipe_id.strip_prefix("research_") {
+            self.research(entity, research_id);
+            return;
+        }
         let Some(player) = self.players.get(&entity) else { return };
         let fail = |player: &Player, error: &str| {
             let _ = player.tx.send(S2C::CraftResult {
@@ -677,6 +812,10 @@ impl World {
             fail(player, "unknown recipe");
             return;
         };
+        if !player.blueprints.contains(recipe.id) {
+            fail(player, "blueprint not researched");
+            return;
+        }
         let station_kind = match recipe.station {
             wilder_crafting::Station::Refinery => EntityKind::Refinery,
             wilder_crafting::Station::Factory => EntityKind::Factory,
@@ -716,6 +855,360 @@ impl World {
         if leftover > 0 {
             let pos = player.character.position;
             self.spawn_loot(pos, vec![ItemStack { kind: out_kind, count: leftover }]);
+        }
+    }
+
+    /// Unlock a blueprint at the Laboratory: consumes fragments + resources.
+    fn research(&mut self, entity: EntityId, recipe_id: &str) {
+        let near_lab = self
+            .players
+            .get(&entity)
+            .map(|p| {
+                self.statics.values().any(|s| {
+                    s.kind == EntityKind::Laboratory
+                        && (s.position - p.character.position).length() < 3.5
+                })
+            })
+            .unwrap_or(false);
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        let fail = |player: &Player, error: &str| {
+            let _ = player.tx.send(S2C::CraftResult {
+                ok: false,
+                error: Some(error.into()),
+                produced: None,
+            });
+        };
+        if !near_lab {
+            fail(player, "no Laboratory in reach");
+            return;
+        }
+        let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
+            fail(player, "unknown blueprint");
+            return;
+        };
+        if player.blueprints.contains(recipe.id) {
+            fail(player, "already researched");
+            return;
+        }
+        if inv::count_items(&player.inventory.slots, ItemKind::BlueprintFragment)
+            < RESEARCH_FRAGMENTS
+        {
+            fail(player, &format!("need {RESEARCH_FRAGMENTS}x Blueprint Fragment"));
+            return;
+        }
+        for &(kind, count) in RESEARCH_RESOURCES {
+            if inv::count_items(&player.inventory.slots, kind) < count {
+                fail(player, &format!("need {}x {}", count, kind.display_name()));
+                return;
+            }
+        }
+        inv::remove_items(
+            &mut player.inventory.slots,
+            ItemKind::BlueprintFragment,
+            RESEARCH_FRAGMENTS,
+        );
+        for &(kind, count) in RESEARCH_RESOURCES {
+            inv::remove_items(&mut player.inventory.slots, kind, count);
+        }
+        player.blueprints.insert(recipe.id.to_string());
+        player.dirty = true;
+        let known: Vec<String> = player.blueprints.iter().cloned().collect();
+        let _ = self
+            .store
+            .save_blueprints(player.character.id, &known);
+        let _ = player.tx.send(S2C::CraftResult { ok: true, error: None, produced: None });
+        let _ = player.tx.send(S2C::BlueprintsUpdate { known });
+        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+    }
+
+    /// Queue a timed production job at a station building (Phase 3).
+    fn queue_production(
+        &mut self,
+        entity: EntityId,
+        building: EntityId,
+        recipe_id: &str,
+        count: u32,
+    ) {
+        let station = self
+            .statics
+            .get(&building)
+            .map(|s| (s.kind, s.position));
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        let fail = |player: &Player, error: &str| {
+            let _ = player.tx.send(S2C::CraftResult {
+                ok: false,
+                error: Some(error.into()),
+                produced: None,
+            });
+        };
+        let Some((kind, pos)) = station else {
+            fail(player, "no such building");
+            return;
+        };
+        if (pos - player.character.position).length() > 3.5 {
+            fail(player, "too far from the building");
+            return;
+        }
+        let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
+            fail(player, "unknown recipe");
+            return;
+        };
+        if !player.blueprints.contains(recipe.id) {
+            fail(player, "blueprint not researched");
+            return;
+        }
+        let expected = match recipe.station {
+            wilder_crafting::Station::Refinery => EntityKind::Refinery,
+            wilder_crafting::Station::Factory => EntityKind::Factory,
+            wilder_crafting::Station::Laboratory => EntityKind::Laboratory,
+        };
+        if kind != expected {
+            fail(player, &format!("recipe needs a {:?}", recipe.station));
+            return;
+        }
+        let count = count.clamp(1, 20);
+        // Inputs are consumed up-front for the whole batch.
+        for &(k, c) in recipe.inputs {
+            if inv::count_items(&player.inventory.slots, k) < c * count {
+                fail(player, &format!("need {}x {}", c * count, k.display_name()));
+                return;
+            }
+        }
+        for &(k, c) in recipe.inputs {
+            inv::remove_items(&mut player.inventory.slots, k, c * count);
+        }
+        let job = ProductionJobState {
+            id: self.next_job_id,
+            recipe,
+            count,
+            done: 0,
+            remaining: recipe.seconds,
+            powered: false,
+        };
+        self.next_job_id += 1;
+        player.production.entry(building).or_default().push(job);
+        player.dirty = true;
+        let jobs: Vec<ProductionJob> =
+            player.production[&building].iter().map(|j| j.to_wire()).collect();
+        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+        let _ = player.tx.send(S2C::ProductionState { building, jobs });
+    }
+
+    /// Advance production queues under the global power budget.
+    fn tick_production(&mut self) {
+        // Deterministic ordering: players by entity id, buildings by id.
+        let mut player_ids: Vec<EntityId> = self.players.keys().copied().collect();
+        player_ids.sort_unstable();
+
+        let mut power_used = 0.0f32;
+        let mut completions: Vec<(EntityId, Vec3, ItemStack)> = Vec::new();
+
+        for pid in player_ids {
+            let Some(player) = self.players.get_mut(&pid) else { continue };
+            let mut buildings: Vec<EntityId> = player.production.keys().copied().collect();
+            buildings.sort_unstable();
+            for building in buildings {
+                let mut state_changed = false;
+                let jobs = player.production.get_mut(&building).unwrap();
+                // Only the head job of each queue runs.
+                if let Some(job) = jobs.first_mut() {
+                    let draw = station_power(job.recipe.station);
+                    let powered = power_used + draw <= POWER_BUDGET;
+                    if powered {
+                        power_used += draw;
+                    }
+                    if powered != job.powered {
+                        job.powered = powered;
+                        state_changed = true;
+                    }
+                    if powered {
+                        job.remaining -= TICK_DT;
+                        if job.remaining <= 0.0 {
+                            job.done += 1;
+                            job.remaining = job.recipe.seconds;
+                            let (kind, count) = job.recipe.output;
+                            let leftover =
+                                inv::add_items(&mut player.inventory.slots, kind, count);
+                            completions.push((
+                                pid,
+                                player.character.position,
+                                ItemStack { kind, count: leftover },
+                            ));
+                            player.dirty = true;
+                            state_changed = true;
+                            let _ = player
+                                .tx
+                                .send(S2C::InventoryUpdate(player.inventory.clone()));
+                        }
+                    }
+                }
+                let jobs = player.production.get_mut(&building).unwrap();
+                if jobs.first().map(|j| j.done >= j.count).unwrap_or(false) {
+                    jobs.remove(0);
+                    state_changed = true;
+                }
+                if jobs.is_empty() {
+                    player.production.remove(&building);
+                }
+                if state_changed {
+                    let jobs: Vec<ProductionJob> = player
+                        .production
+                        .get(&building)
+                        .map(|jobs| jobs.iter().map(|j| j.to_wire()).collect())
+                        .unwrap_or_default();
+                    let _ = player.tx.send(S2C::ProductionState { building, jobs });
+                }
+            }
+        }
+
+        // Overflow output that didn't fit the inventory drops at the player's feet.
+        for (_pid, pos, stack) in completions {
+            if stack.count > 0 {
+                self.spawn_loot(pos, vec![stack]);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Market
+    // -----------------------------------------------------------------------
+
+    fn save_market(&self) {
+        let _ = self.store.save_meta("market_listings", &self.market);
+        let _ = self.store.save_meta("market_next_id", &self.next_listing_id);
+    }
+
+    fn send_market_state(&self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let listings: Vec<MarketListing> = self
+            .market
+            .iter()
+            .map(|l| MarketListing {
+                id: l.id,
+                seller: l.seller_name.clone(),
+                kind: l.kind,
+                count: l.count,
+                price_each: l.price_each,
+            })
+            .collect();
+        let _ = player.tx.send(S2C::MarketState { listings, wallet: player.wallet });
+    }
+
+    fn market_action(&mut self, entity: EntityId, action: MarketAction) {
+        let result = self.apply_market_action(entity, action);
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::MarketResult {
+                ok: result.is_ok(),
+                error: result.err(),
+            });
+            let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+        }
+        self.send_market_state(entity);
+    }
+
+    fn apply_market_action(&mut self, entity: EntityId, action: MarketAction) -> Result<(), String> {
+        match action {
+            MarketAction::Refresh => Ok(()),
+            MarketAction::List { kind, count, price_each } => {
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                if count == 0 || price_each == 0 || price_each > 1_000_000 {
+                    return Err("invalid listing".into());
+                }
+                let have = inv::count_items(&player.inventory.slots, kind);
+                if have < count {
+                    return Err(format!("you only have {have}x {}", kind.display_name()));
+                }
+                inv::remove_items(&mut player.inventory.slots, kind, count);
+                player.dirty = true;
+                let listing = wilder_market::Listing {
+                    id: self.next_listing_id,
+                    seller: player.character.id,
+                    seller_name: player.character.name.clone(),
+                    kind,
+                    count,
+                    price_each,
+                };
+                self.next_listing_id += 1;
+                self.market.push(listing);
+                self.save_market();
+                Ok(())
+            }
+            MarketAction::Buy { listing_id, count } => {
+                let idx = self
+                    .market
+                    .iter()
+                    .position(|l| l.id == listing_id)
+                    .ok_or("listing gone")?;
+                let (kind, price_each, available, seller, seller_name) = {
+                    let l = &self.market[idx];
+                    (l.kind, l.price_each, l.count, l.seller, l.seller_name.clone())
+                };
+                let count = count.min(available).max(1);
+                let cost = price_each.saturating_mul(count);
+                let buyer = self.players.get_mut(&entity).ok_or("not in world")?;
+                if buyer.wallet < cost {
+                    return Err(format!("need {cost} WILD, have {}", buyer.wallet));
+                }
+                buyer.wallet -= cost;
+                let buyer_account = buyer.character.account_id;
+                let buyer_pos = buyer.character.position;
+                let leftover = inv::add_items(&mut buyer.inventory.slots, kind, count);
+                buyer.dirty = true;
+                let _ = self.store.update_wallet(buyer_account, self.players[&entity].wallet);
+                if leftover > 0 {
+                    self.spawn_loot(buyer_pos, vec![ItemStack { kind, count: leftover }]);
+                }
+
+                // Credit the seller (minus the burn fee), online or offline.
+                let fee = cost * MARKET_FEE_PCT / 100;
+                let proceeds = cost - fee;
+                let seller_online = self
+                    .players
+                    .values_mut()
+                    .find(|p| p.character.id == seller);
+                if let Some(sp) = seller_online {
+                    sp.wallet += proceeds;
+                    let account = sp.character.account_id;
+                    let wallet = sp.wallet;
+                    let _ = self.store.update_wallet(account, wallet);
+                } else if let Ok(ch) = self.store.character(seller) {
+                    if let Ok(account) = self.store.account_by_id(ch.account_id) {
+                        let _ = self
+                            .store
+                            .update_wallet(account.id, account.wallet + proceeds);
+                    }
+                }
+                let _ = seller_name; // (transaction history is post-MVP)
+
+                let l = &mut self.market[idx];
+                l.count -= count;
+                if l.count == 0 {
+                    self.market.remove(idx);
+                }
+                self.save_market();
+                Ok(())
+            }
+            MarketAction::Cancel { listing_id } => {
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                let idx = self
+                    .market
+                    .iter()
+                    .position(|l| l.id == listing_id)
+                    .ok_or("listing gone")?;
+                if self.market[idx].seller != player.character.id {
+                    return Err("not your listing".into());
+                }
+                let listing = self.market.remove(idx);
+                let leftover =
+                    inv::add_items(&mut player.inventory.slots, listing.kind, listing.count);
+                player.dirty = true;
+                let pos = player.character.position;
+                if leftover > 0 {
+                    self.spawn_loot(pos, vec![ItemStack { kind: listing.kind, count: leftover }]);
+                }
+                self.save_market();
+                Ok(())
+            }
         }
     }
 
@@ -814,6 +1307,7 @@ impl World {
         self.tick_npcs();
         self.tick_loot();
         self.tick_nodes();
+        self.tick_production();
         self.tick_regen();
         self.update_interest();
         self.replicate();
@@ -1068,6 +1562,8 @@ impl World {
                     (EntityKind::Building, 9.0, 3.0, "Stash Terminal"),
                     (EntityKind::Refinery, 15.0, 3.0, "Refinery"),
                     (EntityKind::Factory, 21.0, 3.0, "Factory"),
+                    (EntityKind::Laboratory, 27.0, 3.0, "Laboratory"),
+                    (EntityKind::MarketTerminal, 9.0, 9.0, "Market Terminal"),
                 ];
                 for &(kind, x, z, name) in hub {
                     let entity = self.alloc_entity();

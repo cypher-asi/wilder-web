@@ -30,6 +30,23 @@ export const RECIPES: Recipe[] = [
   { id: "medkit", station: "Factory", inputs: [["BioGel", 2], ["Polymer", 1]], output: ["Medkit", 1], seconds: 6 },
 ];
 
+/** Recipes every character knows from the start (mirror of wilder-world DEFAULT_BLUEPRINTS). */
+export const DEFAULT_BLUEPRINTS = [
+  "steel_plate",
+  "copper_wire",
+  "pipe",
+  "knife",
+  "ammo_9mm",
+  "medkit",
+];
+
+/** Laboratory research cost (mirror of wilder-world RESEARCH_* constants). */
+export const RESEARCH_FRAGMENTS = 2;
+export const RESEARCH_RESOURCES: [ItemKind, number][] = [
+  ["Electronics", 5],
+  ["Chemicals", 5],
+];
+
 /** Resource node variant -> resource (mirror of wilder_economy::RESOURCES order). */
 export const NODE_RESOURCES: ItemKind[] = [
   "Iron",

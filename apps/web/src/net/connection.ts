@@ -217,6 +217,34 @@ export class GameConnection {
         }
         break;
       }
+      case "ProductionState": {
+        const production = { ...useGame.getState().production };
+        if (msg.d.jobs.length > 0) {
+          production[msg.d.building] = { jobs: msg.d.jobs, at: performance.now() };
+        } else {
+          delete production[msg.d.building];
+        }
+        ui.set({ production });
+        break;
+      }
+      case "MarketState": {
+        ui.set({ market: { listings: msg.d.listings, wallet: msg.d.wallet } });
+        break;
+      }
+      case "MarketResult": {
+        if (!msg.d.ok) {
+          ui.pushChat({
+            from: "system",
+            text: `Market: ${msg.d.error ?? "action failed"}`,
+            system: true,
+          });
+        }
+        break;
+      }
+      case "BlueprintsUpdate": {
+        ui.set({ blueprints: msg.d.known });
+        break;
+      }
       case "Error": {
         ui.pushChat({ from: "system", text: msg.d.message, system: true });
         break;

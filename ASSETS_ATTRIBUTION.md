@@ -8,6 +8,7 @@ All bundled assets are CC0 (public domain) unless noted. Thank you to these crea
 |---|---|---|
 | `assets/models/character.glb` (Rogue Hooded, rigged + animated) | [KayKit Character Pack: Adventurers](https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0) by Kay Lousberg | CC0 |
 | `assets/models/streetlight|bench|trash_A|firehydrant|dumpster|car_*|trafficlight_A|watertower|box_A|bush` (+ `.bin`, `citybits_texture.png`) | [KayKit City Builder Bits](https://github.com/KayKit-Game-Assets/KayKit-City-Builder-Bits-1.0) by Kay Lousberg | CC0 |
+| `assets/models/megakit/*` (AC unit, bollard, drain, manhole, planter, doors + shared textures, downscaled to 1K) | [Downtown City MegaKit](https://quaternius.com/packs/downtowncitymegakit.html) by Quaternius | CC0 |
 
 ## PBR Textures
 

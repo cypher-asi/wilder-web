@@ -3,6 +3,7 @@ import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes
 import { GameConnection } from "../net/connection";
 import { ItemKind } from "../net/protocol";
 import { game, useGame } from "../state/game";
+import { MapOverlay } from "./MapOverlay";
 
 export function Hud({ connection }: { connection: GameConnection }) {
   const { connected, joined, characterName, health, maxHealth, chat, inventoryOpen } =
@@ -27,13 +28,14 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ExtractHint />
           <div className="hud-hint">
             WASD move · MOUSE aim · LMB shoot · RMB move / drag look · Q/E rotate ·
-            I inventory · ENTER chat
+            M map · I inventory · ENTER chat
           </div>
           <WeaponHud />
           <Chat lines={chat} connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
+          <MapOverlay />
         </>
       )}
     </div>

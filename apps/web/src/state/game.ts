@@ -177,10 +177,13 @@ interface UiState {
   nearMarket: boolean;
   /** Market panel visibility (auto-closes when leaving the terminal). */
   marketOpen: boolean;
+  /** Fullscreen city map overlay (M key). */
+  mapOpen: boolean;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
   toggleInventory: () => void;
+  toggleMap: () => void;
 }
 
 export const useGame: import("zustand").UseBoundStore<
@@ -211,11 +214,13 @@ export const useGame: import("zustand").UseBoundStore<
   market: null,
   nearMarket: false,
   marketOpen: false,
+  mapOpen: false,
 
   set: (partial) => set(partial),
   pushChat: (line) =>
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
+  toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
 }));
 
 if (typeof window !== "undefined" && import.meta.env.DEV) {

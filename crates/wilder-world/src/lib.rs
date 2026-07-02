@@ -80,6 +80,49 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
     coord.x.abs() <= SAFE_RADIUS && coord.z.abs() <= SAFE_RADIUS
 }
 
+/// Walkable spots for the hub stations in the spawn chunk: prefer sidewalk /
+/// plaza tiles (off the road), keep spots at least 2 tiles apart, and stay
+/// close to spawn.
+fn hub_spots(chunk: &ChunkData, count: usize) -> Vec<Vec3> {
+    let spawn_tx = (SPAWN.x / TILE_SIZE) as i32;
+    let spawn_tz = (SPAWN.z / TILE_SIZE) as i32;
+    let mut candidates: Vec<(i32, usize, usize)> = Vec::new();
+    for tz in 0..TILES_PER_CHUNK {
+        for tx in 0..TILES_PER_CHUNK {
+            let kind = chunk.tile(tx, tz);
+            if !kind.walkable() {
+                continue;
+            }
+            let d = (tx as i32 - spawn_tx).abs().max((tz as i32 - spawn_tz).abs());
+            if d < 2 {
+                continue; // keep the spawn tile itself clear
+            }
+            // Prefer off-road tiles; road tiles rank behind everything else.
+            let penalty = if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
+            candidates.push((d + penalty, tx, tz));
+        }
+    }
+    candidates.sort();
+    let mut spots: Vec<(usize, usize)> = Vec::new();
+    for &(_, tx, tz) in &candidates {
+        if spots.len() >= count {
+            break;
+        }
+        if spots
+            .iter()
+            .all(|&(sx, sz)| (sx as i32 - tx as i32).abs() + (sz as i32 - tz as i32).abs() >= 2)
+        {
+            spots.push((tx, tz));
+        }
+    }
+    spots
+        .into_iter()
+        .map(|(tx, tz)| {
+            Vec3::new((tx as f32 + 0.5) * TILE_SIZE, 0.0, (tz as f32 + 0.5) * TILE_SIZE)
+        })
+        .collect()
+}
+
 /// Commands from connections into the sim.
 pub enum WorldCmd {
     Join {
@@ -1593,25 +1636,21 @@ impl World {
         if !self.static_seeded_chunks.contains(&coord) {
             self.static_seeded_chunks.insert(coord);
             if coord.x == 0 && coord.z == 0 {
-                // Hub statics: stash terminal + crafting stations along the road.
-                let hub: &[(EntityKind, f32, f32, &str)] = &[
-                    (EntityKind::Building, 9.0, 3.0, "Stash Terminal"),
-                    (EntityKind::Refinery, 15.0, 3.0, "Refinery"),
-                    (EntityKind::Factory, 21.0, 3.0, "Factory"),
-                    (EntityKind::Laboratory, 27.0, 3.0, "Laboratory"),
-                    (EntityKind::MarketTerminal, 9.0, 9.0, "Market Terminal"),
+                // Hub statics: stash terminal + crafting stations on walkable
+                // spots near spawn (positions come from the baked city map).
+                let hub: &[(EntityKind, &str)] = &[
+                    (EntityKind::Building, "Stash Terminal"),
+                    (EntityKind::Refinery, "Refinery"),
+                    (EntityKind::Factory, "Factory"),
+                    (EntityKind::Laboratory, "Laboratory"),
+                    (EntityKind::MarketTerminal, "Market Terminal"),
                 ];
-                for &(kind, x, z, name) in hub {
+                let spots = hub_spots(&self.chunks.get(coord), hub.len());
+                for (&(kind, name), pos) in hub.iter().zip(spots) {
                     let entity = self.alloc_entity();
                     self.statics.insert(
                         entity,
-                        StaticEntity {
-                            entity,
-                            kind,
-                            position: Vec3::new(x, 0.0, z),
-                            name: name.into(),
-                            variant: 0,
-                        },
+                        StaticEntity { entity, kind, position: pos, name: name.into(), variant: 0 },
                     );
                 }
             }

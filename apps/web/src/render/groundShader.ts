@@ -1,8 +1,8 @@
 // Ground shader: extends MeshStandardMaterial (so lights/shadows/fog keep
 // working) with per-tile-kind PBR texturing and world-space procedural detail:
-// cracks, oil stains, asphalt patches, puddles, sidewalk expansion joints,
-// grime, and painted road markings mirrored from the deterministic road grid
-// (roads on even chunk rows/cols, 12 m avenues every 4th chunk, 6 m streets).
+// cracks, oil stains, asphalt patches, puddles, sidewalk expansion joints, and
+// grime. Road proximity comes from the aRoadD vertex attribute (signed meters
+// to the road network, baked from the city tile grid in Ground.tsx).
 
 import * as THREE from "three";
 import { getPbrTextureSet } from "../assets/catalog";
@@ -49,7 +49,9 @@ for (const [name, p] of TEXTURE_SETS) {
 const VERT_DECLS = /* glsl */ `
 #include <common>
 attribute float aKind;
+attribute float aRoadD;
 varying float vKind;
+varying float vRoadD;
 varying vec3 vWPos;
 varying vec3 vWNormal;
 `;
@@ -59,11 +61,13 @@ const VERT_MAIN = /* glsl */ `
 vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
 vWNormal = normalize(mat3(modelMatrix) * objectNormal);
 vKind = aKind;
+vRoadD = aRoadD;
 `;
 
 const FRAG_DECLS = /* glsl */ `
 #include <common>
 varying float vKind;
+varying float vRoadD;
 varying vec3 vWPos;
 varying vec3 vWNormal;
 uniform sampler2D uAsphaltMap;
@@ -118,48 +122,6 @@ float gVoroEdge(vec2 p) {
   }
   return f2 - f1;
 }
-float gRmod(float a, float m) { return a - m * floor(a / m); }
-// Crossing roads repeat every 64 m; every other one (128 m) is a 12 m avenue.
-float gBandW(float j) { return gRmod(j, 2.0) < 0.5 ? 12.0 : 6.0; }
-// Distance along a road axis to the nearest crossing road band (0 inside it).
-float gCrossDist(float p) {
-  float j = floor(p / 64.0);
-  float dPrev = p - (64.0 * j + gBandW(j));
-  float dNext = 64.0 * (j + 1.0) - p;
-  if (dPrev < 0.0) return 0.0;
-  return min(dPrev, dNext);
-}
-// Painted markings for one road orientation: returns (white, yellow) masks.
-// along = world coord down the road, across = 0..w within the band.
-vec2 gRoadPaint(float along, float across, float w) {
-  float aa = fwidth(across) + 0.01;
-  float interD = gCrossDist(along);
-  // Dashed double yellow center line (2 m on / 1.5 m off), gap at intersections.
-  float c = w * 0.5;
-  float dash = step(gRmod(along, 3.5), 2.0) * step(4.0, interD);
-  float y1 = 1.0 - smoothstep(0.06, 0.06 + aa, abs(across - (c - 0.16)));
-  float y2 = 1.0 - smoothstep(0.06, 0.06 + aa, abs(across - (c + 0.16)));
-  float yellow = max(y1, y2) * dash;
-  // Solid white edge lines 0.25 m off each curb.
-  float e1 = 1.0 - smoothstep(0.075, 0.075 + aa, abs(across - 0.25));
-  float e2 = 1.0 - smoothstep(0.075, 0.075 + aa, abs(across - (w - 0.25)));
-  float white = max(e1, e2);
-  // Avenues: parking lane separator 2 m off each curb.
-  if (w > 9.0) {
-    float p1 = 1.0 - smoothstep(0.075, 0.075 + aa, abs(across - 2.0));
-    float p2 = 1.0 - smoothstep(0.075, 0.075 + aa, abs(across - (w - 2.0)));
-    white = max(white, max(p1, p2));
-  }
-  white *= step(0.4, interD);
-  float inSpan = step(0.3, across) * step(across, w - 0.3);
-  // Zebra crosswalk: 0.5 m stripes across the road, 0.6-3.0 m out from the box.
-  float cw = step(0.6, interD) * step(interD, 3.2) * step(gRmod(interD - 0.6, 1.0), 0.6);
-  white = max(white, cw * inSpan);
-  // Stop line just behind the crosswalk.
-  float sl = step(3.4, interD) * step(interD, 3.8);
-  white = max(white, sl * inSpan);
-  return vec2(white, yellow);
-}
 `;
 
 // Main surface computation. Declares gRgh / gWN at main() scope so the
@@ -174,31 +136,11 @@ vec2 gUV = abs(gGeoN.y) > 0.5
   ? wp.xz
   : (abs(gGeoN.x) > abs(gGeoN.z) ? vec2(wp.z, -wp.y) : vec2(wp.x, -wp.y));
 
-// Road-grid frame (mirrors wilder-terrain, rem_euclid semantics).
-float gcz = floor(wp.z / 32.0);
-float gcx = floor(wp.x / 32.0);
-bool gHRoad = gRmod(gcz, 2.0) < 0.5;
-bool gVRoad = gRmod(gcx, 2.0) < 0.5;
-float gHW = gRmod(gcz, 4.0) < 0.5 ? 12.0 : 6.0;
-float gVW = gRmod(gcx, 4.0) < 0.5 ? 12.0 : 6.0;
-float gZin = wp.z - gcz * 32.0;
-float gXin = wp.x - gcx * 32.0;
-bool gInH = gHRoad && gZin < gHW;
-bool gInV = gVRoad && gXin < gVW;
-
 // Distance to the nearest road surface (0 on roads) -> grime deep in blocks.
-float gDistRoad = min(
-  min(gHRoad ? max(gZin - gHW, 0.0) : 1e5,
-      gRmod(gcz + 1.0, 2.0) < 0.5 ? 32.0 - gZin : 1e5),
-  min(gVRoad ? max(gXin - gVW, 0.0) : 1e5,
-      gRmod(gcx + 1.0, 2.0) < 0.5 ? 32.0 - gXin : 1e5));
-if (gInH || gInV) gDistRoad = 0.0;
+float gDistRoad = max(vRoadD, 0.0);
 
 // Distance to the road edge, for fragments on the road (gutter zone).
-float gEdgeD = 1e5;
-if (gInH) gEdgeD = min(gEdgeD, min(gZin, gHW - gZin));
-if (gInV) gEdgeD = min(gEdgeD, min(gXin, gVW - gXin));
-float gNearC = 1.0 - smoothstep(0.2, 1.5, gEdgeD);
+float gNearC = 1.0 - smoothstep(0.2, 2.6, max(-vRoadD, 0.0));
 
 vec3 gAlb;
 float gRgh;
@@ -284,26 +226,6 @@ if (gKind == 0) {
   float repair = smoothstep(0.62, 0.8, gFbm(wp.xz * 0.075 + 91.2));
   gAlb = mix(gAlb, gAlb * vec3(1.3, 1.27, 1.2), repair);
   gRgh = mix(gRgh, min(gRgh + 0.3, 0.9), repair);
-}
-
-// Painted markings, worn by noise, clamped so bloom stays tame.
-if (gKind == 0) {
-  vec2 pH = gRoadPaint(wp.x, gZin, gHW);
-  vec2 pV = gRoadPaint(wp.z, gXin, gVW);
-  float mH = (gInH && !gInV) ? 1.0 : 0.0;
-  float mV = (gInV && !gInH) ? 1.0 : 0.0;
-  float white = max(pH.x * mH, pV.x * mV);
-  float yellow = max(pH.y * mH, pV.y * mV);
-  float erode = smoothstep(0.2, 0.42, gFbm(wp.xz * 1.3 + 43.0));
-  float wear = mix(0.5, 1.0, smoothstep(0.25, 0.75, gFbm(wp.xz * 0.8 + 5.0)));
-  white *= erode;
-  yellow *= erode;
-  float paintM = max(white, yellow);
-  if (paintM > 0.001) {
-    vec3 paintCol = (vec3(0.45, 0.45, 0.42) * white + vec3(0.45, 0.35, 0.1) * yellow) / paintM;
-    gAlb = mix(gAlb, paintCol * wear, paintM);
-    gRgh = mix(gRgh, gRgh * 0.6 + 0.02, paintM);
-  }
 }
 
 // Puddles: pooled in gutters and low spots; mirror-smooth, slightly dark.

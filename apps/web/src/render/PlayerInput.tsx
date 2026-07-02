@@ -48,6 +48,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         event.preventDefault();
         useGame.getState().toggleInventory();
       }
+      if (event.code === "KeyM") {
+        event.preventDefault();
+        useGame.getState().toggleMap();
+      }
       if (event.code === "Enter") {
         useGame.getState().set({ chatOpen: true });
       }

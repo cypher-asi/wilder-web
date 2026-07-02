@@ -27,6 +27,9 @@ Thumbs.db
 
 tools/screens/
 
+# City map bake source GLBs (downloaded, large)
+tools/citymap/cache/
+
 # Asset Lab content (derived / large source data)
 content/raw/
 content/imported/

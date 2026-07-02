@@ -5,6 +5,7 @@
 
 import { useMemo } from "react";
 import * as THREE from "three";
+import { CITY_ROAD, CITY_ROAD_LINE, CITY_WATER, cityTileAt } from "../game/citymap";
 import { ChunkData, TileKind, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 import { groundMaterial } from "./groundShader";
 
@@ -30,25 +31,15 @@ function isLowKind(kind: TileKind): boolean {
   return kind === "Road" || kind === "RoadLine" || kind === "Water";
 }
 
-function rem(n: number, m: number): number {
-  return ((n % m) + m) % m;
-}
-
 /**
- * Classify any world tile (global tile coords) as road or raised using the
- * deterministic road-grid math from wilder-terrain: chunks on even rows/cols
- * carry a road band on tiles [0, w), w = 6 on avenues (every 4th), else 3.
- * Everything that is not road counts as "raised" for curb purposes.
+ * Classify any world tile (global tile coords) as road-grade or raised using
+ * the baked city map (see game/citymap.ts). Water sits at road grade too.
  */
 export function tileKindAt(worldTx: number, worldTz: number): "road" | "raised" {
-  const n = TILES_PER_CHUNK;
-  const cz = Math.floor(worldTz / n);
-  const cx = Math.floor(worldTx / n);
-  const tz = worldTz - cz * n;
-  const tx = worldTx - cx * n;
-  if (rem(cz, 2) === 0 && tz < (rem(cz, 4) === 0 ? 6 : 3)) return "road";
-  if (rem(cx, 2) === 0 && tx < (rem(cx, 4) === 0 ? 6 : 3)) return "road";
-  return "raised";
+  const kind = cityTileAt(worldTx, worldTz);
+  return kind === CITY_ROAD || kind === CITY_ROAD_LINE || kind === CITY_WATER
+    ? "road"
+    : "raised";
 }
 
 /**
@@ -65,6 +56,9 @@ class GeoBuilder {
   positions: number[] = [];
   normals: number[] = [];
   kinds: number[] = [];
+  roadDs: number[] = [];
+  /** Signed road distance (m) applied to vertices emitted by tri/quad. */
+  roadD = 0;
 
   tri(a: number[], b: number[], c: number[], kind: number) {
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
@@ -78,6 +72,7 @@ class GeoBuilder {
     for (let i = 0; i < 3; i++) {
       this.normals.push(nx, ny, nz);
       this.kinds.push(kind);
+      this.roadDs.push(this.roadD);
     }
   }
 
@@ -91,8 +86,37 @@ class GeoBuilder {
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(this.positions, 3));
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(this.normals, 3));
     geometry.setAttribute("aKind", new THREE.Float32BufferAttribute(this.kinds, 1));
+    geometry.setAttribute("aRoadD", new THREE.Float32BufferAttribute(this.roadDs, 1));
     return geometry;
   }
+}
+
+/**
+ * Signed distance (meters, tile-quantized) from a tile to the road network:
+ * positive = distance to the nearest road tile (grime deep in blocks),
+ * negative = -distance to the nearest raised tile for road tiles (gutters).
+ */
+function signedRoadDistance(
+  isRoad: (tx: number, tz: number) => boolean,
+  tx: number,
+  tz: number,
+  maxR = 8,
+): number {
+  const self = isRoad(tx, tz);
+  let best = Infinity;
+  for (let r = 1; r <= maxR; r++) {
+    if (best <= r * TILE_SIZE) break;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+        if (isRoad(tx + dx, tz + dz) !== self) {
+          best = Math.min(best, Math.hypot(dx, dz) * TILE_SIZE);
+        }
+      }
+    }
+  }
+  if (best === Infinity) best = (maxR + 1) * TILE_SIZE;
+  return self ? -best : best;
 }
 
 function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
@@ -106,11 +130,21 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
     if (tx >= 0 && tx < n && tz >= 0 && tz < n) return isLowKind(chunk.tiles[tz * n + tx]);
     return tileKindAt(baseTx + tx, baseTz + tz) === "road";
   };
+  // Road membership for the distance field (in-chunk exact, neighbors baked).
+  const roadAt = (tx: number, tz: number): boolean => {
+    if (tx >= 0 && tx < n && tz >= 0 && tz < n) {
+      const k = chunk.tiles[tz * n + tx];
+      return k === "Road" || k === "RoadLine";
+    }
+    const k = cityTileAt(baseTx + tx, baseTz + tz);
+    return k === CITY_ROAD || k === CITY_ROAD_LINE;
+  };
 
   for (let tz = 0; tz < n; tz++) {
     for (let tx = 0; tx < n; tx++) {
       const tileKind = chunk.tiles[tz * n + tx];
       const kind = KIND_ID[tileKind] ?? 2;
+      g.roadD = tileKind === "Water" ? 99 : signedRoadDistance(roadAt, tx, tz);
       const x0 = tx * TILE_SIZE, x1 = x0 + TILE_SIZE;
       const z0 = tz * TILE_SIZE, z1 = z0 + TILE_SIZE;
 
@@ -229,32 +263,45 @@ interface Detail {
 }
 
 function chunkDetails(chunk: ChunkData): Detail[] {
-  const cx = chunk.coord.x;
-  const cz = chunk.coord.z;
-  const rng = chunkRng(cx, cz);
-  const size = TILES_PER_CHUNK * TILE_SIZE;
-  const hRoad = rem(cz, 2) === 0;
-  const vRoad = rem(cx, 2) === 0;
-  const hW = (rem(cz, 4) === 0 ? 6 : 3) * TILE_SIZE;
-  const vW = (rem(cx, 4) === 0 ? 6 : 3) * TILE_SIZE;
+  const n = TILES_PER_CHUNK;
+  const rng = chunkRng(chunk.coord.x, chunk.coord.z);
   const out: Detail[] = [];
+  const tile = (tx: number, tz: number): TileKind | null =>
+    tx >= 0 && tx < n && tz >= 0 && tz < n ? chunk.tiles[tz * n + tx] : null;
 
-  if (hRoad) {
-    const count = 1 + (rng() < 0.5 ? 1 : 0);
-    for (let i = 0; i < count; i++) {
-      // In a driving lane beside the center line, clear of the intersection.
-      const x = (vRoad ? vW + 2 : 1.5) + rng() * (size - (vRoad ? vW : 0) - 4);
-      out.push({ kind: "manhole", x, z: hW / 2 + (rng() < 0.5 ? -1.4 : 1.4), rot: rng() * Math.PI });
+  // Manholes on interior road tiles; storm drains on road tiles that touch a
+  // sidewalk, snapped against that curb. Sparse via rng, capped per chunk.
+  let manholes = 0;
+  let drains = 0;
+  for (let tz = 0; tz < n && (manholes < 3 || drains < 3); tz++) {
+    for (let tx = 0; tx < n; tx++) {
+      const k = tile(tx, tz);
+      if (k !== "Road" && k !== "RoadLine") continue;
+      const cxm = tile(tx - 1, tz) === "Sidewalk";
+      const cxp = tile(tx + 1, tz) === "Sidewalk";
+      const czm = tile(tx, tz - 1) === "Sidewalk";
+      const czp = tile(tx, tz + 1) === "Sidewalk";
+      const curb = cxm || cxp || czm || czp;
+      const x = (tx + 0.5) * TILE_SIZE;
+      const z = (tz + 0.5) * TILE_SIZE;
+      if (curb && drains < 3) {
+        if (rng() < 0.05) {
+          if (czm) out.push({ kind: "drain", x, z: tz * TILE_SIZE + 0.28, rot: 0 });
+          else if (czp) out.push({ kind: "drain", x, z: (tz + 1) * TILE_SIZE - 0.28, rot: 0 });
+          else if (cxm) out.push({ kind: "drain", x: tx * TILE_SIZE + 0.28, z, rot: Math.PI / 2 });
+          else out.push({ kind: "drain", x: (tx + 1) * TILE_SIZE - 0.28, z, rot: Math.PI / 2 });
+          drains++;
+        }
+      } else if (!curb && manholes < 3 && rng() < 0.03) {
+        out.push({
+          kind: "manhole",
+          x: x + (rng() - 0.5),
+          z: z + (rng() - 0.5),
+          rot: rng() * Math.PI,
+        });
+        manholes++;
+      }
     }
-    // Storm drain against the far curb, just past the intersection corner.
-    out.push({ kind: "drain", x: (vRoad ? vW : 0) + 1.4 + rng() * 2, z: hW - 0.28, rot: 0 });
-  }
-  if (vRoad) {
-    if (rng() < 0.7) {
-      const z = (hRoad ? hW + 2 : 1.5) + rng() * (size - (hRoad ? hW : 0) - 4);
-      out.push({ kind: "manhole", x: vW / 2 + (rng() < 0.5 ? -1.4 : 1.4), z, rot: rng() * Math.PI });
-    }
-    out.push({ kind: "drain", x: vW - 0.28, z: (hRoad ? hW : 0) + 1.4 + rng() * 2, rot: Math.PI / 2 });
   }
   return out;
 }

@@ -1,19 +1,20 @@
-//! Deterministic city generation.
+//! City terrain from the baked Wilder World map.
 //!
-//! A chunk's content is a pure function of (world_seed, chunk_coord), so
+//! The city layout (streets, sidewalks, plots, parks, building footprints) is
+//! rasterized offline from the map.wilderworld.com blockout GLBs into a 2 m
+//! tile grid (`tools/citymap/bake.mjs`) and embedded here as `citymap.bin`.
+//! A chunk's tiles and buildings are a pure slice of that grid; decoration
+//! props remain a deterministic function of (world_seed, chunk_coord), so
 //! unmodified chunks are never persisted and client/server always agree.
 //!
-//! City layout: a road grid with avenues every 4 chunks and streets every
-//! 2 chunks. Blocks between roads are filled with buildings, plazas, and
-//! parks. All dimensions are tile-aligned (1 tile = 2 m, 16 tiles per chunk).
-//!
-//! Real-world proportions: streets are 3 tiles (6 m), avenues 6 tiles (12 m,
-//! outermost tile on each side is a parking lane), sidewalks 2 tiles (4 m)
-//! on BOTH sides of every road, building footprints 4-6 tiles (8-12 m).
+//! Chunks outside the baked map are open water (unwalkable), which forms the
+//! natural world boundary.
 
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
+use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+use std::sync::OnceLock;
 use wilder_types::*;
 
 /// Prop archetype ids (mirrored in the client asset catalog).
@@ -30,6 +31,128 @@ pub mod props {
     pub const KIOSK: u16 = 9;
     pub const TRAFFIC_LIGHT: u16 = 10;
     pub const STOP_SIGN: u16 = 11;
+}
+
+const CITYMAP_BIN: &[u8] = include_bytes!("../assets/citymap.bin");
+
+/// The baked city: global tile grid + per-chunk building instances.
+pub struct CityMap {
+    /// World tile coordinate of grid column 0 / row 0.
+    tile_min_x: i32,
+    tile_min_z: i32,
+    width: usize,
+    height: usize,
+    /// Row-major (z-major) tile kinds.
+    tiles: Vec<TileKind>,
+    buildings: HashMap<(i32, i32), Vec<BuildingInstance>>,
+    /// Spawn point in world meters (always on a walkable road tile).
+    pub spawn: Vec3,
+}
+
+fn tile_kind_from_u8(v: u8) -> TileKind {
+    match v {
+        0 => TileKind::Road,
+        1 => TileKind::RoadLine,
+        2 => TileKind::Sidewalk,
+        3 => TileKind::Plaza,
+        4 => TileKind::Building,
+        5 => TileKind::Park,
+        _ => TileKind::Water,
+    }
+}
+
+impl CityMap {
+    fn parse(data: &[u8]) -> CityMap {
+        let mut o = 0usize;
+        let take = |o: &mut usize, n: usize| {
+            let s = &data[*o..*o + n];
+            *o += n;
+            s
+        };
+        let read_i32 = |o: &mut usize| i32::from_le_bytes(take(o, 4).try_into().unwrap());
+        let read_u32 = |o: &mut usize| u32::from_le_bytes(take(o, 4).try_into().unwrap());
+        let read_f32 = |o: &mut usize| f32::from_le_bytes(take(o, 4).try_into().unwrap());
+
+        assert_eq!(take(&mut o, 4), b"WCM1", "bad citymap.bin magic");
+        let tile_min_x = read_i32(&mut o);
+        let tile_min_z = read_i32(&mut o);
+        let width = read_u32(&mut o) as usize;
+        let height = read_u32(&mut o) as usize;
+        let spawn_x = read_f32(&mut o);
+        let spawn_z = read_f32(&mut o);
+
+        let building_count = read_u32(&mut o) as usize;
+        let mut buildings: HashMap<(i32, i32), Vec<BuildingInstance>> = HashMap::new();
+        for _ in 0..building_count {
+            let cx = read_i32(&mut o);
+            let cz = read_i32(&mut o);
+            let b = take(&mut o, 6);
+            let style = read_u32(&mut o);
+            buildings.entry((cx, cz)).or_default().push(BuildingInstance {
+                archetype: b[5] as u16,
+                tx0: b[0],
+                tz0: b[1],
+                tx1: b[2],
+                tz1: b[3],
+                stories: b[4],
+                style,
+            });
+        }
+
+        let run_count = read_u32(&mut o) as usize;
+        let mut tiles = Vec::with_capacity(width * height);
+        for _ in 0..run_count {
+            let r = take(&mut o, 3);
+            let len = u16::from_le_bytes([r[0], r[1]]) as usize;
+            let kind = tile_kind_from_u8(r[2]);
+            tiles.resize(tiles.len() + len, kind);
+        }
+        assert_eq!(tiles.len(), width * height, "citymap tile count mismatch");
+
+        CityMap {
+            tile_min_x,
+            tile_min_z,
+            width,
+            height,
+            tiles,
+            buildings,
+            spawn: Vec3::new(spawn_x, 0.0, spawn_z),
+        }
+    }
+
+    pub fn get() -> &'static CityMap {
+        static MAP: OnceLock<CityMap> = OnceLock::new();
+        MAP.get_or_init(|| CityMap::parse(CITYMAP_BIN))
+    }
+
+    /// Tile kind at a global world tile coordinate; Water outside the map.
+    pub fn tile_at(&self, wtx: i32, wtz: i32) -> TileKind {
+        let gx = wtx - self.tile_min_x;
+        let gz = wtz - self.tile_min_z;
+        if gx < 0 || gz < 0 || gx >= self.width as i32 || gz >= self.height as i32 {
+            return TileKind::Water;
+        }
+        self.tiles[gz as usize * self.width + gx as usize]
+    }
+
+    /// World-tile bounds of the baked map: (min_x, min_z, max_x, max_z), max exclusive.
+    pub fn tile_bounds(&self) -> (i32, i32, i32, i32) {
+        (
+            self.tile_min_x,
+            self.tile_min_z,
+            self.tile_min_x + self.width as i32,
+            self.tile_min_z + self.height as i32,
+        )
+    }
+}
+
+/// Stable position hash for prop spacing decisions that must agree across
+/// chunk borders (uses world tile coords, independent of the chunk grid).
+fn tile_hash(wtx: i32, wtz: i32) -> u32 {
+    let mut h = (wtx as u32).wrapping_mul(0x85eb_ca6b) ^ (wtz as u32).wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x27d4_eb2f);
+    h ^ (h >> 16)
 }
 
 pub struct TerrainGenerator {
@@ -51,276 +174,187 @@ impl TerrainGenerator {
         Pcg64Mcg::seed_from_u64(mix)
     }
 
-    /// Is there a road along the given chunk-grid line?
-    fn road_row(&self, cz: i32) -> bool {
-        cz.rem_euclid(2) == 0
-    }
-    fn road_col(&self, cx: i32) -> bool {
-        cx.rem_euclid(2) == 0
-    }
-    fn avenue_row(&self, cz: i32) -> bool {
-        cz.rem_euclid(4) == 0
-    }
-    fn avenue_col(&self, cx: i32) -> bool {
-        cx.rem_euclid(4) == 0
-    }
-
     pub fn generate(&self, coord: ChunkCoord) -> ChunkData {
-        let mut rng = self.chunk_rng(coord);
+        let map = CityMap::get();
         let n = TILES_PER_CHUNK;
-        let mut tiles = vec![TileKind::Plaza; n * n];
+        let base_tx = coord.x * n as i32;
+        let base_tz = coord.z * n as i32;
 
-        // Road layout within this chunk. Roads run along the low edges of
-        // road-rows/cols: tiles 0..road_w are road, then sidewalk.
-        let h_road = self.road_row(coord.z);
-        let v_road = self.road_col(coord.x);
-        // Streets 3 tiles (6 m), avenues 6 tiles (12 m). The outermost tile
-        // on each side of an avenue serves as a parking lane.
-        let h_w: usize = if self.avenue_row(coord.z) { 6 } else { 3 };
-        let v_w: usize = if self.avenue_col(coord.x) { 6 } else { 3 };
-        // Roads on the neighboring chunks' low edges put their far-side
-        // sidewalk band on this chunk's high edges.
-        let far_h_walk = self.road_row(coord.z + 1);
-        let far_v_walk = self.road_col(coord.x + 1);
-
+        let mut tiles = vec![TileKind::Water; n * n];
+        let mut any_land = false;
         for tz in 0..n {
             for tx in 0..n {
-                let mut kind = TileKind::Plaza;
-                let in_h = h_road && tz < h_w;
-                let in_v = v_road && tx < v_w;
-                if in_h || in_v {
-                    kind = TileKind::Road;
-                    // Center line markers on the road (visual only).
-                    if in_h && !in_v && tz == h_w / 2 && tx % 2 == 0 {
-                        kind = TileKind::RoadLine;
-                    }
-                    if in_v && !in_h && tx == v_w / 2 && tz % 2 == 0 {
-                        kind = TileKind::RoadLine;
-                    }
-                } else {
-                    // 2-tile (4 m) sidewalks flank every road on both sides:
-                    // the near band belongs to this chunk's own roads, the
-                    // far band to roads on the adjacent chunks' low edges.
-                    let near_h = h_road && tz < h_w + 2;
-                    let near_v = v_road && tx < v_w + 2;
-                    let far_h = far_h_walk && tz >= n - 2;
-                    let far_v = far_v_walk && tx >= n - 2;
-                    if near_h || near_v || far_h || far_v {
-                        kind = TileKind::Sidewalk;
-                    }
+                let kind = map.tile_at(base_tx + tx as i32, base_tz + tz as i32);
+                if kind != TileKind::Water {
+                    any_land = true;
                 }
                 tiles[tz * n + tx] = kind;
             }
         }
 
-        // Interior area available for buildings/park (between sidewalks).
-        let x0 = if v_road { v_w + 2 } else { 0 };
-        let z0 = if h_road { h_w + 2 } else { 0 };
-        let x1 = if far_v_walk { n - 2 } else { n };
-        let z1 = if far_h_walk { n - 2 } else { n };
+        let buildings = map.buildings.get(&(coord.x, coord.z)).cloned().unwrap_or_default();
 
-        let mut buildings = Vec::new();
-        let mut props = Vec::new();
+        let mut chunk = ChunkData { coord, tiles, buildings, props: Vec::new() };
+        if any_land {
+            self.decorate(&mut chunk, map, base_tx, base_tz);
+        }
+        chunk
+    }
 
-        // Occasionally a park instead of buildings (about 1 in 7 interior chunks).
-        let is_park = rng.random_ratio(1, 7);
-        if is_park {
-            for tz in z0..z1 {
-                for tx in x0..x1 {
-                    tiles[tz * n + tx] = TileKind::Park;
-                }
-            }
-            let trees = rng.random_range(4..9);
-            for _ in 0..trees {
-                let x = rng.random_range(x0 as f32 * TILE_SIZE..x1 as f32 * TILE_SIZE);
-                let z = rng.random_range(z0 as f32 * TILE_SIZE..z1 as f32 * TILE_SIZE);
-                props.push(PropInstance {
-                    archetype: props::TREE,
-                    x,
-                    z,
-                    rotation: rng.random_range(0.0..TAU),
-                });
-            }
-            for _ in 0..rng.random_range(1..3u32) {
-                let x = rng.random_range(x0 as f32 * TILE_SIZE..x1 as f32 * TILE_SIZE);
-                let z = rng.random_range(z0 as f32 * TILE_SIZE..z1 as f32 * TILE_SIZE);
-                props.push(PropInstance { archetype: props::BENCH, x, z, rotation: 0.0 });
-            }
-        } else {
-            self.place_buildings(&mut rng, &mut tiles, &mut buildings, x0, z0, x1, z1);
-        }
+    /// Deterministic street furniture derived from the baked tiles.
+    fn decorate(&self, chunk: &mut ChunkData, map: &CityMap, base_tx: i32, base_tz: i32) {
+        let n = TILES_PER_CHUNK;
+        let mut rng = self.chunk_rng(chunk.coord);
+        let at = |tx: i32, tz: i32| map.tile_at(base_tx + tx, base_tz + tz);
+        let center = |t: usize| (t as f32 + 0.5) * TILE_SIZE;
 
-        // Tiles are final past this point; props below only read them.
-        let sidewalk_at = |tx: usize, tz: usize| tiles[tz * n + tx] == TileKind::Sidewalk;
+        for tz in 0..n {
+            for tx in 0..n {
+                let kind = chunk.tiles[tz * n + tx];
+                let (itx, itz) = (tx as i32, tz as i32);
+                let wtx = base_tx + itx;
+                let wtz = base_tz + itz;
+                let h = tile_hash(wtx, wtz);
 
-        // Streetlights every 12 tiles (24 m) on both sides of every road,
-        // standing on the sidewalk 0.7 m from the curb. Rotation convention:
-        // 0.0 = arm reaches toward -z (near side of a horizontal road),
-        // PI = arm toward +z (far side), FRAC_PI_2 = arm toward -x (near
-        // side of a vertical road), FRAC_PI_2 + PI = arm toward +x.
-        if h_road {
-            let z = h_w as f32 * TILE_SIZE + 0.7;
-            for tx in (0..n).step_by(12) {
-                if sidewalk_at(tx, h_w) {
-                    let x = tx as f32 * TILE_SIZE + 1.0;
-                    props.push(PropInstance { archetype: props::STREETLIGHT, x, z, rotation: 0.0 });
-                }
-            }
-        }
-        if far_h_walk {
-            let z = n as f32 * TILE_SIZE - 0.7;
-            for tx in (0..n).step_by(12) {
-                if sidewalk_at(tx, n - 1) {
-                    let x = tx as f32 * TILE_SIZE + 1.0;
-                    props.push(PropInstance { archetype: props::STREETLIGHT, x, z, rotation: PI });
-                }
-            }
-        }
-        if v_road {
-            let x = v_w as f32 * TILE_SIZE + 0.7;
-            for tz in (0..n).step_by(12) {
-                if sidewalk_at(v_w, tz) {
-                    let z = tz as f32 * TILE_SIZE + 1.0;
-                    props.push(PropInstance {
-                        archetype: props::STREETLIGHT,
-                        x,
-                        z,
-                        rotation: FRAC_PI_2,
-                    });
-                }
-            }
-        }
-        if far_v_walk {
-            let x = n as f32 * TILE_SIZE - 0.7;
-            for tz in (0..n).step_by(12) {
-                if sidewalk_at(n - 1, tz) {
-                    let z = tz as f32 * TILE_SIZE + 1.0;
-                    props.push(PropInstance {
-                        archetype: props::STREETLIGHT,
-                        x,
-                        z,
-                        rotation: FRAC_PI_2 + PI,
-                    });
-                }
-            }
-        }
+                match kind {
+                    TileKind::Sidewalk => {
+                        // Which sides face a road? (curb tiles only)
+                        let road_xm = at(itx - 1, itz) == TileKind::Road;
+                        let road_xp = at(itx + 1, itz) == TileKind::Road;
+                        let road_zm = at(itx, itz - 1) == TileKind::Road;
+                        let road_zp = at(itx, itz + 1) == TileKind::Road;
+                        let road_sides =
+                            road_xm as u32 + road_xp as u32 + road_zm as u32 + road_zp as u32;
+                        if road_sides == 0 {
+                            continue;
+                        }
 
-        // Intersection control: one prop on each sidewalk corner this chunk
-        // owns, facing diagonally into the intersection. Traffic lights on
-        // avenue intersections, stop signs elsewhere. The four cases below
-        // are mutually exclusive (adjacent grid lines are never both roads).
-        if h_road && v_road {
-            let arch = if self.avenue_row(coord.z) || self.avenue_col(coord.x) {
-                props::TRAFFIC_LIGHT
-            } else {
-                props::STOP_SIGN
-            };
-            if sidewalk_at(v_w, h_w) {
-                props.push(PropInstance {
-                    archetype: arch,
-                    x: v_w as f32 * TILE_SIZE + 0.7,
-                    z: h_w as f32 * TILE_SIZE + 0.7,
-                    rotation: FRAC_PI_4, // faces (-x, -z)
-                });
-            }
-        } else if h_road && far_v_walk {
-            let arch = if self.avenue_row(coord.z) || self.avenue_col(coord.x + 1) {
-                props::TRAFFIC_LIGHT
-            } else {
-                props::STOP_SIGN
-            };
-            if sidewalk_at(n - 1, h_w) {
-                props.push(PropInstance {
-                    archetype: arch,
-                    x: n as f32 * TILE_SIZE - 0.7,
-                    z: h_w as f32 * TILE_SIZE + 0.7,
-                    rotation: -FRAC_PI_4, // faces (+x, -z)
-                });
-            }
-        } else if v_road && far_h_walk {
-            let arch = if self.avenue_col(coord.x) || self.avenue_row(coord.z + 1) {
-                props::TRAFFIC_LIGHT
-            } else {
-                props::STOP_SIGN
-            };
-            if sidewalk_at(v_w, n - 1) {
-                props.push(PropInstance {
-                    archetype: arch,
-                    x: v_w as f32 * TILE_SIZE + 0.7,
-                    z: n as f32 * TILE_SIZE - 0.7,
-                    rotation: PI - FRAC_PI_4, // faces (-x, +z)
-                });
-            }
-        } else if far_h_walk && far_v_walk {
-            let arch = if self.avenue_row(coord.z + 1) || self.avenue_col(coord.x + 1) {
-                props::TRAFFIC_LIGHT
-            } else {
-                props::STOP_SIGN
-            };
-            if sidewalk_at(n - 1, n - 1) {
-                props.push(PropInstance {
-                    archetype: arch,
-                    x: n as f32 * TILE_SIZE - 0.7,
-                    z: n as f32 * TILE_SIZE - 0.7,
-                    rotation: PI + FRAC_PI_4, // faces (+x, +z)
-                });
-            }
-        }
+                        // Intersection corners (roads on both axes): traffic
+                        // control facing diagonally into the crossing.
+                        if (road_xm || road_xp) && (road_zm || road_zp) {
+                            if h % 5 == 0 {
+                                let sx = if road_xm { -1.0 } else { 1.0 };
+                                let sz = if road_zm { -1.0 } else { 1.0 };
+                                let arch = if h % 10 == 0 {
+                                    props::TRAFFIC_LIGHT
+                                } else {
+                                    props::STOP_SIGN
+                                };
+                                let rotation = match (road_xm, road_zm) {
+                                    (true, true) => FRAC_PI_4,
+                                    (false, true) => -FRAC_PI_4,
+                                    (true, false) => PI - FRAC_PI_4,
+                                    (false, false) => PI + FRAC_PI_4,
+                                };
+                                chunk.props.push(PropInstance {
+                                    archetype: arch,
+                                    x: center(tx) + sx * 0.55,
+                                    z: center(tz) + sz * 0.55,
+                                    rotation,
+                                });
+                            }
+                            continue;
+                        }
 
-        // Parked cars. Avenues get 1-3 cars in their parking lanes (the
-        // outermost road tile on each side); narrow streets keep a ~2/3
-        // chance of a single car pulled up against the curb.
-        if h_road {
-            if self.avenue_row(coord.z) {
-                let count = rng.random_range(1..=3u32);
-                let mut x = if v_road { v_w as f32 * TILE_SIZE } else { 0.0 }
-                    + rng.random_range(0.5..4.0);
-                for _ in 0..count {
-                    if x > n as f32 * TILE_SIZE - 4.0 {
-                        break;
+                        // Streetlights along straight curbs, roughly every
+                        // 22 m (spacing via world-tile hash so borders agree).
+                        // Rotation: 0 = arm toward -z, PI = +z, FRAC_PI_2 = -x.
+                        if h % 11 == 0 {
+                            let (dx, dz, rotation) = if road_zm {
+                                (0.0, -0.65, 0.0)
+                            } else if road_zp {
+                                (0.0, 0.65, PI)
+                            } else if road_xm {
+                                (-0.65, 0.0, FRAC_PI_2)
+                            } else {
+                                (0.65, 0.0, FRAC_PI_2 + PI)
+                            };
+                            chunk.props.push(PropInstance {
+                                archetype: props::STREETLIGHT,
+                                x: center(tx) + dx,
+                                z: center(tz) + dz,
+                                rotation,
+                            });
+                        } else if h % 31 == 7 {
+                            // Occasional hydrant on the curb line.
+                            chunk.props.push(PropInstance {
+                                archetype: props::HYDRANT,
+                                x: center(tx),
+                                z: center(tz),
+                                rotation: rng.random_range(0.0..TAU),
+                            });
+                        }
                     }
-                    let z = if rng.random_bool(0.5) {
-                        0.5 * TILE_SIZE // low-side parking lane (tz = 0)
-                    } else {
-                        (h_w as f32 - 0.5) * TILE_SIZE // high-side lane
-                    };
-                    let rotation = if rng.random_bool(0.5) { 0.0 } else { PI };
-                    props.push(PropInstance { archetype: props::CAR, x, z, rotation });
-                    x += 5.0 + rng.random_range(1.0..6.0);
+                    TileKind::Road => {
+                        // Parked cars hug curbs: road tile with sidewalk on
+                        // exactly one side, sparse, aligned with the curb.
+                        let walk_xm = at(itx - 1, itz) == TileKind::Sidewalk;
+                        let walk_xp = at(itx + 1, itz) == TileKind::Sidewalk;
+                        let walk_zm = at(itx, itz - 1) == TileKind::Sidewalk;
+                        let walk_zp = at(itx, itz + 1) == TileKind::Sidewalk;
+                        if h % 37 != 0 {
+                            continue;
+                        }
+                        let (dx, dz, rotation) = if walk_zm {
+                            (0.0, -0.4, if h & 64 == 0 { 0.0 } else { PI })
+                        } else if walk_zp {
+                            (0.0, 0.4, if h & 64 == 0 { 0.0 } else { PI })
+                        } else if walk_xm {
+                            (-0.4, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
+                        } else if walk_xp {
+                            (0.4, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
+                        } else {
+                            continue;
+                        };
+                        chunk.props.push(PropInstance {
+                            archetype: props::CAR,
+                            x: center(tx) + dx,
+                            z: center(tz) + dz,
+                            rotation,
+                        });
+                    }
+                    TileKind::Park => {
+                        if h % 13 == 0 {
+                            chunk.props.push(PropInstance {
+                                archetype: props::TREE,
+                                x: center(tx) + rng.random_range(-0.7..0.7),
+                                z: center(tz) + rng.random_range(-0.7..0.7),
+                                rotation: rng.random_range(0.0..TAU),
+                            });
+                        } else if h % 89 == 3 {
+                            chunk.props.push(PropInstance {
+                                archetype: props::BENCH,
+                                x: center(tx),
+                                z: center(tz),
+                                rotation: rng.random_range(0.0..TAU),
+                            });
+                        }
+                    }
+                    TileKind::Plaza => {
+                        // Sparse plaza clutter: kiosks, benches, trees.
+                        if h % 61 == 0 {
+                            let arch = match h % 3 {
+                                0 => props::KIOSK,
+                                1 => props::BENCH,
+                                _ => props::TREE,
+                            };
+                            chunk.props.push(PropInstance {
+                                archetype: arch,
+                                x: center(tx),
+                                z: center(tz),
+                                rotation: rng.random_range(0.0..TAU),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-            } else if rng.random_ratio(2, 3) {
-                let tx = rng.random_range(2..n - 2);
-                props.push(PropInstance {
-                    archetype: props::CAR,
-                    x: tx as f32 * TILE_SIZE,
-                    // Inside the road, hugging the curb on the sidewalk side.
-                    z: (h_w as f32 - 0.5) * TILE_SIZE,
-                    rotation: if rng.random_bool(0.5) { 0.0 } else { PI },
-                });
-            }
-        }
-        if v_road && self.avenue_col(coord.x) {
-            let count = rng.random_range(1..=3u32);
-            let mut z =
-                if h_road { h_w as f32 * TILE_SIZE } else { 0.0 } + rng.random_range(0.5..4.0);
-            for _ in 0..count {
-                if z > n as f32 * TILE_SIZE - 4.0 {
-                    break;
-                }
-                let x = if rng.random_bool(0.5) {
-                    0.5 * TILE_SIZE // low-side parking lane (tx = 0)
-                } else {
-                    (v_w as f32 - 0.5) * TILE_SIZE // high-side lane
-                };
-                let rotation = if rng.random_bool(0.5) { FRAC_PI_2 } else { -FRAC_PI_2 };
-                props.push(PropInstance { archetype: props::CAR, x, z, rotation });
-                z += 5.0 + rng.random_range(1.0..6.0);
             }
         }
 
-        // Sidewalk clutter: scatter onto actual Sidewalk tiles only.
+        // Sidewalk clutter: a few trash bags / vents per chunk, random spots.
+        let sidewalk_at = |tx: usize, tz: usize| chunk.tiles[tz * n + tx] == TileKind::Sidewalk;
         for _ in 0..rng.random_range(0..4u32) {
-            let arch = *[props::TRASH, props::HYDRANT, props::VENT, props::KIOSK]
+            let arch = *[props::TRASH, props::VENT, props::TRASH, props::BARRIER]
                 .get(rng.random_range(0..4usize))
                 .unwrap();
             for _attempt in 0..8 {
@@ -329,7 +363,7 @@ impl TerrainGenerator {
                 let tx = (x / TILE_SIZE) as usize;
                 let tz = (z / TILE_SIZE) as usize;
                 if sidewalk_at(tx, tz) {
-                    props.push(PropInstance {
+                    chunk.props.push(PropInstance {
                         archetype: arch,
                         x,
                         z,
@@ -338,53 +372,6 @@ impl TerrainGenerator {
                     break;
                 }
             }
-        }
-
-        ChunkData { coord, tiles, buildings, props }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn place_buildings(
-        &self,
-        rng: &mut Pcg64Mcg,
-        tiles: &mut [TileKind],
-        buildings: &mut Vec<BuildingInstance>,
-        x0: usize,
-        z0: usize,
-        x1: usize,
-        z1: usize,
-    ) {
-        let n = TILES_PER_CHUNK;
-        // Greedy packing: carve the interior into 4-6 tile (8-12 m) building
-        // footprints with 1-tile alleys between them.
-        let mut tz = z0;
-        while tz + 4 <= z1 {
-            let depth = rng.random_range(4..=usize::min(6, z1 - tz));
-            let mut tx = x0;
-            while tx + 4 <= x1 {
-                let width = rng.random_range(4..=usize::min(6, x1 - tx));
-                // Skip some lots to create plazas/alleys.
-                if rng.random_ratio(5, 6) {
-                    let stories = rng.random_range(2..=8u8);
-                    let archetype = rng.random_range(0..4u16);
-                    for z in tz..(tz + depth).min(z1) {
-                        for x in tx..(tx + width).min(x1) {
-                            tiles[z * n + x] = TileKind::Building;
-                        }
-                    }
-                    buildings.push(BuildingInstance {
-                        archetype,
-                        tx0: tx as u8,
-                        tz0: tz as u8,
-                        tx1: (tx + width).min(x1) as u8,
-                        tz1: (tz + depth).min(z1) as u8,
-                        stories,
-                        style: rng.random(),
-                    });
-                }
-                tx += width + 1;
-            }
-            tz += depth + 1;
         }
     }
 }
@@ -410,53 +397,70 @@ mod tests {
     }
 
     #[test]
-    fn different_seed_differs() {
-        let a = TerrainGenerator::new(1).generate(ChunkCoord::new(1, 1));
-        let b = TerrainGenerator::new(2).generate(ChunkCoord::new(1, 1));
-        assert!(a.tiles != b.tiles || a.buildings.len() != b.buildings.len());
-    }
-
-    #[test]
-    fn roads_are_walkable_and_connected_on_grid_lines() {
+    fn spawn_is_on_walkable_road() {
+        let map = CityMap::get();
+        // wilder-world's SPAWN constant assumes the bake anchors spawn here.
+        assert_eq!(map.spawn, Vec3::new(3.0, 0.0, 3.0));
         let generator = TerrainGenerator::new(42);
-        // Chunk (0,0) sits on avenue row 0 and avenue col 0: both roads
-        // are avenues, 6 tiles (12 m) wide.
-        let chunk = generator.generate(ChunkCoord::new(0, 0));
-        assert!(chunk.tile(0, 0).walkable());
-        for tx in 0..TILES_PER_CHUNK {
-            for tz in 0..6 {
-                assert!(
-                    matches!(chunk.tile(tx, tz), TileKind::Road | TileKind::RoadLine),
-                    "expected avenue road at {tx},{tz}"
-                );
-                assert!(chunk.tile(tx, tz).walkable(), "road blocked at {tx},{tz}");
+        let coord = ChunkCoord::from_world(map.spawn);
+        let chunk = generator.generate(coord);
+        let tx = ((map.spawn.x - coord.x as f32 * CHUNK_SIZE) / TILE_SIZE) as usize;
+        let tz = ((map.spawn.z - coord.z as f32 * CHUNK_SIZE) / TILE_SIZE) as usize;
+        assert!(matches!(chunk.tile(tx, tz), TileKind::Road | TileKind::RoadLine));
+        // A 5x5 neighborhood around spawn is walkable (guaranteed by the bake).
+        for dz in -2i32..=2 {
+            for dx in -2i32..=2 {
+                let kind =
+                    map.tile_at((map.spawn.x / TILE_SIZE) as i32 + dx, (map.spawn.z / TILE_SIZE) as i32 + dz);
+                assert!(kind.walkable(), "unwalkable tile at spawn offset ({dx},{dz})");
             }
         }
-        // A 2-tile sidewalk band follows the horizontal avenue.
-        for tx in 6..TILES_PER_CHUNK {
-            assert_eq!(chunk.tile(tx, 6), TileKind::Sidewalk);
-            assert_eq!(chunk.tile(tx, 7), TileKind::Sidewalk);
-        }
     }
 
     #[test]
-    fn sidewalks_on_both_sides_of_roads() {
+    fn outside_map_is_water() {
         let generator = TerrainGenerator::new(42);
-        // Chunk (0,1) has no horizontal road of its own, but road_row(2)
-        // runs along its high edge, so its far-side sidewalk band occupies
-        // tz = 14,15 (except where the vertical avenue passes through).
-        let chunk = generator.generate(ChunkCoord::new(0, 1));
-        for tx in 6..TILES_PER_CHUNK {
-            assert_eq!(chunk.tile(tx, 14), TileKind::Sidewalk, "no far sidewalk at {tx},14");
-            assert_eq!(chunk.tile(tx, 15), TileKind::Sidewalk, "no far sidewalk at {tx},15");
+        let chunk = generator.generate(ChunkCoord::new(100_000, 100_000));
+        assert!(chunk.tiles.iter().all(|t| *t == TileKind::Water));
+        assert!(chunk.buildings.is_empty());
+        assert!(chunk.props.is_empty());
+    }
+
+    #[test]
+    fn buildings_match_building_tiles() {
+        // Every baked building rect must sit on Building tiles, and the rect
+        // coordinates must be inside the chunk.
+        let map = CityMap::get();
+        let generator = TerrainGenerator::new(7);
+        let coord = ChunkCoord::from_world(map.spawn);
+        for cz in coord.z - 3..coord.z + 4 {
+            for cx in coord.x - 3..coord.x + 4 {
+                let chunk = generator.generate(ChunkCoord::new(cx, cz));
+                for b in &chunk.buildings {
+                    assert!(b.tx0 < b.tx1 && b.tz0 < b.tz1);
+                    assert!((b.tx1 as usize) <= TILES_PER_CHUNK);
+                    assert!((b.tz1 as usize) <= TILES_PER_CHUNK);
+                    for tz in b.tz0..b.tz1 {
+                        for tx in b.tx0..b.tx1 {
+                            assert_eq!(
+                                chunk.tile(tx as usize, tz as usize),
+                                TileKind::Building,
+                                "building rect off Building tiles in ({cx},{cz})"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
     #[test]
     fn fixed_props_never_on_road_tiles() {
+        let map = CityMap::get();
         let generator = TerrainGenerator::new(7);
-        for cz in -4..5 {
-            for cx in -4..5 {
+        let coord = ChunkCoord::from_world(map.spawn);
+        for cz in coord.z - 4..coord.z + 5 {
+            for cx in coord.x - 4..coord.x + 5 {
                 let chunk = generator.generate(ChunkCoord::new(cx, cz));
                 for p in &chunk.props {
                     let fixed = matches!(

@@ -88,15 +88,15 @@ if (zoomSteps !== 0) {
 }
 
 if (tilt !== 0) {
-  // Hold RMB and drag vertically; keep the button held through the screenshot
-  // since the tilt eases back to the fixed pitch on release.
+  // RMB-drag vertically to tilt; the camera keeps the tilt after release.
   await page.mouse.move(800, 450);
   await page.mouse.down({ button: "right" });
   for (let i = 1; i <= 12; i++) {
     await page.mouse.move(800, 450 + (tilt * i) / 12);
     await new Promise((r) => setTimeout(r, 30));
   }
-  await new Promise((r) => setTimeout(r, 600));
+  await page.mouse.up({ button: "right" });
+  await new Promise((r) => setTimeout(r, 800));
 }
 
 if (walk) {

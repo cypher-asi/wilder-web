@@ -1,10 +1,10 @@
-// Ascent-style follow camera: fixed high pitch, pulled back so the character
-// stays small against the environment. The mouse is reserved for aiming, so
-// the resting camera only changes with Q/E (yaw) and wheel (zoom).
+// Ascent-style follow camera: high default pitch, pulled back so the character
+// stays small against the environment. The resting camera changes with Q/E
+// (yaw), wheel (zoom), and RMB drag (orbit/tilt, which persists).
 // Holding right-click and dragging orbits the view: horizontal drag rotates
-// around the player, vertical drag tilts up/down. On release the camera
-// eases back to the fixed framing. (A quick RMB tap without dragging is
-// still click-to-move, handled in PlayerInput.)
+// around the player, vertical drag tilts up/down. Both stay where you leave
+// them on release. (A quick RMB tap without dragging is still click-to-move,
+// handled in PlayerInput.)
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -16,8 +16,6 @@ export const cameraState = {
   distance: 34,
   minDistance: 20,
   maxDistance: 120,
-  /** Temporary RMB-drag orbit offset, eases back to 0 on release. */
-  yawOffset: 0,
 };
 
 /** Fog density at the default zoom; thinned as the camera pulls back. */
@@ -29,8 +27,6 @@ const PITCH_FAR = THREE.MathUtils.degToRad(62);
 /** Total pitch band while RMB-dragging; the low end is near-horizontal. */
 const PITCH_MIN = THREE.MathUtils.degToRad(5);
 const PITCH_MAX = THREE.MathUtils.degToRad(80);
-/** How fast the drag offsets ease back once RMB is released. */
-const RETURN_RATE = 4;
 
 export function CameraRig() {
   const { camera, gl, scene } = useThree();
@@ -71,8 +67,8 @@ export function CameraRig() {
       const dx = event.clientX - lastPointer.current.x;
       const dy = event.clientY - lastPointer.current.y;
       lastPointer.current = { x: event.clientX, y: event.clientY };
-      // Horizontal drag orbits around the player.
-      cameraState.yawOffset += dx * 0.005;
+      // Horizontal drag orbits around the player and persists on release.
+      cameraState.yaw += dx * 0.005;
       // Vertical drag tilts; clamp so the total pitch stays in the band.
       const zoomFrac =
         (cameraState.distance - cameraState.minDistance) /
@@ -113,13 +109,6 @@ export function CameraRig() {
     if (keys.current.q) cameraState.yaw += dt * 1.8;
     if (keys.current.e) cameraState.yaw -= dt * 1.8;
 
-    // Once the drag ends, ease the orbit offsets back to the fixed framing.
-    if (!dragging.current) {
-      const decay = Math.max(0, 1 - dt * RETURN_RATE);
-      cameraState.yawOffset *= decay;
-      pitchOffset.current *= decay;
-    }
-
     const player = game.entities.get(game.localEntityId);
     const tx = player ? player.x : game.predicted.x;
     const tz = player ? player.z : game.predicted.z;
@@ -142,7 +131,7 @@ export function CameraRig() {
       PITCH_MIN,
       PITCH_MAX,
     );
-    const yaw = cameraState.yaw + cameraState.yawOffset;
+    const yaw = cameraState.yaw;
 
     const horizontal = Math.cos(pitch) * cameraState.distance;
     const height = Math.sin(pitch) * cameraState.distance;

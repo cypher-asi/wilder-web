@@ -15,6 +15,7 @@ function argValue(flag) {
 
 const zoomSteps = Number(argValue("--zoom") ?? 0);
 const tilt = Number(argValue("--tilt") ?? 0); // RMB-drag dy in px (negative = tilt camera lower)
+const pan = Number(argValue("--pan") ?? 0); // RMB-drag dx in px (orbits left/right)
 const walk = argValue("--walk");
 const tp = argValue("--tp"); // "x,z" dev teleport via chat
 
@@ -87,12 +88,12 @@ if (zoomSteps !== 0) {
   await new Promise((r) => setTimeout(r, 1200));
 }
 
-if (tilt !== 0) {
-  // RMB-drag vertically to tilt; the camera keeps the tilt after release.
+if (tilt !== 0 || pan !== 0) {
+  // RMB-drag to orbit/tilt; the camera keeps the angle after release.
   await page.mouse.move(800, 450);
   await page.mouse.down({ button: "right" });
   for (let i = 1; i <= 12; i++) {
-    await page.mouse.move(800, 450 + (tilt * i) / 12);
+    await page.mouse.move(800 + (pan * i) / 12, 450 + (tilt * i) / 12);
     await new Promise((r) => setTimeout(r, 30));
   }
   await page.mouse.up({ button: "right" });

@@ -3,11 +3,19 @@
 // deterministic street furniture (manholes, storm drains). Surface detail
 // (textures, markings, puddles, cracks) lives in the ground shader (ground.ts).
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
-import { CITY_ROAD, CITY_ROAD_LINE, CITY_WATER, cityTileAt } from "../game/citymap";
+import {
+  CITY_ROAD,
+  CITY_ROAD_LINE,
+  CITY_WATER,
+  cityMapReady,
+  cityTileAt,
+  onCityMapReady,
+} from "../game/citymap";
 import { ChunkData, TileKind, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 import { groundMaterial } from "./groundShader";
+import { buildRoadMarkings, markingsMaterial } from "./roadMarkings";
 
 /** Height of the raised sidewalk/plaza slab above road grade. */
 const CURB_H = 0.14;
@@ -311,17 +319,18 @@ function RoadDetails({ chunk }: { chunk: ChunkData }) {
   return (
     <>
       {details.map((d, i) =>
+        // Kept above the painted road markings layer (y = 0.012).
         d.kind === "manhole" ? (
           <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
-            <mesh geometry={manholeGeo} material={manholeCover} position={[0, 0.006, 0]} />
-            <mesh geometry={manholeRimGeo} material={manholeRim} position={[0, 0.005, 0]} />
+            <mesh geometry={manholeGeo} material={manholeCover} position={[0, 0.016, 0]} />
+            <mesh geometry={manholeRimGeo} material={manholeRim} position={[0, 0.015, 0]} />
           </group>
         ) : (
           <mesh
             key={i}
             geometry={drainGeo}
             material={drainGrate}
-            position={[d.x, 0.008, d.z]}
+            position={[d.x, 0.018, d.z]}
             rotation={[0, d.rot, 0]}
           />
         ),
@@ -331,10 +340,19 @@ function RoadDetails({ chunk }: { chunk: ChunkData }) {
 }
 
 export function ChunkGround({ chunk }: { chunk: ChunkData }) {
-  const geometry = useMemo(() => buildGroundGeometry(chunk), [chunk]);
+  // Curbs and markings query the global city grid for out-of-chunk neighbors;
+  // rebuild once it finishes its async load if this chunk mounted first.
+  const [mapReady, setMapReady] = useState(cityMapReady());
+  useEffect(() => onCityMapReady(() => setMapReady(true)), []);
+  const geometry = useMemo(() => buildGroundGeometry(chunk), [chunk, mapReady]);
+  const markings = useMemo(
+    () => (mapReady ? buildRoadMarkings(chunk) : null),
+    [chunk, mapReady],
+  );
   return (
     <>
       <mesh geometry={geometry} material={groundMaterial} receiveShadow />
+      {markings && <mesh geometry={markings} material={markingsMaterial} receiveShadow />}
       <RoadDetails chunk={chunk} />
     </>
   );

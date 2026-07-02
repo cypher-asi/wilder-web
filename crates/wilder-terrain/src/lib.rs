@@ -286,8 +286,14 @@ impl TerrainGenerator {
                         }
                     }
                     TileKind::Road => {
-                        // Parked cars hug curbs: road tile with sidewalk on
-                        // exactly one side, sparse, aligned with the curb.
+                        // Parked cars in the curbside parking lane: road tile
+                        // with sidewalk on exactly one side, sparse, aligned
+                        // with the curb. The curb tile center sits 1.0 m from
+                        // the curb face; a parking lane is 2.4 m wide, so the
+                        // car center goes 1.2 m off the curb face (0.2 m from
+                        // tile center, away from the sidewalk) to keep the
+                        // 1.9 m body clear of both the sidewalk and the
+                        // outermost lane line.
                         let walk_xm = at(itx - 1, itz) == TileKind::Sidewalk;
                         let walk_xp = at(itx + 1, itz) == TileKind::Sidewalk;
                         let walk_zm = at(itx, itz - 1) == TileKind::Sidewalk;
@@ -296,13 +302,13 @@ impl TerrainGenerator {
                             continue;
                         }
                         let (dx, dz, rotation) = if walk_zm {
-                            (0.0, -0.4, if h & 64 == 0 { 0.0 } else { PI })
+                            (0.0, 0.2, if h & 64 == 0 { 0.0 } else { PI })
                         } else if walk_zp {
-                            (0.0, 0.4, if h & 64 == 0 { 0.0 } else { PI })
+                            (0.0, -0.2, if h & 64 == 0 { 0.0 } else { PI })
                         } else if walk_xm {
-                            (-0.4, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
+                            (0.2, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
                         } else if walk_xp {
-                            (0.4, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
+                            (-0.2, 0.0, if h & 64 == 0 { FRAC_PI_2 } else { -FRAC_PI_2 })
                         } else {
                             continue;
                         };

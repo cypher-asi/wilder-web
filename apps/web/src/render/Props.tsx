@@ -5,6 +5,7 @@ import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
+import { CAR_LENGTH } from "../game/scale";
 import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
 import { mulberry, NEON_COLORS } from "./facade";
 import { groundHeightAt } from "./Ground";
@@ -376,7 +377,7 @@ const PROP_TARGETS: Record<number, { size: number; axis: "height" | "length" }> 
   [TRASH]: { size: 1.1, axis: "height" },
   [HYDRANT]: { size: 0.75, axis: "height" },
   [VENT]: { size: 1.3, axis: "height" }, // dumpster model
-  [CAR]: { size: 4.5, axis: "length" },
+  [CAR]: { size: CAR_LENGTH, axis: "length" },
   [KIOSK]: { size: 2.4, axis: "height" },
   [TRAFFIC_LIGHT]: { size: 5.2, axis: "height" },
 };

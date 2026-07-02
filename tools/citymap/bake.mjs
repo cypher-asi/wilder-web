@@ -140,6 +140,8 @@ const grid = new Uint8Array(W * H).fill(WATER);
 // Rasterization
 // ---------------------------------------------------------------------------
 
+const SUBSAMPLES = [[0.27, 0.27], [0.73, 0.27], [0.27, 0.73], [0.73, 0.73]];
+
 /**
  * Rasterize triangles into `grid` with kind `kind`.
  * mode "any": tile is hit if any of 4 subsamples falls inside a triangle.
@@ -148,7 +150,7 @@ const grid = new Uint8Array(W * H).fill(WATER);
  * hits: optional Set collecting hit tile indices (for building footprints).
  */
 function rasterize(tris, kind, mode = "any", filter = null, hits = null) {
-  const offs = mode === "center" ? [[0.5, 0.5]] : [[0.27, 0.27], [0.73, 0.27], [0.27, 0.73], [0.73, 0.73]];
+  const offs = mode === "center" ? [[0.5, 0.5]] : SUBSAMPLES;
   for (const t of tris) {
     if (filter && !filter(t)) continue;
     const ax = t[0], ay = t[1], bx = t[3], by = t[4], cx = t[6], cy = t[7];
@@ -186,17 +188,81 @@ function rasterize(tris, kind, mode = "any", filter = null, hits = null) {
   }
 }
 
+/**
+ * Per-subsample coverage mask (bit s set = subsample s inside some triangle).
+ * Used for the ground-fabric layers so each tile can be assigned by majority
+ * coverage instead of "last rasterized layer that touches the tile wins",
+ * which dilated streets by up to a tile per side into sidewalks.
+ */
+function rasterizeMask(tris, mask, filter = null) {
+  for (const t of tris) {
+    if (filter && !filter(t)) continue;
+    const ax = t[0], ay = t[1], bx = t[3], by = t[4], cx = t[6], cy = t[7];
+    const tminX = Math.min(ax, bx, cx), tmaxX = Math.max(ax, bx, cx);
+    const tminY = Math.min(ay, by, cy), tmaxY = Math.max(ay, by, cy);
+    const gx0 = Math.max(0, Math.floor(tminX / TILE) - gminX);
+    const gx1 = Math.min(W - 1, Math.floor(tmaxX / TILE) - gminX);
+    const gy0 = Math.max(0, Math.floor(tminY / TILE) - gminY);
+    const gy1 = Math.min(H - 1, Math.floor(tmaxY / TILE) - gminY);
+    if (gx1 < gx0 || gy1 < gy0) continue;
+    const d = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (d === 0) continue;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const i = gy * W + gx;
+        let m = mask[i];
+        if (m === 0b1111) continue;
+        for (let s = 0; s < 4; s++) {
+          if (m & (1 << s)) continue;
+          const px = (gminX + gx + SUBSAMPLES[s][0]) * TILE;
+          const py = (gminY + gy + SUBSAMPLES[s][1]) * TILE;
+          const w0 = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+          const w1 = (cx - bx) * (py - by) - (cy - by) * (px - bx);
+          const w2 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx);
+          if (d > 0 ? w0 >= 0 && w1 >= 0 && w2 >= 0 : w0 <= 0 && w1 <= 0 && w2 <= 0) {
+            m |= 1 << s;
+          }
+        }
+        mask[i] = m;
+      }
+    }
+  }
+}
+
+const POPCOUNT4 = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+
 // Land above sea level becomes park; underwater terrain stays water.
 const aboveSea = (t) => (t[2] + t[5] + t[8]) / 3 > -0.5;
 
+// Coverage masks per ground-fabric layer, then majority vote per tile. Ties
+// favor the most specific/walkable kind: street > sidewalk > plaza > park.
+const streetMask = new Uint8Array(W * H);
+const sidewalkMask = new Uint8Array(W * H);
+const plazaMask = new Uint8Array(W * H);
+const parkMask = new Uint8Array(W * H);
 console.log("Rasterizing land ...");
-rasterize(layers.Land, PARK, "any", aboveSea);
+rasterizeMask(layers.Land, parkMask, aboveSea);
 console.log("Rasterizing plots ...");
-rasterize(layers.Plot, PLAZA);
+rasterizeMask(layers.Plot, plazaMask);
 console.log("Rasterizing sidewalks ...");
-rasterize(layers.Sidewalk, SIDEWALK);
+rasterizeMask(layers.Sidewalk, sidewalkMask);
 console.log("Rasterizing streets ...");
-rasterize(layers.Street, ROAD);
+rasterizeMask(layers.Street, streetMask);
+console.log("Assigning tiles by majority coverage ...");
+for (let i = 0; i < grid.length; i++) {
+  // Priority order breaks ties (>=), so equal coverage goes to the street.
+  let kind = WATER;
+  let best = 0;
+  const park = POPCOUNT4[parkMask[i]];
+  if (park > best) { best = park; kind = PARK; }
+  const plaza = POPCOUNT4[plazaMask[i]];
+  if (plaza >= best && plaza > 0) { best = plaza; kind = PLAZA; }
+  const sidewalk = POPCOUNT4[sidewalkMask[i]];
+  if (sidewalk >= best && sidewalk > 0) { best = sidewalk; kind = SIDEWALK; }
+  const street = POPCOUNT4[streetMask[i]];
+  if (street >= best && street > 0) { kind = ROAD; }
+  grid[i] = kind;
+}
 
 // ---------------------------------------------------------------------------
 // Buildings

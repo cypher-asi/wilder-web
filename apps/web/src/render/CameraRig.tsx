@@ -11,11 +11,14 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { game } from "../state/game";
 
+// Wiami streets are boulevard-scale (17-37 m curb to curb), so the resting
+// distance is pulled back far enough that a full road plus both sidewalks and
+// building faces fit the frame instead of one asphalt plane filling it.
 export const cameraState = {
   yaw: Math.PI / 4,
-  distance: 34,
+  distance: 48,
   minDistance: 20,
-  maxDistance: 120,
+  maxDistance: 140,
 };
 
 /** Fog density at the default zoom; thinned as the camera pulls back. */

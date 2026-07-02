@@ -4,9 +4,10 @@
 import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
-import { ChunkData, PropInstance } from "../net/protocol";
+import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
 import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
 import { mulberry, NEON_COLORS } from "./facade";
+import { groundHeightAt } from "./Ground";
 
 // Archetype ids from wilder-terrain.
 export const STREETLIGHT = 0;
@@ -313,7 +314,7 @@ const PROP_TARGETS: Record<number, { size: number; axis: "height" | "length" }> 
   [TRAFFIC_LIGHT]: { size: 5.2, axis: "height" },
 };
 
-export function PropMesh({ prop }: { prop: PropInstance; chunk?: ChunkData }) {
+export function PropMesh({ prop, chunk }: { prop: PropInstance; chunk?: ChunkData }) {
   const assetId =
     prop.archetype === CAR
       ? CAR_MODELS[Math.abs(Math.floor(prop.x * 7 + prop.z * 13)) % CAR_MODELS.length]
@@ -334,8 +335,14 @@ export function PropMesh({ prop }: { prop: PropInstance; chunk?: ChunkData }) {
     return { scale, yOffset: -model.minY * scale };
   }, [model, prop.archetype]);
 
+  // Stand on the visual ground surface (raised sidewalk vs road grade). The
+  // parent group sits at the chunk origin, so prop.x/z are chunk-local.
+  const groundY = chunk
+    ? groundHeightAt(chunk.coord.x * CHUNK_SIZE + prop.x, chunk.coord.z * CHUNK_SIZE + prop.z)
+    : 0;
+
   return (
-    <group position={[prop.x, 0, prop.z]} rotation={[0, prop.rotation, 0]}>
+    <group position={[prop.x, groundY, prop.z]} rotation={[0, prop.rotation, 0]}>
       {model ? (
         <primitive object={model.scene} scale={scale} position={[0, yOffset, 0]} />
       ) : (

@@ -5,7 +5,15 @@
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { stepMove } from "../game/collision";
+import {
+  CROUCH_SPEED,
+  ROLL_COOLDOWN,
+  ROLL_DURATION,
+  ROLL_SPEED,
+  RUN_SPEED,
+  stepMoveSpeed,
+  WALK_SPEED,
+} from "../game/collision";
 import { GameConnection } from "../net/connection";
 import { game, useGame } from "../state/game";
 import { cameraState } from "./CameraRig";
@@ -22,9 +30,21 @@ const WEAPON_COOLDOWN: Record<string, number> = {
 };
 const FIST_COOLDOWN = 0.8;
 
+/** Seconds LMB takes to draw the gun before the first shot can fire. */
+const DRAW_TIME = 0.25;
+/** Seconds without shooting before the gun is holstered again. */
+const HOLSTER_AFTER = 5.0;
+
+const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
+
 export function equippedCooldown(): number {
   const weapon = useGame.getState().inventory?.equipped_weapon;
   return (weapon && WEAPON_COOLDOWN[weapon]) || FIST_COOLDOWN;
+}
+
+function hasRangedWeapon(): boolean {
+  const weapon = useGame.getState().inventory?.equipped_weapon;
+  return weapon != null && RANGED_WEAPONS.has(weapon);
 }
 
 export function PlayerInput({ connection }: { connection: GameConnection }) {
@@ -55,17 +75,13 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "Enter") {
         useGame.getState().set({ chatOpen: true });
       }
-      if (event.code === "Space") {
+      if (event.code === "Space" && !event.repeat) {
         event.preventDefault();
-        // Attack toward the aim point (fallback to facing).
-        const seq = game.nextSeq++;
-        const tx = game.aim.active
-          ? game.aim.x
-          : game.predicted.x + Math.cos(game.predicted.yaw) * 3;
-        const tz = game.aim.active
-          ? game.aim.z
-          : game.predicted.z + Math.sin(game.predicted.yaw) * 3;
-        connection.send({ t: "Attack", d: { seq, tx, tz } });
+        startRoll();
+      }
+      if (event.code === "KeyC" && !event.repeat) {
+        event.preventDefault();
+        toggleCrouch();
       }
     };
     const up = (event: KeyboardEvent) => {
@@ -79,7 +95,16 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     };
     const onPointerLeave = () => (pointer.current.inside = false);
     const onPointerDown = (event: PointerEvent) => {
-      if (event.button === 0) firing.current = true;
+      if (event.button !== 0) return;
+      const now = performance.now();
+      if (!game.gun.drawn) {
+        // First click draws the weapon; shooting starts on the next click
+        // (or by holding once the draw finishes).
+        game.gun.drawn = true;
+        game.gun.readyAt = now + DRAW_TIME * 1000;
+        game.gun.lastShotAt = now; // baseline for the auto-holster timer
+      }
+      firing.current = true;
     };
     const onPointerUp = (event: PointerEvent) => {
       if (event.button === 0) firing.current = false;
@@ -110,15 +135,66 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     game.moveMarker = { x, z, at: performance.now() };
   }
 
+  /** Current WASD direction in world space, or null when no key is held. */
+  function moveDirection(): [number, number] | null {
+    const k = keys.current;
+    let ix = 0;
+    let iz = 0;
+    if (k.KeyW || k.ArrowUp) iz -= 1;
+    if (k.KeyS || k.ArrowDown) iz += 1;
+    if (k.KeyA || k.ArrowLeft) ix -= 1;
+    if (k.KeyD || k.ArrowRight) ix += 1;
+    if (ix === 0 && iz === 0) return null;
+    // Camera-relative: forward = away from camera on XZ.
+    const yaw = cameraState.yaw;
+    const fx = -Math.cos(yaw);
+    const fz = -Math.sin(yaw);
+    const rx = -fz;
+    const rz = fx;
+    let dx = fx * -iz + rx * ix;
+    let dz = fz * -iz + rz * ix;
+    const len = Math.hypot(dx, dz);
+    return [dx / len, dz / len];
+  }
+
+  /** Space: dodge roll along the movement direction (fallback: facing). */
+  function startRoll() {
+    const now = performance.now();
+    if (game.roll || now < game.rollReadyAt || game.localEntityId === 0) return;
+    const dir = moveDirection();
+    const yaw = game.aim.active ? game.aim.yaw : game.predicted.yaw;
+    const [dx, dz] = dir ?? [Math.cos(yaw), Math.sin(yaw)];
+    if (game.crouching) toggleCrouch();
+    game.roll = { until: now + ROLL_DURATION * 1000, dx, dz };
+    game.rollReadyAt = now + ROLL_COOLDOWN * 1000;
+    const seq = game.nextSeq++;
+    connection.send({ t: "Roll", d: { seq, dx, dz } });
+  }
+
+  function toggleCrouch() {
+    if (game.roll || game.localEntityId === 0) return;
+    game.crouching = !game.crouching;
+    connection.send({ t: "SetCrouch", d: { on: game.crouching } });
+  }
+
   useFrame((_, dt) => {
     updateAim();
     updateFire();
+    updateHolster();
     accumulator.current += dt;
     while (accumulator.current >= TICK_DT) {
       accumulator.current -= TICK_DT;
       stepInput();
     }
   });
+
+  /** Put the gun away after a few seconds without shooting. */
+  function updateHolster() {
+    if (!game.gun.drawn || firing.current) return;
+    if (performance.now() - game.gun.lastShotAt > HOLSTER_AFTER * 1000) {
+      game.gun.drawn = false;
+    }
+  }
 
   /** Project the cursor onto the ground plane at the player's elevation. */
   function updateAim() {
@@ -145,61 +221,78 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     game.aim.active = true;
   }
 
-  /** Hold-to-fire at the equipped weapon's rate, aimed at the cursor. */
+  /**
+   * Hold-to-fire at the equipped weapon's rate, aimed at the cursor. Only
+   * shoots once the weapon is drawn (first click) and the draw finished.
+   */
   function updateFire() {
     if (!firing.current || !game.aim.active) return;
     const now = performance.now();
+    if (!game.gun.drawn || now < game.gun.readyAt) return;
+    if (game.roll) return; // no shooting mid-roll
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
     lastShotAt.current = now;
+    game.gun.lastShotAt = now;
     const seq = game.nextSeq++;
     connection.send({ t: "Attack", d: { seq, tx: game.aim.x, tz: game.aim.z } });
   }
 
   function stepInput() {
+    const now = performance.now();
+
+    // Active dodge roll: predict the server's dash locally; the server drains
+    // (and acks) any queued MoveInputs without applying them, so we don't
+    // send movement while rolling.
+    if (game.roll) {
+      if (now >= game.roll.until) {
+        game.roll = null;
+      } else {
+        const [nx, nz] = stepMoveSpeed(
+          game.chunks,
+          game.predicted.x,
+          game.predicted.z,
+          game.roll.dx,
+          game.roll.dz,
+          ROLL_SPEED,
+          TICK_DT,
+        );
+        game.predicted.x = nx;
+        game.predicted.z = nz;
+        game.predicted.yaw = Math.atan2(game.roll.dz, game.roll.dx);
+        game.lastDirectInputAt = now;
+        game.moveMarker = null;
+        return;
+      }
+    }
+
     const k = keys.current;
-    let ix = 0;
-    let iz = 0;
-    if (k.KeyW || k.ArrowUp) iz -= 1;
-    if (k.KeyS || k.ArrowDown) iz += 1;
-    if (k.KeyA || k.ArrowLeft) ix -= 1;
-    if (k.KeyD || k.ArrowRight) ix += 1;
-    if (ix === 0 && iz === 0) return;
+    const dir = moveDirection();
+    if (!dir) return;
+    const [dx, dz] = dir;
 
     const run = !k.ShiftLeft && !k.ShiftRight; // run by default, shift walks
-
-    // Camera-relative: forward = away from camera on XZ (including any
-    // temporary RMB-drag orbit so controls match what's on screen).
-    const yaw = cameraState.yaw + cameraState.yawOffset;
-    const fx = -Math.cos(yaw);
-    const fz = -Math.sin(yaw);
-    const rx = -fz;
-    const rz = fx;
-    let dx = fx * -iz + rx * ix;
-    let dz = fz * -iz + rz * ix;
-    const len = Math.hypot(dx, dz);
-    dx /= len;
-    dz /= len;
+    const speed = game.crouching ? CROUCH_SPEED : run ? RUN_SPEED : WALK_SPEED;
 
     const seq = game.nextSeq++;
     connection.send({ t: "MoveInput", d: { seq, dx, dz, run } });
-    game.pendingInputs.push({ seq, dx, dz, run, dt: TICK_DT });
+    game.pendingInputs.push({ seq, dx, dz, speed, dt: TICK_DT });
     if (game.pendingInputs.length > 120) game.pendingInputs.shift();
 
     // Predict locally with identical rules.
-    const [nx, nz] = stepMove(
+    const [nx, nz] = stepMoveSpeed(
       game.chunks,
       game.predicted.x,
       game.predicted.z,
       dx,
       dz,
-      run,
+      speed,
       TICK_DT,
     );
     game.predicted.x = nx;
     game.predicted.z = nz;
     // Facing follows the aim (twin-stick); fall back to move direction.
     game.predicted.yaw = game.aim.active ? game.aim.yaw : Math.atan2(dz, dx);
-    game.lastDirectInputAt = performance.now();
+    game.lastDirectInputAt = now;
     game.moveMarker = null;
   }
 

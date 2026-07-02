@@ -3,7 +3,7 @@
 
 import { useMemo } from "react";
 import * as THREE from "three";
-import { PropInstance } from "../net/protocol";
+import { ChunkData, PropInstance } from "../net/protocol";
 import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
 import { mulberry, NEON_COLORS } from "./facade";
 
@@ -235,7 +235,7 @@ const PROP_TARGETS: Record<number, { size: number; axis: "height" | "length" }> 
   [TRAFFIC_LIGHT]: { size: 5.2, axis: "height" },
 };
 
-export function PropMesh({ prop }: { prop: PropInstance }) {
+export function PropMesh({ prop }: { prop: PropInstance; chunk?: ChunkData }) {
   const assetId =
     prop.archetype === CAR
       ? CAR_MODELS[Math.abs(Math.floor(prop.x * 7 + prop.z * 13)) % CAR_MODELS.length]

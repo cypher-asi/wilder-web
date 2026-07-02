@@ -6,7 +6,8 @@ All bundled assets are CC0 (public domain) unless noted. Thank you to these crea
 
 | Asset | Source | License |
 |---|---|---|
-| `assets/models/character.glb` (Rogue Hooded, rigged + animated) | [KayKit Character Pack: Adventurers](https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0) by Kay Lousberg | CC0 |
+| `assets/models/character.glb` (mannequin, rigged + animated; built via `tools/build-character.mjs`) | [Universal Animation Library](https://quaternius.com/packs/universalanimationlibrary.html) by Quaternius | CC0 |
+| `assets/models/pistol.glb` (Scifi Pistol) | [Quaternius via poly.pizza](https://poly.pizza/m/uw4B33Mm0d) | CC0 |
 | `assets/models/streetlight|bench|trash_A|firehydrant|dumpster|car_*|trafficlight_A|watertower|box_A|bush` (+ `.bin`, `citybits_texture.png`) | [KayKit City Builder Bits](https://github.com/KayKit-Game-Assets/KayKit-City-Builder-Bits-1.0) by Kay Lousberg | CC0 |
 | `assets/models/megakit/*` (AC unit, bollard, drain, manhole, planter, doors + shared textures, downscaled to 1K) | [Downtown City MegaKit](https://quaternius.com/packs/downtowncitymegakit.html) by Quaternius | CC0 |
 

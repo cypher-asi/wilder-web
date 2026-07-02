@@ -3,7 +3,13 @@
     "id": "character_main",
     "path": "models/character.glb",
     "type": "model",
-    "license": "CC0 KayKit"
+    "license": "CC0 Quaternius"
+  },
+  {
+    "id": "weapon_pistol",
+    "path": "models/pistol.glb",
+    "type": "model",
+    "license": "CC0 Quaternius"
   },
   {
     "id": "prop_streetlight",
@@ -224,6 +230,48 @@
   {
     "id": "lab_sm_bush_1",
     "path": "models/imported/sm_bush_1.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_ac01",
+    "path": "models/imported/sm_ac01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_ac02",
+    "path": "models/imported/sm_ac02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_aircon",
+    "path": "models/imported/sm_aircon.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_billboard02",
+    "path": "models/imported/sm_billboard02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_billboard27",
+    "path": "models/imported/sm_billboard27.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_3dbillboard01",
+    "path": "models/imported/sm_3dbillboard01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_3dbillboard03",
+    "path": "models/imported/sm_3dbillboard03.glb",
     "type": "model",
     "license": "Purchased (cyberpunk kit)"
   }

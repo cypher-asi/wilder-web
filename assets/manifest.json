@@ -178,5 +178,53 @@
     "path": "models/imported/sm_barrier01.glb",
     "type": "model",
     "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_lamp_005",
+    "path": "models/imported/sm_lamp_005.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_barrier08",
+    "path": "models/imported/sm_barrier08.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_bin_001",
+    "path": "models/imported/sm_bin_001.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_bench01",
+    "path": "models/imported/sm_bench01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_tree1",
+    "path": "models/imported/sm_tree1.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_tree2",
+    "path": "models/imported/sm_tree2.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_tree3",
+    "path": "models/imported/sm_tree3.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_bush_1",
+    "path": "models/imported/sm_bush_1.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
   }
 ]

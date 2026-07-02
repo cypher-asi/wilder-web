@@ -8,6 +8,7 @@ import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
 import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
 import { mulberry, NEON_COLORS } from "./facade";
 import { groundHeightAt } from "./Ground";
+import { KitEntry, KitFit } from "./InstancedKit";
 
 // Archetype ids from wilder-terrain.
 export const STREETLIGHT = 0;
@@ -296,6 +297,72 @@ function Fallback({ prop }: { prop: PropInstance }) {
         </mesh>
       );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Instanced kit props (cyberpunk kit via InstancedKit)
+// ---------------------------------------------------------------------------
+
+interface InstancedVariant {
+  assetId: string;
+  /** Per-variant uniform scale multiplier (default 1). */
+  scale?: number;
+}
+
+/**
+ * Archetypes rendered through InstancedKit instead of per-prop scene clones.
+ * Multiple variants per archetype rotate by position hash so streets vary
+ * without per-instance state. Kit assets are meter-scaled, so most render at
+ * their authored size; oversized source models get a fit below.
+ */
+const INSTANCED_PROPS: Record<number, InstancedVariant[]> = {
+  [STREETLIGHT]: [{ assetId: "lab_sm_lamp_005" }],
+  [BENCH]: [{ assetId: "lab_sm_bench01" }],
+  [TRASH]: [{ assetId: "lab_sm_bin_001" }],
+  [BARRIER]: [{ assetId: "lab_sm_barrier01" }, { assetId: "lab_sm_barrier08" }],
+  [TREE]: [
+    { assetId: "lab_sm_tree1" },
+    { assetId: "lab_sm_tree2" },
+    { assetId: "lab_sm_tree2", scale: 0.85 },
+    { assetId: "lab_sm_tree3", scale: 1.4 },
+    { assetId: "lab_sm_bush_1" },
+  ],
+};
+
+/** Bbox normalization for kit models whose authored size doesn't fit streets. */
+export const INSTANCED_PROP_FITS: Record<string, KitFit> = {
+  lab_sm_tree1: { size: 9, axis: "height" },
+  lab_sm_tree2: { size: 7.5, axis: "height" },
+};
+
+export function isInstancedProp(archetype: number): boolean {
+  return archetype in INSTANCED_PROPS;
+}
+
+/** Gather world-space kit placements for instanced prop archetypes. */
+export function collectInstancedProps(chunks: ChunkData[]): KitEntry[] {
+  const out: KitEntry[] = [];
+  for (const chunk of chunks) {
+    const ox = chunk.coord.x * CHUNK_SIZE;
+    const oz = chunk.coord.z * CHUNK_SIZE;
+    for (const prop of chunk.props) {
+      const variants = INSTANCED_PROPS[prop.archetype];
+      if (!variants) continue;
+      const hash = Math.abs(Math.floor(prop.x * 7 + prop.z * 13 + prop.archetype * 5));
+      const v = variants[hash % variants.length];
+      const x = ox + prop.x;
+      const z = oz + prop.z;
+      out.push({
+        assetId: v.assetId,
+        x,
+        y: groundHeightAt(x, z),
+        z,
+        rotationY: prop.rotation,
+        scale: v.scale,
+      });
+    }
+  }
+  return out;
 }
 
 /**

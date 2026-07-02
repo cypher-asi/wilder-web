@@ -1,5 +1,5 @@
 // Input: WASD (camera-relative) with client prediction at the server tick
-// rate, and click-to-move via ground raycast.
+// rate, and right-click-to-move via ground raycast.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -132,8 +132,9 @@ function GroundClickPlane({
     <mesh
       ref={ref}
       rotation={[-Math.PI / 2, 0, 0]}
-      onClick={(e) => {
-        if (e.delta > 4) return; // ignore drags
+      // Right-click to move (context menu is suppressed on the canvas).
+      onContextMenu={(e) => {
+        if (e.delta > 4) return; // ignore drags (RMB drag tilts the camera)
         onGroundClick(e.point.x, e.point.z);
       }}
     >

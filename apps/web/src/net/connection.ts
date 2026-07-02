@@ -1,5 +1,6 @@
 // WebSocket game connection: handshake, message dispatch, input sending.
 
+import { playSfx } from "../assets/audio";
 import { game, spawnEntity, useGame } from "../state/game";
 import { C2S, decode, encode, S2C } from "./protocol";
 
@@ -21,6 +22,7 @@ export class GameConnection {
 
     ws.onopen = () => {
       useGame.getState().set({ connected: true });
+      game.send = (msg) => this.send(msg);
       this.send({ t: "Authenticate", d: { token: this.token } });
     };
     ws.onmessage = (event) => {
@@ -123,6 +125,12 @@ export class GameConnection {
           if (snap.id === game.localEntityId) {
             // Reconciliation: server state + replay of unacked inputs.
             this.reconcile(snap.position[0], snap.position[2], msg.d.last_input_seq);
+            // Health is authoritative from our own snapshot.
+            const maxHealth = useGame.getState().maxHealth;
+            const health = Math.round(snap.health_pct * maxHealth);
+            if (health !== useGame.getState().health) {
+              ui.set({ health });
+            }
           }
         }
         break;
@@ -137,6 +145,52 @@ export class GameConnection {
       }
       case "Chat": {
         ui.pushChat({ from: msg.d.from, text: msg.d.text });
+        break;
+      }
+      case "CombatEvent": {
+        const ev = msg.d;
+        if (ev.t === "Hit") {
+          void playSfx("sfx_hit", 0.35);
+        } else if (ev.t === "MuzzleFlash") {
+          void playSfx("sfx_shoot", 0.3);
+        } else if (ev.t === "EntityDied") {
+          void playSfx("sfx_death", 0.4);
+        }
+        break;
+      }
+      case "Died": {
+        ui.set({ extracting: null });
+        ui.pushChat({
+          from: "system",
+          text: `You died${msg.d.by ? ` to ${msg.d.by}` : ""}.${msg.d.lost_items ? " Your carried items were dropped." : ""}`,
+          system: true,
+        });
+        break;
+      }
+      case "ExtractStart": {
+        ui.set({ extracting: { seconds: msg.d.seconds, startedAt: performance.now() } });
+        break;
+      }
+      case "ExtractCancel": {
+        ui.set({ extracting: null });
+        ui.pushChat({ from: "system", text: "Extraction cancelled.", system: true });
+        break;
+      }
+      case "ExtractResult": {
+        ui.set({ extracting: null });
+        if (msg.d.success) {
+          void playSfx("sfx_pickup", 0.5);
+          const total = msg.d.banked.reduce((n, s) => n + s.count, 0);
+          ui.pushChat({
+            from: "system",
+            text: `Extraction successful. ${total} item(s) banked to your stash.`,
+            system: true,
+          });
+        }
+        break;
+      }
+      case "GatherResult": {
+        void playSfx("sfx_pickup", 0.45);
         break;
       }
       case "Error": {

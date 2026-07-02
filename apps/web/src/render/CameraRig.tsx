@@ -35,7 +35,7 @@ export function CameraRig() {
       if (!dragging) return;
       const dx = event.clientX - lastX;
       lastX = event.clientX;
-      cameraState.yaw -= dx * 0.008;
+      cameraState.yaw += dx * 0.008;
     };
     const onPointerUp = () => (dragging = false);
     const onWheel = (event: WheelEvent) => {
@@ -80,8 +80,13 @@ export function CameraRig() {
     const tx = player ? player.x : game.predicted.x;
     const tz = player ? player.z : game.predicted.z;
 
-    // Smooth follow.
-    target.current.lerp(new THREE.Vector3(tx, 0, tz), Math.min(1, dt * 8));
+    // Smooth follow; snap on long-range teleports (death/extraction respawn).
+    const next = new THREE.Vector3(tx, 0, tz);
+    if (target.current.distanceTo(next) > 40) {
+      target.current.copy(next);
+    } else {
+      target.current.lerp(next, Math.min(1, dt * 8));
+    }
 
     // Zoom-dependent pitch: slightly lower at street level for drama.
     const zoomFrac =

@@ -30,6 +30,14 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "Enter") {
         useGame.getState().set({ chatOpen: true });
       }
+      if (event.code === "Space") {
+        event.preventDefault();
+        // Attack toward facing.
+        const seq = game.nextSeq++;
+        const tx = game.predicted.x + Math.cos(game.predicted.yaw) * 3;
+        const tz = game.predicted.z + Math.sin(game.predicted.yaw) * 3;
+        connection.send({ t: "Attack", d: { seq, tx, tz } });
+      }
     };
     const up = (event: KeyboardEvent) => {
       keys.current[event.code] = false;
@@ -42,27 +50,11 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     };
   }, []);
 
-  // Click-to-move on left click.
-  useEffect(() => {
-    const canvas = gl.domElement;
-    const onClick = (event: PointerEvent) => {
-      if (event.button !== 0) return;
-      const rect = canvas.getBoundingClientRect();
-      const ndc = new THREE.Vector2(
-        ((event.clientX - rect.left) / rect.width) * 2 - 1,
-        -((event.clientY - rect.top) / rect.height) * 2 + 1,
-      );
-      raycaster.current.setFromCamera(ndc, camera);
-      const hit = new THREE.Vector3();
-      if (raycaster.current.ray.intersectPlane(groundPlane.current, hit)) {
-        const seq = game.nextSeq++;
-        connection.send({ t: "MoveTo", d: { seq, x: hit.x, z: hit.z } });
-        game.moveMarker = { x: hit.x, z: hit.z, at: performance.now() };
-      }
-    };
-    canvas.addEventListener("pointerdown", onClick);
-    return () => canvas.removeEventListener("pointerdown", onClick);
-  }, [camera, gl, connection]);
+  function onGroundClick(x: number, z: number) {
+    const seq = game.nextSeq++;
+    connection.send({ t: "MoveTo", d: { seq, x, z } });
+    game.moveMarker = { x, z, at: performance.now() };
+  }
 
   useFrame((_, dt) => {
     accumulator.current += dt;
@@ -118,7 +110,37 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     game.moveMarker = null;
   }
 
-  return <MoveMarker />;
+  return (
+    <>
+      <GroundClickPlane onGroundClick={onGroundClick} />
+      <MoveMarker />
+    </>
+  );
+}
+
+/** Invisible plane that follows the player and receives click-to-move. */
+function GroundClickPlane({
+  onGroundClick,
+}: {
+  onGroundClick: (x: number, z: number) => void;
+}) {
+  const ref = useRef<THREE.Mesh>(null);
+  useFrame(() => {
+    ref.current?.position.set(game.predicted.x, 0, game.predicted.z);
+  });
+  return (
+    <mesh
+      ref={ref}
+      rotation={[-Math.PI / 2, 0, 0]}
+      onClick={(e) => {
+        if (e.delta > 4) return; // ignore drags
+        onGroundClick(e.point.x, e.point.z);
+      }}
+    >
+      <planeGeometry args={[400, 400]} />
+      <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
+    </mesh>
+  );
 }
 
 function MoveMarker() {

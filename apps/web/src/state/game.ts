@@ -63,6 +63,8 @@ export const game = {
   lastDirectInputAt: 0,
   /** Click-to-move marker (world position + time set). */
   moveMarker: null as { x: number; z: number; at: number } | null,
+  /** Active connection sender (set by GameConnection.connect). */
+  send: null as ((msg: import("../net/protocol").C2S) => void) | null,
 
   reset() {
     this.chunks.clear();
@@ -71,8 +73,20 @@ export const game = {
     this.pendingInputs = [];
     this.nextSeq = 1;
     this.moveMarker = null;
+    // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },
 };
+
+// Debug handle for development tooling.
+declare global {
+  interface Window {
+    __game?: typeof game;
+    __ui?: unknown;
+  }
+}
+if (typeof window !== "undefined" && import.meta.env.DEV) {
+  window.__game = game;
+}
 
 export function spawnEntity(data: EntitySpawnData): GameEntity {
   const entity: GameEntity = {
@@ -114,13 +128,19 @@ interface UiState {
   lastError: string | null;
   /** bumped when chunk set changes (drives chunk re-render) */
   chunkVersion: number;
+  /** Active extraction channel (seconds total + start time). */
+  extracting: { seconds: number; startedAt: number } | null;
+  /** Near a stash terminal (enables deposit/withdraw UI). */
+  nearStash: boolean;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
   toggleInventory: () => void;
 }
 
-export const useGame = create<UiState>((set) => ({
+export const useGame: import("zustand").UseBoundStore<
+  import("zustand").StoreApi<UiState>
+> = create<UiState>((set) => ({
   connected: false,
   joined: false,
   characterName: "",
@@ -134,9 +154,15 @@ export const useGame = create<UiState>((set) => ({
   chatOpen: false,
   lastError: null,
   chunkVersion: 0,
+  extracting: null,
+  nearStash: false,
 
   set: (partial) => set(partial),
   pushChat: (line) =>
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
 }));
+
+if (typeof window !== "undefined" && import.meta.env.DEV) {
+  window.__ui = useGame;
+}

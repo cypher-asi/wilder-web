@@ -1600,6 +1600,8 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wilder-ai",
+ "wilder-combat",
  "wilder-inventory",
  "wilder-pathfinding",
  "wilder-persistence",

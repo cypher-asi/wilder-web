@@ -126,13 +126,107 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   );
 }
 
+function LootCrate({ entity }: { entity: GameEntity }) {
+  const glow = useRef<THREE.Mesh>(null);
+  useFrame(({ clock }) => {
+    if (glow.current) {
+      const pulse = 1.5 + Math.sin(clock.elapsedTime * 4) * 0.8;
+      (glow.current.material as THREE.MeshStandardMaterial).emissiveIntensity = pulse;
+    }
+  });
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <mesh position={[0, 0.28, 0]} castShadow>
+        <boxGeometry args={[0.6, 0.55, 0.6]} />
+        <meshStandardMaterial color="#3a2f1d" roughness={0.6} metalness={0.3} />
+      </mesh>
+      <mesh ref={glow} position={[0, 0.58, 0]}>
+        <boxGeometry args={[0.5, 0.06, 0.5]} />
+        <meshStandardMaterial color="#ffe14d" emissive="#ffc93d" emissiveIntensity={2} />
+      </mesh>
+    </group>
+  );
+}
+
+function ExtractionBeacon({ entity }: { entity: GameEntity }) {
+  const beam = useRef<THREE.Mesh>(null);
+  useFrame(({ clock }) => {
+    if (beam.current) {
+      (beam.current.material as THREE.MeshBasicMaterial).opacity =
+        0.25 + Math.sin(clock.elapsedTime * 2.5) * 0.1;
+      beam.current.rotation.y = clock.elapsedTime * 0.4;
+    }
+  });
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <mesh position={[0, 0.15, 0]}>
+        <cylinderGeometry args={[1.1, 1.3, 0.3, 24]} />
+        <meshStandardMaterial color="#0f2a24" emissive="#1affc4" emissiveIntensity={0.7} />
+      </mesh>
+      <mesh ref={beam} position={[0, 8, 0]}>
+        <cylinderGeometry args={[0.55, 0.9, 16, 12, 1, true]} />
+        <meshBasicMaterial
+          color="#1affc4"
+          transparent
+          opacity={0.3}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+function StashTerminal({ entity }: { entity: GameEntity }) {
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+        useGame.getState().set({ inventoryOpen: true });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <boxGeometry args={[1.1, 1.8, 0.7]} />
+        <meshStandardMaterial color="#141a24" roughness={0.4} metalness={0.6} />
+      </mesh>
+      <mesh position={[0, 1.25, 0.36]}>
+        <planeGeometry args={[0.8, 0.5]} />
+        <meshStandardMaterial color="#40e8ff" emissive="#40e8ff" emissiveIntensity={1.6} />
+      </mesh>
+    </group>
+  );
+}
+
 function EntityView({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
+  const isCharacter = entity.kind === "Player" || entity.kind === "Npc";
 
   useFrame(() => {
     if (!group.current) return;
     const isLocal = entity.id === game.localEntityId;
     const now = performance.now();
+
+    if (!isCharacter) {
+      group.current.position.set(entity.x, entity.y, entity.z);
+      return;
+    }
 
     if (isLocal && now - game.lastDirectInputAt < PREDICT_WINDOW) {
       // Prediction drives the local player during WASD movement.
@@ -159,10 +253,52 @@ function EntityView({ entity }: { entity: GameEntity }) {
     }
   });
 
+  let body: React.ReactNode;
+  switch (entity.kind) {
+    case "LootContainer":
+      body = <LootCrate entity={entity} />;
+      break;
+    case "ExtractionPoint":
+      body = <ExtractionBeacon entity={entity} />;
+      break;
+    case "Building":
+      body = <StashTerminal entity={entity} />;
+      break;
+    case "Npc":
+      body = (
+        <group
+          onClick={(e) => {
+            e.stopPropagation();
+            const seq = game.nextSeq++;
+            game.send?.({ t: "Attack", d: { seq, tx: entity.x, tz: entity.z } });
+          }}
+          onPointerOver={() => (document.body.style.cursor = "crosshair")}
+          onPointerOut={() => (document.body.style.cursor = "default")}
+        >
+          <ProceduralCharacter entity={entity} />
+          <HealthRing entity={entity} />
+        </group>
+      );
+      break;
+    default:
+      body = <CharacterModel entity={entity} />;
+  }
+
+  return <group ref={group}>{body}</group>;
+}
+
+function HealthRing({ entity }: { entity: GameEntity }) {
+  const ref = useRef<THREE.Mesh>(null);
+  useFrame(() => {
+    if (!ref.current) return;
+    ref.current.visible = entity.healthPct < 0.999 && entity.anim !== "Death";
+    ref.current.scale.setScalar(Math.max(entity.healthPct, 0.05));
+  });
   return (
-    <group ref={group}>
-      <CharacterModel entity={entity} />
-    </group>
+    <mesh ref={ref} position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.5, 0.62, 24]} />
+      <meshBasicMaterial color="#ff4455" transparent opacity={0.8} depthWrite={false} />
+    </mesh>
   );
 }
 

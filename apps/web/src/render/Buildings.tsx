@@ -1,50 +1,95 @@
-// Building rendering. Phase C will replace the single box with a procedural
-// storefront base, detailed upper facades, and a dressed roof.
+// Building rendering: procedural storefront base, textured upper facade, and
+// dressed roof. Geometry comes from building.ts (merged per material key);
+// materials are shared across buildings via facade.ts.
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import { BuildingInstance, TILE_SIZE } from "../net/protocol";
-import { makeFacadeMaterial, mulberry, NEON_COLORS } from "./facade";
+import { useAssetModel } from "../assets/catalog";
+import { BuildingInstance } from "../net/protocol";
+import { buildBuildingModel, WaterTowerPlacement } from "./building";
+import { getBuildingMaterial, getSharedMaterial } from "./facade";
 
-export function Building({ building }: { building: BuildingInstance }) {
-  const width = (building.tx1 - building.tx0) * TILE_SIZE;
-  const depth = (building.tz1 - building.tz0) * TILE_SIZE;
-  // 4.5m ground floor (storefront) + 3m per upper story.
-  const height = 4.5 + (building.stories - 1) * 3;
-  const x = building.tx0 * TILE_SIZE + width / 2;
-  const z = building.tz0 * TILE_SIZE + depth / 2;
+// Sidewalk/building tiles are raised; buildings sit on top of them.
+const GROUND_Y = 0.14;
 
-  const material = useMemo(
-    () => makeFacadeMaterial({ width, height, depth, style: building.style }),
-    [width, height, depth, building.style],
-  );
+// Material keys whose meshes are emissive/glass overlays, not solid massing.
+const NO_SHADOW = new Set(["neon", "glass"]);
 
-  const neon = useMemo(() => {
-    const rng = mulberry(building.style ^ 0x9e3779b9);
-    if (rng() > 0.45) return null;
-    const color = NEON_COLORS[Math.floor(rng() * NEON_COLORS.length)];
-    const signH = 1.2 + rng() * 2.5;
-    const signY = 2.5 + rng() * Math.max(1, height - 5);
-    // Stick the sign on the -z face (usually street facing).
-    return { color, signH, signY };
-  }, [building.style, height]);
+function WaterTower({ placement }: { placement: WaterTowerPlacement }) {
+  const model = useAssetModel("prop_watertower");
+
+  const node = useMemo(() => {
+    if (!model) return null;
+    const target = 5;
+    const scale = target / Math.max(model.size.y, 0.001);
+    model.scene.scale.setScalar(scale);
+    model.scene.position.y = -model.minY * scale;
+    return model.scene;
+  }, [model]);
 
   return (
-    <group position={[x, height / 2, z]}>
-      <mesh material={material} castShadow>
-        <boxGeometry args={[width, height, depth]} />
-      </mesh>
-      {neon && (
-        <mesh position={[width * 0.25, neon.signY - height / 2, -depth / 2 - 0.08]}>
-          <planeGeometry args={[0.35, neon.signH]} />
-          <meshStandardMaterial
-            color={neon.color}
-            emissive={neon.color}
-            emissiveIntensity={3.2}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
+    <group
+      position={[placement.x, placement.baseY, placement.z]}
+      rotation={[0, placement.ry, 0]}
+    >
+      {node ? (
+        <primitive object={node} />
+      ) : (
+        <ProceduralWaterTower />
       )}
+    </group>
+  );
+}
+
+/** Fallback tank-on-legs if the KayKit model is unavailable. */
+function ProceduralWaterTower() {
+  const legs = useMemo(() => [0, 1, 2, 3].map((i) => (i * Math.PI) / 2 + Math.PI / 4), []);
+  const wood = getSharedMaterial("wood");
+  const metal = getSharedMaterial("metalDark");
+  return (
+    <group>
+      {legs.map((a, i) => (
+        <mesh
+          key={i}
+          material={metal}
+          position={[Math.cos(a) * 0.85, 1.1, Math.sin(a) * 0.85]}
+          castShadow
+        >
+          <cylinderGeometry args={[0.06, 0.08, 2.2, 8]} />
+        </mesh>
+      ))}
+      <mesh material={wood} position={[0, 3.1, 0]} castShadow>
+        <cylinderGeometry args={[1.05, 1.05, 2.0, 14]} />
+      </mesh>
+      <mesh material={metal} position={[0, 4.45, 0]} castShadow>
+        <coneGeometry args={[1.15, 0.7, 14]} />
+      </mesh>
+    </group>
+  );
+}
+
+export function Building({ building }: { building: BuildingInstance }) {
+  const model = useMemo(() => buildBuildingModel(building), [building]);
+
+  // Dispose merged geometries when the chunk unloads (materials are shared).
+  useEffect(() => {
+    return () => {
+      for (const [, geom] of model.geoms) geom.dispose();
+    };
+  }, [model]);
+
+  return (
+    <group position={[model.x, GROUND_Y, model.z]}>
+      {model.geoms.map(([key, geom]) => (
+        <mesh
+          key={key}
+          geometry={geom}
+          material={getBuildingMaterial(key, building)}
+          castShadow={!NO_SHADOW.has(key)}
+          receiveShadow={!NO_SHADOW.has(key)}
+        />
+      ))}
+      {model.waterTower && <WaterTower placement={model.waterTower} />}
     </group>
   );
 }

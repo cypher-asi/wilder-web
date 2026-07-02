@@ -1,0 +1,613 @@
+// Procedural building generator. Produces merged geometry per material key
+// (see facade.ts getBuildingMaterial) for a Precinct-style building: storefront
+// base with bays/awnings/signage, textured upper mass, and a dressed roof.
+// Everything is deterministic from BuildingInstance.style.
+
+import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { BuildingInstance, TILE_SIZE } from "../net/protocol";
+import { mulberry, NEON_COLORS } from "./facade";
+
+export interface WaterTowerPlacement {
+  x: number;
+  z: number;
+  baseY: number;
+  ry: number;
+}
+
+export interface BuildingModel {
+  /** material key -> merged geometry, in building-local space (y=0 at base). */
+  geoms: [string, THREE.BufferGeometry][];
+  waterTower: WaterTowerPlacement | null;
+  /** Building center in chunk-local coordinates. */
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+  height: number;
+}
+
+// Materials whose meshes are merged via vertex colors (see facade.ts).
+const COLOR_MATS = new Set(["neon", "fabric"]);
+const WHITE = new THREE.Color(1, 1, 1);
+
+const NEON = NEON_COLORS.map((c) => new THREE.Color(c));
+const INTERIOR_GLOW = ["#ffd9a0", "#ffe9c9", "#c9f0ff", "#ffd2e1", "#d6ffe3"].map(
+  (c) => new THREE.Color(c),
+);
+const AWNING_COLORS = ["#7a2230", "#1f4a38", "#22335c", "#5c3a22", "#3a2f4f"].map(
+  (c) => new THREE.Color(c),
+);
+const DIM_GLASS = new THREE.Color(0.015, 0.018, 0.024);
+
+class Parts {
+  private lists = new Map<string, THREE.BufferGeometry[]>();
+  private euler = new THREE.Euler();
+  private m = new THREE.Matrix4();
+
+  add(
+    mat: string,
+    geom: THREE.BufferGeometry,
+    x: number,
+    y: number,
+    z: number,
+    rx = 0,
+    ry = 0,
+    rz = 0,
+    color?: THREE.Color,
+  ): void {
+    this.m.makeRotationFromEuler(this.euler.set(rx, ry, rz));
+    this.m.setPosition(x, y, z);
+    geom.applyMatrix4(this.m);
+    if (COLOR_MATS.has(mat)) {
+      const c = color ?? WHITE;
+      const count = geom.getAttribute("position").count;
+      const arr = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        arr[i * 3] = c.r;
+        arr[i * 3 + 1] = c.g;
+        arr[i * 3 + 2] = c.b;
+      }
+      geom.setAttribute("color", new THREE.BufferAttribute(arr, 3));
+    }
+    let list = this.lists.get(mat);
+    if (!list) {
+      list = [];
+      this.lists.set(mat, list);
+    }
+    list.push(geom);
+  }
+
+  box(
+    mat: string,
+    sx: number,
+    sy: number,
+    sz: number,
+    x: number,
+    y: number,
+    z: number,
+    rx = 0,
+    ry = 0,
+    rz = 0,
+    color?: THREE.Color,
+  ): void {
+    this.add(mat, new THREE.BoxGeometry(sx, sy, sz), x, y, z, rx, ry, rz, color);
+  }
+
+  cyl(
+    mat: string,
+    r: number,
+    h: number,
+    x: number,
+    y: number,
+    z: number,
+    rx = 0,
+    ry = 0,
+    rz = 0,
+    rTop?: number,
+  ): void {
+    this.add(
+      mat,
+      new THREE.CylinderGeometry(rTop ?? r, r, h, 10),
+      x,
+      y,
+      z,
+      rx,
+      ry,
+      rz,
+    );
+  }
+
+  plane(
+    mat: string,
+    w: number,
+    h: number,
+    x: number,
+    y: number,
+    z: number,
+    rx = 0,
+    ry = 0,
+    rz = 0,
+    color?: THREE.Color,
+  ): void {
+    this.add(mat, new THREE.PlaneGeometry(w, h), x, y, z, rx, ry, rz, color);
+  }
+
+  build(): [string, THREE.BufferGeometry][] {
+    const out: [string, THREE.BufferGeometry][] = [];
+    for (const [key, list] of this.lists) {
+      const merged = mergeGeometries(list, false);
+      if (merged) out.push([key, merged]);
+    }
+    return out;
+  }
+}
+
+/** A vertical facade plane of the building, with a local (along, y, out) frame. */
+interface Face {
+  axis: "x" | "z";
+  /** Wall plane coordinate on the face axis (e.g. -depth/2). */
+  wall: number;
+  /** Outward direction along the face axis: -1 or +1. */
+  sign: number;
+  /** Facade length along the face. */
+  len: number;
+  /** Center of the facade along its tangent axis (building-local). */
+  center: number;
+}
+
+function faceBox(
+  p: Parts,
+  f: Face,
+  mat: string,
+  alongSize: number,
+  ySize: number,
+  outSize: number,
+  along: number,
+  y: number,
+  out: number,
+  tiltOut = 0,
+  color?: THREE.Color,
+): void {
+  if (f.axis === "z") {
+    const rx = tiltOut * f.sign;
+    p.box(mat, alongSize, ySize, outSize, f.center + along, y, f.wall + f.sign * out, rx, 0, 0, color);
+  } else {
+    const rz = -tiltOut * f.sign;
+    p.box(mat, outSize, ySize, alongSize, f.wall + f.sign * out, y, f.center + along, 0, 0, rz, color);
+  }
+}
+
+/** Plane on a face, normal pointing outward. */
+function facePlane(
+  p: Parts,
+  f: Face,
+  mat: string,
+  alongSize: number,
+  ySize: number,
+  along: number,
+  y: number,
+  out: number,
+  color?: THREE.Color,
+): void {
+  if (f.axis === "z") {
+    const ry = f.sign < 0 ? Math.PI : 0;
+    p.plane(mat, alongSize, ySize, f.center + along, y, f.wall + f.sign * out, 0, ry, 0, color);
+  } else {
+    const ry = f.sign < 0 ? -Math.PI / 2 : Math.PI / 2;
+    p.plane(mat, alongSize, ySize, f.wall + f.sign * out, y, f.center + along, 0, ry, 0, color);
+  }
+}
+
+/** Vertical cylinder on a face. */
+function faceCyl(
+  p: Parts,
+  f: Face,
+  mat: string,
+  r: number,
+  h: number,
+  along: number,
+  y: number,
+  out: number,
+): void {
+  if (f.axis === "z") p.cyl(mat, r, h, f.center + along, y, f.wall + f.sign * out);
+  else p.cyl(mat, r, h, f.wall + f.sign * out, y, f.center + along);
+}
+
+// ---------------------------------------------------------------------------
+// Storefront (street-facing ground floor)
+// ---------------------------------------------------------------------------
+
+type BayKind = "window" | "door" | "shutter" | "service";
+
+function buildStorefront(
+  p: Parts,
+  f: Face,
+  rng: () => number,
+  trimKey: string,
+  isFront: boolean,
+): void {
+  const len = f.len;
+  const pier = 0.35;
+  const n = Math.max(1, Math.round(len / 4));
+  const bw = (len - pier * (n + 1)) / n;
+
+  // Piers between/around bays (proud 0.32 of the wall).
+  for (let i = 0; i <= n; i++) {
+    const a = -len / 2 + pier / 2 + i * (bw + pier);
+    faceBox(p, f, trimKey, pier, 3.45, 0.32, a, 1.725, 0.16);
+  }
+  // Fascia band (sign zone) below the storefront cornice.
+  faceBox(p, f, trimKey, len, 1.0, 0.34, 0, 3.95, 0.17);
+
+  // Bay contents.
+  const kinds: BayKind[] = [];
+  for (let i = 0; i < n; i++) {
+    const r = rng();
+    kinds.push(r < 0.48 ? "window" : r < 0.66 ? "door" : r < 0.87 ? "shutter" : "service");
+  }
+  if (isFront && !kinds.includes("door") && n >= 2) {
+    kinds[Math.floor(rng() * n)] = "door";
+  }
+
+  for (let i = 0; i < n; i++) {
+    const a = -len / 2 + pier + bw / 2 + i * (bw + pier);
+    const kind = kinds[i];
+
+    if (kind === "window") {
+      // Bulkhead base wall, glass, mullions, interior glow.
+      faceBox(p, f, trimKey, bw + 0.04, 0.5, 0.26, a, 0.25, 0.13);
+      facePlane(p, f, "glass", bw - 0.12, 2.8, a, 1.9, 0.115);
+      const lit = rng() < 0.62;
+      const glow = INTERIOR_GLOW[Math.floor(rng() * INTERIOR_GLOW.length)]
+        .clone()
+        .multiplyScalar(lit ? 1.0 + rng() * 0.55 : 1);
+      facePlane(p, f, "neon", bw - 0.3, 2.55, a, 1.83, 0.05, lit ? glow : DIM_GLASS);
+      if (lit) {
+        // Light spill onto the sidewalk in front of the window.
+        const spill = glow.clone().multiplyScalar(0.12);
+        if (f.axis === "z") {
+          p.plane("neon", bw - 0.2, 1.1, f.center + a, 0.012, f.wall + f.sign * 0.72, -Math.PI / 2, 0, 0, spill);
+        } else {
+          p.plane("neon", 1.1, bw - 0.2, f.wall + f.sign * 0.72, 0.012, f.center + a, -Math.PI / 2, 0, 0, spill);
+        }
+      }
+      // Mullion frame: verticals + top/bottom rails.
+      const panes = Math.max(2, Math.round(bw / 1.2));
+      for (let k = 1; k < panes; k++) {
+        const mx = a - (bw - 0.12) / 2 + (k * (bw - 0.12)) / panes;
+        faceBox(p, f, "metalDark", 0.06, 2.8, 0.07, mx, 1.9, 0.13);
+      }
+      faceBox(p, f, "metalDark", bw - 0.06, 0.08, 0.08, a, 0.52, 0.13);
+      faceBox(p, f, "metalDark", bw - 0.06, 0.08, 0.08, a, 3.3, 0.13);
+      if (rng() < 0.55) addAwning(p, f, rng, a, bw);
+    } else if (kind === "door") {
+      // Recessed doorway with side panels, jambs, transom light, step.
+      const panelW = (bw - 1.3) / 2;
+      if (panelW > 0.05) {
+        faceBox(p, f, trimKey, panelW, 3.45, 0.2, a - 0.65 - panelW / 2, 1.725, 0.1);
+        faceBox(p, f, trimKey, panelW, 3.45, 0.2, a + 0.65 + panelW / 2, 1.725, 0.1);
+      }
+      faceBox(p, f, trimKey, 1.3, 0.85, 0.2, a, 3.02, 0.1); // header
+      faceBox(p, f, "metalDark", 0.09, 2.45, 0.3, a - 0.62, 1.22, 0.15);
+      faceBox(p, f, "metalDark", 0.09, 2.45, 0.3, a + 0.62, 1.22, 0.15);
+      facePlane(p, f, "metalDark", 1.16, 2.15, a, 1.08, 0.035); // door, recessed
+      facePlane(p, f, "neon", 1.05, 0.16, a, 2.36, 0.16, new THREE.Color("#ffd9a0").multiplyScalar(1.8));
+      faceBox(p, f, "trim", 1.6, 0.09, 0.55, a, 0.045, 0.27); // step
+      if (rng() < 0.4) addAwning(p, f, rng, a, bw);
+    } else if (kind === "shutter") {
+      // Roll-up corrugated shutter + housing box.
+      faceBox(p, f, "corrugated", bw - 0.08, 3.1, 0.1, a, 1.55, 0.1);
+      faceBox(p, f, "metalDark", bw + 0.02, 0.32, 0.26, a, 3.28, 0.13);
+    } else {
+      // Service: plain dark door + vent, wall left bare.
+      faceBox(p, f, "metalDark", 1.0, 2.1, 0.09, a - bw * 0.18, 1.05, 0.05);
+      faceBox(p, f, "grill", 0.6, 0.42, 0.07, a + bw * 0.24, 2.5, 0.045);
+      faceCyl(p, f, "metalDark", 0.04, 3.2, a + bw * 0.42, 1.7, 0.1);
+    }
+
+    // Shop sign board on the fascia (~60% of bays).
+    if (rng() < 0.6) {
+      const sw = bw * (0.55 + rng() * 0.35);
+      const sh = 0.55 + rng() * 0.25;
+      const color = NEON[Math.floor(rng() * NEON.length)]
+        .clone()
+        .multiplyScalar(1.5 + rng() * 0.7);
+      faceBox(p, f, "metalDark", sw + 0.1, sh + 0.1, 0.14, a, 3.95, 0.44);
+      facePlane(p, f, "neon", sw, sh, a, 3.95, 0.525, color);
+    } else {
+      rng();
+      rng();
+      rng();
+    }
+  }
+}
+
+function addAwning(p: Parts, f: Face, rng: () => number, a: number, bw: number): void {
+  if (rng() < 0.75) {
+    // Sloped fabric awning.
+    const color = AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)];
+    faceBox(p, f, "fabric", bw * 0.96, 0.05, 0.95, a, 3.38, 0.62, 0.38, color);
+    // Valance strip hanging at the outer edge.
+    faceBox(p, f, "fabric", bw * 0.96, 0.18, 0.04, a, 3.12, 1.02, 0, color);
+  } else {
+    // Flat metal canopy with an emissive under-strip along its front edge.
+    rng();
+    faceBox(p, f, "metal", bw * 0.96, 0.07, 0.9, a, 3.42, 0.58);
+    facePlane(
+      p,
+      f,
+      "neon",
+      bw * 0.9,
+      0.055,
+      a,
+      3.37,
+      1.015,
+      new THREE.Color("#cfe8ff").multiplyScalar(1.9),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Service faces (alley sides): shutters/doors, AC units, conduit
+// ---------------------------------------------------------------------------
+
+function buildServiceFace(p: Parts, f: Face, rng: () => number, height: number): void {
+  const len = f.len;
+  // Ground level: a service door and sometimes a shutter.
+  const doorA = (rng() - 0.5) * (len - 2.5);
+  faceBox(p, f, "metalDark", 1.05, 2.15, 0.1, doorA, 1.07, 0.06);
+  faceBox(p, f, "trim", 1.25, 0.12, 0.16, doorA, 2.28, 0.08); // lintel
+  if (rng() < 0.45) {
+    let a = (rng() - 0.5) * (len - 4);
+    if (Math.abs(a - doorA) < 2.2) a = doorA + (a > doorA ? 2.4 : -2.4);
+    faceBox(p, f, "corrugated", 2.4, 2.5, 0.1, a, 1.25, 0.06);
+    faceBox(p, f, "metalDark", 2.5, 0.28, 0.2, a, 2.62, 0.1);
+  } else {
+    rng();
+  }
+
+  // Wall AC units on the upper facade.
+  const acCount = 1 + Math.floor(rng() * 3);
+  for (let i = 0; i < acCount; i++) {
+    const a = (rng() - 0.5) * (len - 1.6);
+    const y = 5.2 + rng() * Math.max(0.5, height - 6.6);
+    faceBox(p, f, "metal", 0.58, 0.44, 0.32, a, y, 0.17);
+    facePlane(p, f, "grill", 0.46, 0.33, a, y, 0.335);
+  }
+
+  // Vertical conduit / drain pipes.
+  const pipeCount = 1 + Math.floor(rng() * 2);
+  for (let i = 0; i < pipeCount; i++) {
+    const a = (rng() < 0.5 ? -1 : 1) * (len / 2 - 0.5 - rng() * 1.2);
+    faceCyl(p, f, "metalDark", 0.045, height - 0.5, a, (height - 0.5) / 2, 0.1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Roof dressing
+// ---------------------------------------------------------------------------
+
+function buildRoof(
+  p: Parts,
+  rng: () => number,
+  w: number,
+  d: number,
+  height: number,
+  stories: number,
+): WaterTowerPlacement | null {
+  const deckTop = height + 0.08;
+  const hx = Math.max(1.2, w / 2 - 0.95);
+  const hz = Math.max(1.2, d / 2 - 0.95);
+
+  // Shuffled 3x3 anchor grid keeps items inside the parapet and non-stacked.
+  const anchors: [number, number][] = [];
+  for (const ix of [-0.62, 0, 0.62]) {
+    for (const iz of [-0.62, 0, 0.62]) {
+      anchors.push([ix * hx + (rng() - 0.5) * 0.5, iz * hz + (rng() - 0.5) * 0.5]);
+    }
+  }
+  for (let i = anchors.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [anchors[i], anchors[j]] = [anchors[j], anchors[i]];
+  }
+  let next = 0;
+  const anchor = (): [number, number] => anchors[next++ % anchors.length];
+
+  // Roof access bulkhead (always).
+  {
+    const [ax, az] = anchor();
+    const bx = THREE.MathUtils.clamp(ax, -(hx - 0.9), hx - 0.9);
+    const bz = THREE.MathUtils.clamp(az, -(hz - 0.9), hz - 0.9);
+    p.box("trim", 2.2, 2.6, 2.5, bx, deckTop + 1.3, bz);
+    p.box("metal", 2.38, 0.1, 2.68, bx, deckTop + 2.66, bz, 0.05);
+    p.plane("metalDark", 0.92, 2.0, bx, deckTop + 1.0, bz - 1.26, 0, Math.PI);
+  }
+
+  // Water tower spot (rendered separately in Buildings.tsx; KayKit or fallback).
+  let waterTower: WaterTowerPlacement | null = null;
+  if (stories >= 5 && rng() < 0.5) {
+    const [ax, az] = anchor();
+    waterTower = {
+      x: THREE.MathUtils.clamp(ax, -(hx - 1.1), hx - 1.1),
+      z: THREE.MathUtils.clamp(az, -(hz - 1.1), hz - 1.1),
+      baseY: deckTop,
+      ry: rng() * Math.PI * 2,
+    };
+  }
+
+  // HVAC units with fan circles.
+  const hvacCount = 1 + Math.floor(rng() * 4);
+  for (let i = 0; i < hvacCount; i++) {
+    const [ax, az] = anchor();
+    const s = 1.0 + rng() * 1.0;
+    const h = 0.7 + rng() * 0.5;
+    const bx = THREE.MathUtils.clamp(ax, -(hx - s / 2), hx - s / 2);
+    const bz = THREE.MathUtils.clamp(az, -(hz - s / 2), hz - s / 2);
+    p.box("metal", s, h, s * 0.82, bx, deckTop + h / 2, bz, 0, rng() * Math.PI);
+    p.plane("grill", s * 0.8, s * 0.62, bx, deckTop + h + 0.011, bz, -Math.PI / 2);
+    p.cyl("metalDark", s * 0.26, 0.05, bx, deckTop + h + 0.035, bz);
+  }
+
+  // Small vents.
+  const ventCount = 2 + Math.floor(rng() * 3);
+  for (let i = 0; i < ventCount; i++) {
+    const [ax, az] = anchor();
+    if (rng() < 0.6) {
+      const vh = 0.4 + rng() * 0.5;
+      p.cyl("trim", 0.1 + rng() * 0.07, vh, ax, deckTop + vh / 2, az);
+      p.cyl("metalDark", 0.16, 0.07, ax, deckTop + vh + 0.03, az);
+    } else {
+      p.box("metal", 0.5, 0.35 + rng() * 0.25, 0.4, ax, deckTop + 0.2, az, 0, rng());
+    }
+  }
+
+  // Pipe runs across the roof.
+  const pipeCount = 1 + Math.floor(rng() * 2);
+  for (let i = 0; i < pipeCount; i++) {
+    const alongX = rng() < 0.5;
+    const length = (alongX ? hx : hz) * (1.1 + rng() * 0.7);
+    const off = (rng() - 0.5) * 1.4 * (alongX ? hz : hx);
+    if (alongX) p.cyl("metalDark", 0.05, length, (rng() - 0.5) * 0.6, deckTop + 0.1, off, 0, 0, Math.PI / 2);
+    else p.cyl("metalDark", 0.05, length, off, deckTop + 0.1, (rng() - 0.5) * 0.6, Math.PI / 2);
+  }
+
+  // Rooftop billboard facing the -z street (~25%).
+  if (rng() < 0.25) {
+    const bwid = Math.min(w - 2.4, 3.6 + rng() * 3);
+    const bh = 1.3 + rng() * 0.8;
+    const bz = hz * 0.55;
+    const by = deckTop + 1.6 + bh / 2;
+    const color = NEON[Math.floor(rng() * NEON.length)].clone().multiplyScalar(1.5 + rng() * 0.6);
+    p.cyl("metalDark", 0.06, by - deckTop, -bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
+    p.cyl("metalDark", 0.06, by - deckTop, bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
+    p.box("metalDark", bwid, bh, 0.1, 0, by, bz, -0.09);
+    p.plane("neon", bwid - 0.12, bh - 0.12, 0, by + 0.006, bz - 0.062, -0.09, Math.PI, 0, color);
+  } else {
+    rng();
+    rng();
+    rng();
+  }
+
+  // Antenna cluster (~45%).
+  if (rng() < 0.45) {
+    const [ax, az] = anchor();
+    const count = 2 + Math.floor(rng() * 2);
+    for (let i = 0; i < count; i++) {
+      const ah = 1.4 + rng() * 2.4;
+      const ox = ax + (rng() - 0.5) * 0.9;
+      const oz = az + (rng() - 0.5) * 0.9;
+      p.cyl("metalDark", 0.025, ah, ox, deckTop + ah / 2, oz);
+      p.box(
+        "neon",
+        0.07,
+        0.07,
+        0.07,
+        ox,
+        deckTop + ah + 0.04,
+        oz,
+        0,
+        0,
+        0,
+        new THREE.Color("#ff2222").multiplyScalar(2.6),
+      );
+    }
+  }
+
+  return waterTower;
+}
+
+// ---------------------------------------------------------------------------
+// Main entry
+// ---------------------------------------------------------------------------
+
+const STORE_TRIMS = ["storeTrim0", "storeTrim1", "storeTrim2", "storeTrim3"];
+
+export function buildBuildingModel(b: BuildingInstance): BuildingModel {
+  const w = (b.tx1 - b.tx0) * TILE_SIZE;
+  const d = (b.tz1 - b.tz0) * TILE_SIZE;
+  const height = 4.5 + (b.stories - 1) * 3;
+  const x = b.tx0 * TILE_SIZE + w / 2;
+  const z = b.tz0 * TILE_SIZE + d / 2;
+
+  const p = new Parts();
+
+  const styleRng = mulberry(b.style ^ 0xa511e9b3);
+  const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
+  const sideStorefront = styleRng() < 0.5;
+  const proud = 0.3;
+
+  // --- Massing -------------------------------------------------------------
+  // Ground-floor block sits proud of the upper mass on street-facing sides
+  // (-z always; -x when it also has a storefront). Both share the facade
+  // material (world-space tiling hides the seam).
+  const baseD = d + proud;
+  const baseW = sideStorefront ? w + proud : w;
+  const baseCx = sideStorefront ? -proud / 2 : 0;
+  p.box("facade", baseW, 4.5, baseD, baseCx, 2.25, -proud / 2);
+  // Cornice lip capping the storefront base.
+  p.box("trim", baseW + 0.3, 0.3, baseD + 0.3, baseCx, 4.65, -proud / 2);
+  p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+
+  // Parapet ring (slightly proud, 0.9m above the roof plane) + trim caps.
+  const pt = 0.28;
+  p.box("facade", w + 0.16, 0.95, pt, 0, height + 0.375, -(d / 2 - 0.06));
+  p.box("facade", w + 0.16, 0.95, pt, 0, height + 0.375, d / 2 - 0.06);
+  p.box("facade", pt, 0.95, d + 0.16, -(w / 2 - 0.06), height + 0.375, 0);
+  p.box("facade", pt, 0.95, d + 0.16, w / 2 - 0.06, height + 0.375, 0);
+  p.box("trim", w + 0.3, 0.08, pt + 0.14, 0, height + 0.89, -(d / 2 - 0.06));
+  p.box("trim", w + 0.3, 0.08, pt + 0.14, 0, height + 0.89, d / 2 - 0.06);
+  p.box("trim", pt + 0.14, 0.08, d + 0.3, -(w / 2 - 0.06), height + 0.89, 0);
+  p.box("trim", pt + 0.14, 0.08, d + 0.3, w / 2 - 0.06, height + 0.89, 0);
+
+  // Roof deck (rolled asphalt).
+  p.box("roof", w - 0.44, 0.08, d - 0.44, 0, height + 0.04, 0);
+
+  // --- Faces ---------------------------------------------------------------
+  // Street faces reference the extruded base wall; service faces are flush.
+  const front: Face = { axis: "z", wall: -d / 2 - proud, sign: -1, len: baseW, center: baseCx };
+  const leftWall = sideStorefront ? -w / 2 - proud : -w / 2;
+  const left: Face = {
+    axis: "x",
+    wall: leftWall,
+    sign: -1,
+    len: sideStorefront ? baseD : d,
+    center: sideStorefront ? -proud / 2 : 0,
+  };
+  const right: Face = { axis: "x", wall: w / 2, sign: 1, len: d, center: 0 };
+  const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
+
+  buildStorefront(p, front, mulberry(b.style ^ 0x1f123bb5), trimKey, true);
+  if (sideStorefront) buildStorefront(p, left, mulberry(b.style ^ 0x27220a95), trimKey, false);
+  else buildServiceFace(p, left, mulberry(b.style ^ 0x27220a95), height);
+  buildServiceFace(p, right, mulberry(b.style ^ 0x33355691), height);
+  buildServiceFace(p, back, mulberry(b.style ^ 0x45d9f3b1), height);
+
+  // --- Hanging neon signs on the front face --------------------------------
+  {
+    const rng = mulberry(b.style ^ 0x5851f42d);
+    const count = 1 + (rng() < 0.45 ? 1 : 0);
+    for (let i = 0; i < count; i++) {
+      const a = (rng() - 0.5) * (w - 2.2);
+      const sh = 1.3 + rng() * 1.5;
+      const yMax = Math.min(height - 1.2, 8.5);
+      const y = Math.min(3.6 + rng() * 4, yMax) ;
+      const color = NEON[Math.floor(rng() * NEON.length)].clone().multiplyScalar(1.8 + rng() * 0.8);
+      const zc = -d / 2 - 0.55;
+      p.box("metalDark", 0.1, sh, 0.72, a, y, zc);
+      p.plane("neon", 0.62, sh - 0.14, a - 0.058, y, zc, 0, -Math.PI / 2, 0, color);
+      p.plane("neon", 0.62, sh - 0.14, a + 0.058, y, zc, 0, Math.PI / 2, 0, color);
+      // Mounting arm back to the wall (upper mass, above the base extrusion).
+      p.cyl("metalDark", 0.03, 0.5, a, y + sh / 2 + 0.1, -d / 2 - 0.28, Math.PI / 2);
+      if (y - sh / 2 < 5.0) {
+        // Sign hangs beside the storefront base: arm from the base wall too.
+        p.cyl("metalDark", 0.03, 0.4, a, y - sh / 2 + 0.1, -d / 2 - 0.33, Math.PI / 2);
+      }
+    }
+  }
+
+  // --- Roof dressing ---------------------------------------------------------
+  const waterTower = buildRoof(p, mulberry(b.style ^ 0x9e3779b9), w, d, height, b.stories);
+
+  return { geoms: p.build(), waterTower, x, z, width: w, depth: d, height };
+}

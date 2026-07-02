@@ -15,10 +15,14 @@ export const cameraState = {
   yaw: Math.PI / 4,
   distance: 34,
   minDistance: 20,
-  maxDistance: 48,
+  maxDistance: 120,
   /** Temporary RMB-drag orbit offset, eases back to 0 on release. */
   yawOffset: 0,
 };
+
+/** Fog density at the default zoom; thinned as the camera pulls back. */
+const FOG_BASE_DENSITY = 0.016;
+const FOG_BASE_DISTANCE = 48;
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
 const PITCH_FAR = THREE.MathUtils.degToRad(62);
@@ -29,7 +33,7 @@ const PITCH_MAX = THREE.MathUtils.degToRad(80);
 const RETURN_RATE = 4;
 
 export function CameraRig() {
-  const { camera, gl } = useThree();
+  const { camera, gl, scene } = useThree();
   const target = useRef(new THREE.Vector3());
   const keys = useRef({ q: false, e: false });
   const pitchOffset = useRef(0);
@@ -41,8 +45,9 @@ export function CameraRig() {
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      // Multiplicative steps: constant feel across the whole zoom range.
       cameraState.distance = THREE.MathUtils.clamp(
-        cameraState.distance + event.deltaY * 0.03,
+        cameraState.distance * Math.exp(event.deltaY * 0.0009),
         cameraState.minDistance,
         cameraState.maxDistance,
       );
@@ -147,6 +152,12 @@ export function CameraRig() {
       target.current.z + Math.sin(yaw) * horizontal,
     );
     camera.lookAt(target.current.x, 1.2, target.current.z);
+
+    // Thin the fog when zoomed far out so the wider view stays readable.
+    if (scene.fog instanceof THREE.FogExp2) {
+      const spread = Math.max(1, cameraState.distance / FOG_BASE_DISTANCE);
+      scene.fog.density = FOG_BASE_DENSITY / spread;
+    }
   });
 
   return null;

@@ -103,15 +103,17 @@ export function Sidekick({
 
       {asset.error && <div className="sk-error">{asset.error}</div>}
 
-      {asset.status === "raw" || asset.status === "importing" ? (
-        <button
-          className="btn btn-primary"
-          disabled={busy || asset.status === "importing"}
-          onClick={() => onImport(asset.id)}
-        >
-          {asset.status === "importing" ? "IMPORTING…" : "IMPORT ASSET"}
-        </button>
-      ) : null}
+      <button
+        className={asset.status === "raw" ? "btn btn-primary" : "btn btn-ghost"}
+        disabled={busy || asset.status === "importing" || asset.status === "optimizing"}
+        onClick={() => onImport(asset.id)}
+      >
+        {asset.status === "importing"
+          ? "IMPORTING…"
+          : asset.status === "raw"
+            ? "IMPORT ASSET"
+            : "RE-IMPORT (REFRESH TEXTURES/META)"}
+      </button>
 
       {meta && (
         <>
@@ -131,6 +133,25 @@ export function Sidekick({
             <Row label="Transparency" value={meta.has_transparency ? "yes" : "no"} />
             <Row label="Emissive" value={meta.has_emissive ? "yes" : "no"} />
             <Row label="Animation" value={meta.has_animation ? "yes" : "no"} />
+          </Section>
+
+          <Section title={`Materials (${meta.materials.length})`}>
+            {meta.materials.map((m) => {
+              const roles = Object.keys(m.textures ?? {}).filter((k) => k !== "key");
+              return (
+                <Row
+                  key={m.name}
+                  label={m.name}
+                  value={
+                    roles.length > 0 ? (
+                      roles.join(" · ")
+                    ) : (
+                      <span className="sk-fail">no textures matched</span>
+                    )
+                  }
+                />
+              );
+            })}
           </Section>
 
           <Section title={`Textures (${meta.textures.length})`}>

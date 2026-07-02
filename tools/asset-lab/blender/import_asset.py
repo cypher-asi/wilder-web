@@ -83,10 +83,18 @@ if bpy.data.objects:
 SUFFIX_ROLES = {
     "b": "base", "base": "base", "basecolor": "base", "d": "base", "alb": "base", "a": "base",
     "a01": "base", "a02": "base",
-    "n": "normal", "normal": "normal",
+    "n": "normal", "normal": "normal", "nrm": "normal",
     "orm": "orm",
+    "r": "roughness", "roughness": "roughness",
     "e": "emissive", "em": "emissive", "emissive": "emissive",
     "op": "opacity",
+}
+
+# Kit-specific texture-set aliases where names simply don't correspond
+# (curated by hand as exceptions surface in the Asset Lab).
+KIT_ALIASES = {
+    "3dbillboard": "3dsigns01",
+    "roadsides": "roads_sides",
 }
 
 
@@ -118,6 +126,10 @@ def texture_key_candidates(mat_name, asset_name):
         n = re.sub(r"^(m|mi|mm|mat|sm)_", "", n)  # material/mesh prefixes
         out.append(n)
         out.append(re.sub(r"_?(inst|mat|material)$", "", n))
+    for c in list(out):
+        alias = KIT_ALIASES.get(c) or KIT_ALIASES.get(re.sub(r"\d+$", "", c.replace("_", "")))
+        if alias:
+            out.insert(0, alias)
     seen, uniq = set(), []
     for c in out:
         if c and c not in seen:
@@ -129,17 +141,34 @@ def texture_key_candidates(mat_name, asset_name):
 TEX_INDEX = index_textures(args.textures_dir)
 
 
-def find_texture_set(mat_name):
-    for key in texture_key_candidates(mat_name, args.name):
+def norm_key(key):
+    """Collapse naming-convention noise: underscores and trailing digit runs
+    (MI_RoadsAsphalt02 vs T_Roads_Asphalt, MI_Slums_Concrete01 vs T_SlumsConcrete)."""
+    return re.sub(r"\d+$", "", key.replace("_", ""))
+
+
+def find_texture_set(mat_name, key_hints=()):
+    candidates = [c for c in list(key_hints) + texture_key_candidates(mat_name, args.name) if c]
+    # 1. Exact key match.
+    for key in candidates:
         if key in TEX_INDEX:
             return key, TEX_INDEX[key]
-    # Loose fallback: prefix match (e.g. material "aircon" vs key
-    # "airconditioner01"). Deterministic: shortest match, then alphabetical.
-    for key in texture_key_candidates(mat_name, args.name):
-        if len(key) < 4:
+    # 2. Normalized match (ignore underscores + trailing digits on both sides).
+    norm_index = {}
+    for k in sorted(TEX_INDEX):
+        norm_index.setdefault(norm_key(k), k)
+    for key in candidates:
+        hit = norm_index.get(norm_key(key))
+        if hit:
+            return hit, TEX_INDEX[hit]
+    # 3. Loose prefix fallback on normalized keys (e.g. material "aircon" vs
+    #    key "airconditioner01"). Deterministic: shortest match, alphabetical.
+    for key in candidates:
+        nk = norm_key(key)
+        if len(nk) < 4:
             continue  # too short to be a meaningful prefix
         hits = sorted(
-            (k for k in TEX_INDEX if k.startswith(key) or key.startswith(k)),
+            (k for k in TEX_INDEX if norm_key(k).startswith(nk) or nk.startswith(norm_key(k))),
             key=lambda k: (len(k), k),
         )
         if hits:
@@ -152,9 +181,56 @@ def load_image(path):
     return img
 
 
+def index_dir_basenames(tex_dir):
+    """Map lowercase filename stem -> filepath for every image in the kit."""
+    idx = {}
+    if not os.path.isdir(tex_dir):
+        return idx
+    for fname in os.listdir(tex_dir):
+        stem, ext = os.path.splitext(fname)
+        if ext.lower() in (".png", ".jpg", ".jpeg", ".tga"):
+            idx[stem.lower()] = os.path.join(tex_dir, fname)
+    return idx
+
+
+BASENAME_INDEX = index_dir_basenames(args.textures_dir)
+
+
+def rescue_fbx_references(mat):
+    """FBX materials embed texture nodes pointing at the vendor's machine
+    (e.g. C:\\Program Files\\Moderncity\\...\\T_airConditioner01_Base.jpg).
+    The kit usually ships the same file (often as .PNG) under Textures/, so
+    repoint broken nodes by filename stem — the FBX's own wiring is a more
+    reliable signal than guessing from material names.
+
+    Returns (roles, keys): roles maps role -> rescued basename for the meta,
+    keys are texture-set keys (e.g. "airconditioner01") usable as hints."""
+    roles, keys = {}, []
+    if not mat.use_nodes:
+        return roles, keys
+    for node in mat.node_tree.nodes:
+        if node.type != "TEX_IMAGE" or node.image is None:
+            continue
+        if os.path.exists(bpy.path.abspath(node.image.filepath)):
+            continue
+        stem = os.path.splitext(os.path.basename(node.image.filepath.replace("\\", "/")))[0].lower()
+        found = BASENAME_INDEX.get(stem)
+        if not found:
+            continue
+        node.image = load_image(found)
+        m = re.match(r"^t_(.+)_([a-z0-9]+)$", stem)
+        if m:
+            keys.append(m.group(1))
+            role = SUFFIX_ROLES.get(m.group(2))
+            if role:
+                roles[role] = os.path.basename(found)
+                if role in ("normal", "orm", "opacity"):
+                    node.image.colorspace_settings.name = "Non-Color"
+    return roles, keys
+
+
 def strip_broken_image_nodes(mat):
-    """FBX files embed texture nodes pointing at the vendor's machine
-    (e.g. C:\\Program Files\\Leartes\\...). Remove any that don't resolve."""
+    """Remove any texture nodes that still don't resolve after rescue."""
     if not mat.use_nodes:
         return
     for node in list(mat.node_tree.nodes):
@@ -165,8 +241,9 @@ def strip_broken_image_nodes(mat):
             mat.node_tree.nodes.remove(node)
 
 
-def wire_material(mat):
-    """Attach convention-named textures to a Principled BSDF material."""
+def wire_material(mat, key_hints=(), skip_roles=frozenset()):
+    """Attach convention-named textures to a Principled BSDF material.
+    Roles in skip_roles were already wired from the FBX's own references."""
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
@@ -174,10 +251,11 @@ def wire_material(mat):
     if bsdf is None:
         return None
 
-    key, tex_set = find_texture_set(mat.name)
+    key, tex_set = find_texture_set(mat.name, key_hints)
     if not tex_set:
         return None
 
+    tex_set = {role: path for role, path in tex_set.items() if role not in skip_roles}
     used = {"key": key}
 
     if "base" in tex_set:
@@ -204,6 +282,12 @@ def wire_material(mat):
         links.new(sep.outputs["Green"], bsdf.inputs["Roughness"])
         links.new(sep.outputs["Blue"], bsdf.inputs["Metallic"])
         used["orm"] = os.path.basename(tex_set["orm"])
+    elif "roughness" in tex_set:
+        img_node = nodes.new("ShaderNodeTexImage")
+        img_node.image = load_image(tex_set["roughness"])
+        img_node.image.colorspace_settings.name = "Non-Color"
+        links.new(img_node.outputs["Color"], bsdf.inputs["Roughness"])
+        used["roughness"] = os.path.basename(tex_set["roughness"])
 
     if "emissive" in tex_set:
         img_node = nodes.new("ShaderNodeTexImage")
@@ -226,13 +310,17 @@ def wire_material(mat):
 materials = []
 texture_files = set()
 for mat in bpy.data.materials:
+    # 1. Repoint the FBX's own texture references into the kit's Textures dir.
+    rescued, key_hints = rescue_fbx_references(mat)
+    # 2. Drop whatever still points at missing files.
     strip_broken_image_nodes(mat)
-    wired = wire_material(mat)
-    entry = {"name": mat.name, "textures": wired or {}}
-    if wired:
-        for role, val in wired.items():
-            if role != "key":
-                texture_files.add(val)
+    # 3. Fill remaining roles by naming convention (hinted by the FBX refs).
+    wired = wire_material(mat, key_hints=key_hints, skip_roles=set(rescued))
+    combined = {**rescued, **(wired or {})}
+    entry = {"name": mat.name, "textures": combined}
+    for role, val in combined.items():
+        if role != "key":
+            texture_files.add(val)
     materials.append(entry)
 
 # ---------------------------------------------------------------------------

@@ -68,14 +68,26 @@ export async function importAsset(assetId, { log = console.log } = {}) {
       { log },
     );
     const meta = JSON.parse(readFileSync(path.join(outDir, "meta.json"), "utf8"));
+    // Re-imports must not demote assets that already have derivatives.
+    const current = loadRegistry().assets[assetId];
+    const status =
+      current.status === "promoted"
+        ? "promoted"
+        : (current.variants ?? []).some((v) => v.passed)
+          ? "gameready"
+          : "imported";
     return updateAsset(assetId, {
-      status: "imported",
+      status,
       importedAt: new Date().toISOString(),
       meta,
       error: null,
     });
   } catch (err) {
-    updateAsset(assetId, { status: "raw", error: String(err.message ?? err) });
+    const current = loadRegistry().assets[assetId];
+    updateAsset(assetId, {
+      status: current.meta ? "imported" : "raw",
+      error: String(err.message ?? err),
+    });
     throw err;
   }
 }

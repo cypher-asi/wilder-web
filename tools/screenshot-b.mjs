@@ -14,6 +14,7 @@ function argValue(flag) {
 }
 
 const zoomSteps = Number(argValue("--zoom") ?? 0);
+const tilt = Number(argValue("--tilt") ?? 0); // RMB-drag dy in px (negative = tilt camera lower)
 const walk = argValue("--walk");
 const tp = argValue("--tp"); // "x,z" dev teleport via chat
 
@@ -84,6 +85,18 @@ if (zoomSteps !== 0) {
     await new Promise((r) => setTimeout(r, 120));
   }
   await new Promise((r) => setTimeout(r, 1200));
+}
+
+if (tilt !== 0) {
+  // Hold RMB and drag vertically; keep the button held through the screenshot
+  // since the tilt eases back to the fixed pitch on release.
+  await page.mouse.move(800, 450);
+  await page.mouse.down({ button: "right" });
+  for (let i = 1; i <= 12; i++) {
+    await page.mouse.move(800, 450 + (tilt * i) / 12);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  await new Promise((r) => setTimeout(r, 600));
 }
 
 if (walk) {

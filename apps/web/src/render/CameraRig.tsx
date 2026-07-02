@@ -26,8 +26,8 @@ const FOG_BASE_DISTANCE = 48;
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
 const PITCH_FAR = THREE.MathUtils.degToRad(62);
-/** Total pitch band while RMB-dragging. */
-const PITCH_MIN = THREE.MathUtils.degToRad(28);
+/** Total pitch band while RMB-dragging; the low end is near-horizontal. */
+const PITCH_MIN = THREE.MathUtils.degToRad(5);
 const PITCH_MAX = THREE.MathUtils.degToRad(80);
 /** How fast the drag offsets ease back once RMB is released. */
 const RETURN_RATE = 4;

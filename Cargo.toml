@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "shared/wilder-types",
+    "shared/wilder-protocol",
+    "crates/wilder-persistence",
+    "crates/wilder-auth",
+    "crates/wilder-terrain",
+    "crates/wilder-physics",
+    "crates/wilder-pathfinding",
+    "crates/wilder-inventory",
+    "crates/wilder-replication",
+    "crates/wilder-world",
+    "crates/wilder-telemetry",
+    "crates/wilder-gateway",
+    "crates/wilder-combat",
+    "crates/wilder-ai",
+    "crates/wilder-economy",
+    "crates/wilder-crafting",
+    "crates/wilder-market",
+    "crates/wilder-sim",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+wilder-types = { path = "shared/wilder-types" }
+wilder-protocol = { path = "shared/wilder-protocol" }
+wilder-persistence = { path = "crates/wilder-persistence" }
+wilder-auth = { path = "crates/wilder-auth" }
+wilder-terrain = { path = "crates/wilder-terrain" }
+wilder-physics = { path = "crates/wilder-physics" }
+wilder-pathfinding = { path = "crates/wilder-pathfinding" }
+wilder-inventory = { path = "crates/wilder-inventory" }
+wilder-replication = { path = "crates/wilder-replication" }
+wilder-world = { path = "crates/wilder-world" }
+wilder-telemetry = { path = "crates/wilder-telemetry" }
+wilder-combat = { path = "crates/wilder-combat" }
+wilder-ai = { path = "crates/wilder-ai" }
+wilder-economy = { path = "crates/wilder-economy" }
+wilder-crafting = { path = "crates/wilder-crafting" }
+wilder-market = { path = "crates/wilder-market" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.9"
+rand_pcg = "0.9"
+argon2 = "0.5"
+dashmap = "6"
+parking_lot = "0.12"
+futures = "0.3"
+rocksdb = "0.24"
+glam = { version = "0.30", features = ["serde"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"

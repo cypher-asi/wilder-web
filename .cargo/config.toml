@@ -1,0 +1,4 @@
+# librocksdb-sys needs libclang for bindgen. Point at the standard LLVM install
+# location on Windows if the variable isn't already set in the environment.
+[env]
+LIBCLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin", force = false }

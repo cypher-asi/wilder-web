@@ -1,0 +1,13 @@
+[package]
+name = "wilder-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wilder-types = { workspace = true }
+wilder-persistence = { workspace = true }
+argon2 = { workspace = true }
+thiserror = { workspace = true }
+# argon2/password-hash use rand_core 0.6; enable OsRng for salt generation.
+rand_core06 = { package = "rand_core", version = "0.6", features = ["getrandom"] }

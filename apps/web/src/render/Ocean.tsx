@@ -22,7 +22,7 @@ import { QualityTier, useQuality } from "../perf/quality";
 import { game, useGame } from "../state/game";
 import { DISPLAY_TO_SCENE, envSkyMaterial, SUN_DIR } from "./Atmosphere";
 import { CAMERA_FAR } from "./CameraRig";
-import { isTronStyle } from "./styles";
+import { isTronStyle, STYLES } from "./styles";
 
 /** Slightly under road grade (0) so coast tiles read flush with the sea. */
 const OCEAN_Y = -0.02;
@@ -103,19 +103,27 @@ function makeWater(geometry: THREE.PlaneGeometry, resolution: number): Water {
   // - The stock shader adds a flat vec3(0.1) floor to the reflective term.
   //   That's tuned for display-referred scenes; in this scene's luminance
   //   scale it reads as a gray wash, so drop it well below the sky level.
-  // - Force the fog to fully saturate just inside the far plane so the rim
-  //   (and everything approaching it) converges on the scene fog color,
-  //   which is tuned to the sky's horizon haze -- water meets sky in the
-  //   same color instead of a hard line.
+  // - Standard exp fog toward the scene fog color handles mid-distance haze.
+  // - The rim (everything approaching the far plane) then converges on a
+  //   separate uHorizonTint, set to the sky's horizon color, so the water
+  //   meets the sky in one tone instead of a hard seam. In styles where the
+  //   fog color already matches the horizon (golden) the tint equals the fog
+  //   color and this is a no-op.
+  water.material.uniforms.uHorizonTint = { value: new THREE.Color("#031014") };
   water.material.fragmentShader = water.material.fragmentShader
     .replace("vec3( 0.1 ) +", "vec3( 0.004 ) +")
+    .replace(
+      "#include <fog_pars_fragment>",
+      "#include <fog_pars_fragment>\nuniform vec3 uHorizonTint;",
+    )
     .replace(
       "#include <fog_fragment>",
       /* glsl */ `
       #ifdef USE_FOG
         float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
-        fogFactor = max( fogFactor, smoothstep( 0.45, 0.92, vFogDepth / ${CAM_FAR.toFixed(1)} ) );
         gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+        float rimFog = smoothstep( 0.45, 0.92, vFogDepth / ${CAM_FAR.toFixed(1)} );
+        gl_FragColor.rgb = mix( gl_FragColor.rgb, uHorizonTint, rimFog );
       #endif
       `,
     );
@@ -217,10 +225,20 @@ export function Ocean() {
   }, [waters, geometry, proxySky]);
 
   // Tron water: black glass with cold blue glints (default: warm sunset).
-  const tron = useGame((s) => isTronStyle(s.visualStyle));
+  const styleId = useGame((s) => s.visualStyle);
   useEffect(() => {
+    const style = STYLES[styleId];
+    const tron = isTronStyle(styleId);
+    // Color the rim converges to as it meets the sky. In tron the fog color is
+    // near-black while the sky horizon is teal, so match the sky's horizon
+    // band (scaled by 1/exposure, like the sky dome's uLum) to blend the seam.
+    // Other styles keep converging on the fog color (unchanged behavior).
+    const horizonTint = new THREE.Color(
+      tron && style.sky ? style.sky.horizon : style.fogColor,
+    ).multiplyScalar(1 / style.exposure);
     for (const w of [waters.near, waters.far]) {
       const u = w.material.uniforms;
+      (u.uHorizonTint.value as THREE.Color).copy(horizonTint);
       if (tron) {
         (u.waterColor.value as THREE.Color).set("#031317");
         (u.sunColor.value as THREE.Color).set("#4fd0e0").multiplyScalar(0.35);
@@ -229,7 +247,7 @@ export function Ocean() {
         (u.sunColor.value as THREE.Color).set("#ffd9b0").multiplyScalar(DISPLAY_TO_SCENE);
       }
     }
-  }, [tron, waters]);
+  }, [styleId, waters]);
 
   useFrame((_, delta) => {
     perf.begin("ocean.tick");

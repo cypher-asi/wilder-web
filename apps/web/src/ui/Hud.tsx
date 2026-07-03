@@ -170,6 +170,8 @@ const WEAPON_LABEL: Record<string, string> = {
   Knife: "KNIFE",
 };
 const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
+/** Display-only ammo cap for the dock bar fill (no real magazine system). */
+const AMMO_DISPLAY_CAP = 60;
 
 /** Top-middle vitals: shield bar over health bar with numeric overlays. */
 function VitalsPanel() {
@@ -187,7 +189,7 @@ function VitalsPanel() {
         <span className="vitals-name">{characterName}</span>
       </div>
       <div className="vitals-row">
-        <span className="vital-label">HP</span>
+        <span className="vital-label">:: HP</span>
         <div className="vital-bar health">
           <div
             className="vital-fill health"
@@ -200,7 +202,7 @@ function VitalsPanel() {
         </span>
       </div>
       <div className="vitals-row">
-        <span className="vital-label">SH</span>
+        <span className="vital-label">:: SH</span>
         <div className={`vital-bar shield${maxShield === 0 ? " depleted" : ""}`}>
           <div
             className="vital-fill shield"
@@ -342,80 +344,6 @@ function ActionSlot({
   );
 }
 
-/** Line-art outline of the equipped weapon (stroke inherits currentColor). */
-function WeaponIcon({ kind }: { kind: string | null }) {
-  const stroke = {
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 2.4,
-    strokeLinejoin: "round",
-    strokeLinecap: "round",
-  } as const;
-  switch (kind) {
-    case "Pistol":
-      return (
-        <svg viewBox="0 0 96 52" className="weapon-outline">
-          <g {...stroke}>
-            {/* slide + frame, grip left, muzzle right */}
-            <path d="M6 14 H91 V26 H62 L60 31 H38 L36 26 H27 L20 45 Q18.5 49 14.5 49 H8 Q4.5 49 5.5 45 L11 26 H6 Z" />
-            {/* trigger guard */}
-            <path d="M38 31 Q40 39 47 39 Q55 39 58 31" />
-            {/* rear + front sights */}
-            <path d="M14 14 V10 H20 V14 M82 14 V10 H86 V14" />
-            {/* slide serrations */}
-            <path d="M70 17 V23 M75 17 V23 M80 17 V23" strokeWidth={1.6} />
-          </g>
-        </svg>
-      );
-    case "Smg":
-      return (
-        <svg viewBox="0 0 96 48" className="weapon-outline">
-          <g {...stroke}>
-            {/* receiver, folding stock left, barrel right */}
-            <path d="M14 16 H84 V26 H68 L66 30 H56 V44 H46 V30 H32 L30 38 Q29 42 25 42 H20 Q17 42 18 38 L20 26 H14 Z" />
-            <path d="M84 19 H94 M84 23 H94" />
-            <path d="M14 18 H4 V30 H10" />
-            {/* front grip + sight */}
-            <path d="M36 16 V11 H42 V16 M74 16 V10 H78 V16" strokeWidth={1.8} />
-          </g>
-        </svg>
-      );
-    case "Pipe":
-      return (
-        <svg viewBox="0 0 96 48" className="weapon-outline">
-          <g {...stroke}>
-            <path d="M10 40 L74 12 M16 47 L80 19" />
-            <path d="M10 40 L16 47 M74 12 L80 19" />
-            {/* end flange + grip tape */}
-            <path d="M70 8 L84 22 M74 5 L88 19" strokeWidth={1.8} />
-            <path d="M22 38 L28 45 M30 34 L36 41" strokeWidth={1.6} />
-          </g>
-        </svg>
-      );
-    case "Knife":
-      return (
-        <svg viewBox="0 0 96 48" className="weapon-outline">
-          <g {...stroke}>
-            {/* blade tip left, handle right */}
-            <path d="M4 30 Q26 12 56 15 L56 25 Q30 27 12 36 Z" />
-            <path d="M56 15 H62 L64 20 H84 Q89 24 84 29 H64 L62 25 H56" />
-            <path d="M14 29 Q30 21 48 20" strokeWidth={1.4} />
-          </g>
-        </svg>
-      );
-    default:
-      // Fists / unarmed: knuckle silhouette.
-      return (
-        <svg viewBox="0 0 96 48" className="weapon-outline">
-          <g {...stroke}>
-            <path d="M34 12 H64 Q76 12 76 24 V28 Q76 40 64 40 H40 Q30 40 30 30 V27 L22 20 Q19 16 26 14 Z" />
-            <path d="M42 12 V20 M52 12 V20 M62 12 V20" strokeWidth={1.8} />
-          </g>
-        </svg>
-      );
-  }
-}
-
 /** Bottom-left weapon dock: equipped weapon, ammo, swappable weapons, XP. */
 function WeaponDock({ connection }: { connection: GameConnection }) {
   const inventory = useGame((s) => s.inventory);
@@ -427,6 +355,7 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
   const label = weapon ? (WEAPON_LABEL[weapon] ?? weapon.toUpperCase()) : "FISTS";
   const ranged = weapon !== null && RANGED_WEAPONS.has(weapon);
   const ammo = invCount(inventory, "Ammo9mm");
+  const ammoPct = Math.min(ammo / AMMO_DISPLAY_CAP, 1) * 100;
   const xpPct = Math.min((xp / Math.max(nextLevelXp, 1)) * 100, 100);
 
   // Other weapons carried in the backpack (click to equip).
@@ -438,19 +367,26 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
   return (
     <div className="weapon-dock">
       <div className="weapon-dock-main">
-        <div className="weapon-dock-art" title={weapon ?? "Unarmed"}>
-          <span className="weapon-dock-tag">{label}</span>
-          <WeaponIcon kind={weapon} />
-        </div>
         <div className="weapon-dock-info">
+          <span className="weapon-dock-tag" title={weapon ?? "Unarmed"}>
+            {label}
+          </span>
           <div className="weapon-dock-ammo-tag">
             <span className="ammo-chevron">»</span>
-            {ranged ? "AMMO" : "MELEE"}
+            {ranged ? ":: AMMO" : ":: MELEE"}
           </div>
           {ranged && (
-            <div className={`weapon-dock-ammo${ammo === 0 ? " empty" : ""}`}>
-              {String(Math.min(ammo, 999)).padStart(3, "0")}
-              <span className="weapon-dock-ammo-label">9MM</span>
+            <div className="weapon-dock-ammo-row">
+              <div className="vital-bar ammo">
+                <div
+                  className={`vital-fill ammo${ammo === 0 ? " empty" : ""}`}
+                  style={{ width: `${ammoPct}%` }}
+                />
+              </div>
+              <div className={`weapon-dock-ammo${ammo === 0 ? " empty" : ""}`}>
+                {Math.min(ammo, 999)}
+                <span className="weapon-dock-ammo-label">/ {AMMO_DISPLAY_CAP}</span>
+              </div>
             </div>
           )}
         </div>

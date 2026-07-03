@@ -5,7 +5,10 @@
   --panel-solid: rgba(9, 15, 24, 0.88);
   --panel-border: rgba(151, 183, 211, 0.24);
   --accent: #4fc3ff;
-  --accent-warm: #ff4d5e;
+  /* Canonical hostile red (see apps/web/src/ui/colors.ts). */
+  --red: #ff6a7c;
+  --red-glow: rgba(255, 106, 124, 0.7);
+  --accent-warm: var(--red);
   --accent-bright: #eaf7ff;
   --accent-dim: rgba(79, 195, 255, 0.45);
   --accent-faint: rgba(79, 195, 255, 0.1);
@@ -13,7 +16,7 @@
   --steel: #9fb4c8;
   --steel-border: rgba(159, 180, 200, 0.26);
   --steel-fill: rgba(159, 180, 200, 0.08);
-  --alert: #ff4d5e;
+  --alert: var(--red);
   --text: #dfe9f2;
   --text-dim: #7f8ea0;
   --hud-glow: 0 0 12px rgba(79, 195, 255, 0.4);
@@ -332,14 +335,31 @@ body {
   margin-bottom: 4px;
 }
 
+/* Floating segmented bar: dark translucent track, no hard frame (the cluster's
+   drop-shadow gives the float). Segment ticks come from an overlay on ::after. */
 .vital-bar {
   position: relative;
   flex: 1;
   height: 9px;
-  background: rgba(4, 6, 11, 0.55);
-  border: 1px solid var(--steel-border);
+  background: rgba(4, 6, 11, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(159, 180, 200, 0.16);
   clip-path: var(--clip-notch-sm);
   overflow: hidden;
+}
+
+/* Segment dividers: thin dark gaps across the whole bar (fill + track). */
+.vital-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent 9px,
+    rgba(4, 6, 11, 0.7) 9px,
+    rgba(4, 6, 11, 0.7) 11px
+  );
 }
 
 .vital-bar.shield {
@@ -355,15 +375,16 @@ body {
   transition: width 0.25s;
 }
 
-/* Health reads as the bright white bar; shield as the blue layer under it. */
+/* Health reads as the bright white bar; shield as the blue layer under it.
+   Color pop: brighter stops + a stronger bloom against the dark track. */
 .vital-fill.health {
-  background: linear-gradient(90deg, #b8dcf5, #ffffff);
-  box-shadow: 0 0 14px rgba(233, 245, 255, 0.6);
+  background: linear-gradient(90deg, #cfe9ff, #ffffff);
+  box-shadow: 0 0 16px rgba(233, 245, 255, 0.85);
 }
 
 .vital-fill.shield {
-  background: linear-gradient(90deg, #1f7fc4, var(--accent));
-  box-shadow: 0 0 12px rgba(79, 195, 255, 0.6);
+  background: linear-gradient(90deg, #2aa6ff, #7fe0ff);
+  box-shadow: 0 0 14px rgba(79, 195, 255, 0.85);
 }
 
 /* Tiny uppercase micro-label in front of each bar (CORE/AUX style). */
@@ -373,7 +394,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.16em;
   color: var(--text-dim);
-  min-width: 16px;
+  min-width: 26px;
   text-align: right;
 }
 
@@ -877,11 +898,11 @@ body {
   gap: 12px;
 }
 
-.weapon-dock-art {
+.weapon-dock-info {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 4px;
 }
 
 /* Small bordered name chip, like the reference's weapon tag. */
@@ -898,14 +919,6 @@ body {
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
 }
 
-/* Line-art gun outline. */
-.weapon-outline {
-  width: 104px;
-  height: 52px;
-  color: var(--accent-bright);
-  filter: drop-shadow(0 0 6px rgba(79, 195, 255, 0.45));
-}
-
 /* AMMO micro-tag with a hot chevron block, like the reference's ammo chip. */
 .weapon-dock-ammo-tag {
   display: flex;
@@ -916,7 +929,29 @@ body {
   font-weight: 700;
   letter-spacing: 0.22em;
   color: var(--text-dim);
-  margin-bottom: 3px;
+}
+
+/* Ammo progress bar + big count, laid out like the reference. */
+.weapon-dock-ammo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.vital-bar.ammo {
+  width: 150px;
+  height: 10px;
+  flex: none;
+}
+
+.vital-fill.ammo {
+  background: linear-gradient(90deg, #2aa6ff, #7fe0ff);
+  box-shadow: 0 0 14px rgba(79, 195, 255, 0.85);
+}
+
+.vital-fill.ammo.empty {
+  background: linear-gradient(90deg, #b3202f, var(--alert));
+  box-shadow: 0 0 12px rgba(255, 77, 94, 0.7);
 }
 
 .ammo-chevron {
@@ -954,9 +989,9 @@ body {
 }
 
 .weapon-dock-ammo-label {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.18em;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   color: var(--text-dim);
   margin-left: 5px;
 }
@@ -1125,9 +1160,9 @@ body {
 .target-reticle-outer,
 .target-reticle-inner {
   position: absolute;
-  border: 1.5px solid #ff3040;
+  border: 1.5px solid var(--red);
   transform: translate(-50%, -50%) rotate(45deg);
-  box-shadow: 0 0 4px rgba(255, 48, 64, 0.7);
+  box-shadow: 0 0 6px var(--red-glow);
   left: 50%;
   top: 50%;
 }
@@ -1140,7 +1175,7 @@ body {
 .target-reticle-inner {
   width: 7px;
   height: 7px;
-  background: rgba(255, 48, 64, 0.5);
+  background: var(--red-glow);
 }
 
 @keyframes target-acquire {
@@ -1160,22 +1195,24 @@ body {
   height: 6px;
   padding: 1px;
   background: rgba(10, 5, 8, 0.85);
-  border: 1px solid rgba(255, 48, 64, 0.5);
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--red-glow);
+  box-shadow:
+    0 0 4px rgba(0, 0, 0, 0.6),
+    0 0 6px var(--red-glow);
   pointer-events: none;
 }
 
 .enemy-hpbar-fill {
   height: 100%;
   width: 100%;
-  background: linear-gradient(90deg, #ff2a3a, #ff6070);
-  box-shadow: 0 0 4px rgba(255, 48, 64, 0.7);
+  background: linear-gradient(90deg, #e04a5a, var(--red));
+  box-shadow: 0 0 6px var(--red-glow);
 }
 
 /* Red skull that pops up when an enemy dies. */
 .death-skull {
   pointer-events: none;
-  filter: drop-shadow(0 0 6px rgba(255, 42, 58, 0.85));
+  filter: drop-shadow(0 0 6px var(--red-glow));
   animation: death-skull-rise 0.6s ease-out forwards;
 }
 
@@ -1203,9 +1240,9 @@ body {
   font-family: var(--font-display);
   font-size: 15px;
   font-weight: 800;
-  color: #ff4646;
+  color: var(--red);
   text-shadow:
-    0 0 6px rgba(255, 40, 40, 0.95),
+    0 0 8px var(--red-glow),
     0 1px 2px #000;
   animation: dmg-rise 0.8s ease-out forwards;
   pointer-events: none;

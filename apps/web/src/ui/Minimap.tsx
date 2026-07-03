@@ -1,29 +1,49 @@
-// Corner minimap (top-right): a live north-up crop of the baked city map
+// Corner minimap (top-right): a live north-up crop of the city tile grid
 // centered on the player, with entity blips (NPCs, players, extraction
 // points) and the safe-zone outline. Click (or M) opens the fullscreen map.
+//
+// The base layer is drawn from the raw tile grid (not the baked image):
+// dark streets with buildings as glowing outlined shapes, holo-map style.
+// It renders into a padded offscreen canvas and only re-renders when the
+// player drifts near its edge; per-frame work is a single blit + blips.
 
-import { useEffect, useRef, useState } from "react";
-import { CityMapManifest, getCityMapManifest } from "../game/citymap";
-import { CHUNK_SIZE } from "../net/protocol";
+import { useEffect, useRef } from "react";
+import {
+  CITY_BUILDING,
+  CITY_PARK,
+  CITY_PLAZA,
+  CITY_ROAD,
+  CITY_ROAD_LINE,
+  CITY_SIDEWALK,
+  cityMapReady,
+  cityTileAt,
+  onCityMapReady,
+} from "../game/citymap";
+import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
 
 /** Canvas size in CSS px (square panel with notched corners). */
 const SIZE = 192;
 /** Screen px per world meter. */
 const SCALE = 1.35;
+/** Extra px margin around the view in the cached base layer. */
+const PAD = 28;
+const BSIZE = SIZE + PAD * 2;
+
+/** Ground fills: streets and open ground stay dark, buildings barely lighter. */
+const TILE_FILL: Record<number, string> = {
+  [CITY_ROAD]: "#030710",
+  [CITY_ROAD_LINE]: "#071022",
+  [CITY_SIDEWALK]: "#050d1a",
+  [CITY_PLAZA]: "#061020",
+  [CITY_PARK]: "#04101a",
+  [CITY_BUILDING]: "#0a1830",
+};
+const WATER_FILL = "#01040a";
 
 export function Minimap() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [manifest, setManifest] = useState<CityMapManifest | null>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
   const toggleMap = useGame((s) => s.toggleMap);
-
-  useEffect(() => {
-    void getCityMapManifest().then(setManifest);
-    const img = new Image();
-    img.src = "/citymap/minimap.png";
-    img.onload = () => (imageRef.current = img);
-  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -31,6 +51,89 @@ export function Minimap() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     let raf = 0;
+
+    // Cached base layer (tiles + building outlines) centered on baseC.
+    const base = document.createElement("canvas");
+    const bctx = base.getContext("2d")!;
+    let baseCx = Infinity;
+    let baseCz = Infinity;
+    let baseDpr = 0;
+    let gridReady = cityMapReady();
+    onCityMapReady(() => {
+      gridReady = true;
+      baseCx = Infinity; // force re-render
+    });
+
+    const renderBase = (cx: number, cz: number, dpr: number) => {
+      if (base.width !== BSIZE * dpr) {
+        base.width = BSIZE * dpr;
+        base.height = BSIZE * dpr;
+      }
+      bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bctx.fillStyle = WATER_FILL;
+      bctx.fillRect(0, 0, BSIZE, BSIZE);
+      if (!gridReady) return;
+
+      const toBase = (wx: number, wz: number): [number, number] => [
+        BSIZE / 2 + (wx - cx) * SCALE,
+        BSIZE / 2 + (wz - cz) * SCALE,
+      ];
+      const t = TILE_SIZE;
+      const s = t * SCALE;
+      const tx0 = Math.floor((cx - BSIZE / 2 / SCALE) / t) - 1;
+      const tz0 = Math.floor((cz - BSIZE / 2 / SCALE) / t) - 1;
+      const tiles = Math.ceil(BSIZE / s) + 2;
+
+      // Ground fills.
+      for (let gz = 0; gz < tiles; gz++) {
+        for (let gx = 0; gx < tiles; gx++) {
+          const kind = cityTileAt(tx0 + gx, tz0 + gz);
+          const [x, y] = toBase((tx0 + gx) * t, (tz0 + gz) * t);
+          bctx.fillStyle = TILE_FILL[kind] ?? WATER_FILL;
+          bctx.fillRect(x, y, s + 0.5, s + 0.5);
+        }
+      }
+
+      // Building outlines: stroke every edge where a building tile meets a
+      // non-building tile, as one glowing path.
+      bctx.beginPath();
+      for (let gz = 0; gz < tiles; gz++) {
+        for (let gx = 0; gx < tiles; gx++) {
+          const tx = tx0 + gx;
+          const tz = tz0 + gz;
+          if (cityTileAt(tx, tz) !== CITY_BUILDING) continue;
+          const [x, y] = toBase(tx * t, tz * t);
+          if (cityTileAt(tx, tz - 1) !== CITY_BUILDING) {
+            bctx.moveTo(x, y);
+            bctx.lineTo(x + s, y);
+          }
+          if (cityTileAt(tx, tz + 1) !== CITY_BUILDING) {
+            bctx.moveTo(x, y + s);
+            bctx.lineTo(x + s, y + s);
+          }
+          if (cityTileAt(tx - 1, tz) !== CITY_BUILDING) {
+            bctx.moveTo(x, y);
+            bctx.lineTo(x, y + s);
+          }
+          if (cityTileAt(tx + 1, tz) !== CITY_BUILDING) {
+            bctx.moveTo(x + s, y);
+            bctx.lineTo(x + s, y + s);
+          }
+        }
+      }
+      bctx.strokeStyle = "rgba(79, 195, 255, 0.85)";
+      bctx.lineWidth = 1;
+      bctx.shadowColor = "rgba(79, 195, 255, 0.9)";
+      bctx.shadowBlur = 5;
+      bctx.stroke();
+      // Second pass without blur sharpens the line over its own glow.
+      bctx.shadowBlur = 0;
+      bctx.strokeStyle = "rgba(180, 230, 255, 0.55)";
+      bctx.stroke();
+
+      baseCx = cx;
+      baseCz = cz;
+    };
 
     const draw = (now: number) => {
       raf = requestAnimationFrame(draw);
@@ -40,38 +143,30 @@ export function Minimap() {
         canvas.height = SIZE * dpr;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#010409";
+      ctx.fillStyle = WATER_FILL;
       ctx.fillRect(0, 0, SIZE, SIZE);
 
       const px = game.predicted.x;
       const pz = game.predicted.z;
+
+      // Re-render the cached base when the view nears its padded edge.
+      const drift = Math.max(Math.abs(px - baseCx), Math.abs(pz - baseCz)) * SCALE;
+      if (drift > PAD - 6 || baseDpr !== dpr) {
+        renderBase(px, pz, dpr);
+        baseDpr = dpr;
+      }
+      ctx.drawImage(
+        base,
+        SIZE / 2 - BSIZE / 2 + (baseCx - px) * SCALE,
+        SIZE / 2 - BSIZE / 2 + (baseCz - pz) * SCALE,
+        BSIZE,
+        BSIZE,
+      );
+
       const toScreen = (x: number, z: number): [number, number] => [
         SIZE / 2 + (x - px) * SCALE,
         SIZE / 2 + (z - pz) * SCALE,
       ];
-
-      // Baked city image: world meters -> image px via the manifest transform.
-      const img = imageRef.current;
-      const man = manifest;
-      if (img && man) {
-        const originX = man.tileMinX * man.tileSize;
-        const originZ = man.tileMinZ * man.tileSize;
-        const metersPerPx = man.tileSize / man.pxPerTile;
-        const [sx, sy] = toScreen(originX, originZ);
-        const s = SCALE * metersPerPx;
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(img, sx, sy, img.width * s, img.height * s);
-        // Holographic recolor to match the fullscreen map: keep the baked
-        // luminance but force everything to the hologram blue hue.
-        ctx.globalCompositeOperation = "color";
-        ctx.fillStyle = "#4fc3ff";
-        ctx.fillRect(0, 0, SIZE, SIZE);
-        // Lift bright areas (roads) into a glow like the M map's emissive net.
-        ctx.globalCompositeOperation = "overlay";
-        ctx.fillStyle = "rgba(79, 195, 255, 0.35)";
-        ctx.fillRect(0, 0, SIZE, SIZE);
-        ctx.globalCompositeOperation = "source-over";
-      }
 
       // Safe-zone outline (chunks |x|,|z| <= 1).
       {
@@ -146,7 +241,7 @@ export function Minimap() {
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [manifest]);
+  }, []);
 
   return (
     <div className="minimap-ring" onClick={toggleMap} title="Open map (M)">

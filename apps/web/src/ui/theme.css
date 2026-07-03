@@ -291,6 +291,8 @@ body {
   left: 16px;
   width: 280px;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+  transform: perspective(900px) rotateY(8deg);
+  transform-origin: left center;
 }
 
 .vitals-top {
@@ -340,21 +342,6 @@ body {
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   overflow: hidden;
-}
-
-/* Segment ticks over the whole track, like the reference's notched bars. */
-.vital-bar::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    90deg,
-    transparent 0px,
-    transparent 9px,
-    rgba(4, 6, 11, 0.85) 9px,
-    rgba(4, 6, 11, 0.85) 11px
-  );
-  pointer-events: none;
 }
 
 .vital-bar.shield {
@@ -433,6 +420,8 @@ body {
   align-items: center;
   gap: 6px;
   pointer-events: auto;
+  transform: perspective(900px) rotateY(-8deg);
+  transform-origin: right center;
 }
 
 /* Square holo-map crop: notched frame with corner brackets, like the M map. */
@@ -492,9 +481,7 @@ body {
 
 .hp-bar {
   height: 8px;
-  background:
-    var(--hatch-steel),
-    rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.45);
   border: 1px solid var(--steel-border);
   overflow: hidden;
 }
@@ -568,6 +555,9 @@ body {
   pointer-events: auto;
   opacity: 0.6;
   transition: opacity 0.2s;
+  transform: perspective(900px) rotateY(8deg);
+  transform-origin: left center;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.6));
 }
 
 .chatwin:hover,
@@ -602,10 +592,8 @@ body {
 }
 
 .chatwin-body {
-  background: var(--panel);
-  backdrop-filter: blur(8px);
+  background: rgba(9, 15, 24, 0.4);
   border: 1px solid var(--steel-border);
-  box-shadow: var(--holo-layers);
   clip-path: polygon(
     100% 0,
     100% calc(100% - 8px),
@@ -710,7 +698,8 @@ body {
   position: absolute;
   top: 50%;
   right: 20px;
-  transform: translateY(-50%);
+  transform: translateY(-50%) perspective(1100px) rotateY(-6deg);
+  transform-origin: right center;
   background: var(--panel);
   backdrop-filter: blur(10px);
   border: 1px solid var(--panel-border);
@@ -765,28 +754,26 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Bottom-center action bar (roll / abilities / consumables). */
+/* Bottom-center action bar (roll / abilities / consumables): floating slots
+   tilted back like a cockpit dashboard. */
 .action-bar {
   position: absolute;
   bottom: 12px;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(-50%) perspective(900px) rotateX(7deg);
+  transform-origin: center bottom;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 9px 14px;
-  background: var(--panel);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--panel-border);
-  box-shadow: var(--holo-layers);
   pointer-events: auto;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
 }
 
 .action-slot {
   position: relative;
   width: 46px;
   height: 46px;
-  background: rgba(233, 245, 255, 0.04);
+  background: rgba(9, 15, 24, 0.45);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   display: flex;
@@ -878,6 +865,8 @@ body {
   min-width: 250px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+  transform: perspective(900px) rotateY(8deg);
+  transform-origin: left center;
 }
 
 .weapon-dock-main {
@@ -1030,6 +1019,9 @@ body {
   gap: 6px;
   align-items: stretch;
   pointer-events: auto;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+  transform: perspective(900px) rotateY(-8deg);
+  transform-origin: right center;
 }
 
 .backpack-grid {
@@ -1037,17 +1029,12 @@ body {
   grid-template-columns: repeat(6, 26px);
   grid-auto-rows: 26px;
   gap: 4px;
-  background: var(--panel);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--panel-border);
-  box-shadow: var(--holo-layers);
-  padding: 8px;
   cursor: pointer;
 }
 
 .backpack-slot {
   position: relative;
-  background: rgba(233, 245, 255, 0.03);
+  background: rgba(9, 15, 24, 0.45);
   border: 1px solid var(--steel-border);
   display: flex;
   align-items: center;
@@ -1068,8 +1055,7 @@ body {
 .backpack-btn {
   position: relative;
   width: 52px;
-  background: var(--panel);
-  backdrop-filter: blur(8px);
+  background: rgba(9, 15, 24, 0.45);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   display: flex;
@@ -1101,9 +1087,7 @@ body {
 .xp-bar {
   flex: 1;
   height: 5px;
-  background:
-    var(--hatch-steel),
-    rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }
 

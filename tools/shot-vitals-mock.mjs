@@ -9,7 +9,7 @@ const browser = await puppeteer.launch({
 });
 const page = await browser.newPage();
 page.on("pageerror", (e) => console.error("[pageerror]", e.message));
-await page.goto("http://localhost:5173", { waitUntil: "networkidle2" });
+await page.goto(process.env.SHOT_URL ?? "http://localhost:5173", { waitUntil: "networkidle2" });
 
 await page.waitForFunction(
   () => [...document.querySelectorAll("button")].some((b) => b.textContent.includes("DEV LOGIN")),

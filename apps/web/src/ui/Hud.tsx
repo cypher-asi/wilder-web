@@ -80,26 +80,38 @@ function VitalsPanel() {
 
   return (
     <div className="vitals">
-      <div className="vitals-name">
-        {characterName}
-        <span className="vitals-level">LV {level}</span>
+      <div className="vitals-top">
+        <span className="vitals-badge">{level}</span>
+        <span className="vitals-name">{characterName}</span>
       </div>
-      <div className={`vital-bar shield${maxShield === 0 ? " depleted" : ""}`}>
-        <div
-          className="vital-fill shield"
-          style={{ width: `${maxShield > 0 ? (shield / maxShield) * 100 : 0}%` }}
-        />
-        <span className="vital-num">
-          {maxShield > 0 ? `${Math.round(shield)} / ${Math.round(maxShield)}` : "NO SHIELD"}
+      <div className="vitals-row">
+        <div className="vital-bar health">
+          <div
+            className="vital-fill health"
+            style={{ width: `${(health / Math.max(maxHealth, 1)) * 100}%` }}
+          />
+        </div>
+        <span className="vital-big health">
+          {Math.round(health)}
+          <span className="vital-max">/{Math.round(maxHealth)}</span>
         </span>
       </div>
-      <div className="vital-bar health">
-        <div
-          className="vital-fill health"
-          style={{ width: `${(health / Math.max(maxHealth, 1)) * 100}%` }}
-        />
-        <span className="vital-num">
-          {Math.round(health)} / {Math.round(maxHealth)}
+      <div className="vitals-row">
+        <div className={`vital-bar shield${maxShield === 0 ? " depleted" : ""}`}>
+          <div
+            className="vital-fill shield"
+            style={{ width: `${maxShield > 0 ? (shield / maxShield) * 100 : 0}%` }}
+          />
+        </div>
+        <span className="vital-big shield">
+          {maxShield > 0 ? (
+            <>
+              {Math.round(shield)}
+              <span className="vital-max">/{Math.round(maxShield)}</span>
+            </>
+          ) : (
+            "NO SHIELD"
+          )}
         </span>
       </div>
     </div>

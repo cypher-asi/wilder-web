@@ -122,6 +122,16 @@ float gVoroEdge(vec2 p) {
   }
   return f2 - f1;
 }
+// Sparse round spots (drips, gum): 1 inside a spot, 0 outside. cellW meters
+// per cell, chance of a spot per cell, radius as a fraction of the cell.
+float gSpots(vec2 wp, float cellW, float chance, float radius) {
+  vec2 cell = floor(wp / cellW);
+  vec2 h = gHash22(cell + 3.1);
+  if (h.x > chance) return 0.0;
+  vec2 center = (cell + 0.25 + 0.5 * gHash22(cell + 7.9)) * cellW;
+  float r = radius * cellW * (0.6 + 0.8 * h.y);
+  return 1.0 - smoothstep(r * 0.6, r, length(wp - center));
+}
 `;
 
 // Main surface computation. Declares gRgh / gWN at main() scope so the
@@ -148,7 +158,7 @@ vec2 gNrm2 = vec2(0.0);
 float gNStr = 0.0;
 if (gKind == 0) {
   vec2 uv = gUV / 3.6;
-  gAlb = texture2D(uAsphaltMap, uv).rgb * 0.85;
+  gAlb = texture2D(uAsphaltMap, uv).rgb * 1.2;
   gRgh = clamp(texture2D(uAsphaltRough, uv).r * 0.5 + 0.03, 0.1, 0.6);
   gNrm2 = texture2D(uAsphaltNormal, uv).rg * 2.0 - 1.0;
   gNStr = 0.45;
@@ -172,7 +182,7 @@ if (gKind == 0) {
   gNStr = 0.25;
 } else if (gKind == 3) {
   vec2 uv = gUV / 3.0;
-  gAlb = texture2D(uConcreteMap, uv).rgb * 0.42;
+  gAlb = texture2D(uConcreteMap, uv).rgb * 0.55;
   gRgh = clamp(texture2D(uConcreteRough, uv).r * 0.55 + 0.12, 0.2, 0.8);
   gNrm2 = texture2D(uConcreteNormal, uv).rg * 2.0 - 1.0;
   gNStr = 0.4;
@@ -187,8 +197,8 @@ if (gKind == 0) {
   gRgh = 0.05;
 }
 
-// Large-scale mottle so big surfaces don't read flat under moonlight.
-gAlb *= 0.65 + 0.65 * gFbm(wp.xz * 0.06 + 7.7);
+// Large-scale mottle so big surfaces don't read flat in low sun.
+gAlb *= 0.85 + 0.35 * gFbm(wp.xz * 0.06 + 7.7);
 
 // Dirt blotches on walkable concrete (boot traffic, weathering).
 if (gKind == 1 || gKind == 2 || gKind == 3) {
@@ -218,14 +228,56 @@ if (gKind == 0) {
 gAlb *= 1.0 - 0.4 * gCrack;
 gRgh = mix(gRgh, min(gRgh + 0.15, 1.0), gCrack);
 
-// Oil stains (dark, glossier) and repair patches (lighter, drier) on roads.
+// Road surface life: tire wear, tar seams, stains, patches, damp sheen.
 if (gKind == 0) {
-  float oil = smoothstep(0.56, 0.78, gFbm(wp.xz * 0.14 + 31.7));
-  gAlb *= 1.0 - 0.4 * oil;
+  float dCurb = max(-vRoadD, 0.0);
+
+  // Tire-wear tracks: two polished strips per 3.5 m lane, measured from the
+  // curb (approximates the lane module without knowing the road layout).
+  float lf = fract((dCurb - 0.9) / 3.5);
+  float track = max(
+    1.0 - smoothstep(0.05, 0.17, abs(lf - 0.27)),
+    1.0 - smoothstep(0.05, 0.17, abs(lf - 0.73)));
+  track *= smoothstep(0.5, 1.4, dCurb);
+  track *= 0.55 + 0.45 * gFbm(wp.xz * 0.11 + 41.0);
+  gAlb *= 1.0 - 0.32 * track;
+  gRgh = mix(gRgh, gRgh * 0.55, track);
+
+  // Tar crack-seal: dark glossy snaking lines, sparser than the crack field.
+  float tarLine = 1.0 - smoothstep(0.05, 0.15, gVoroEdge(wp.xz * 0.17 + 5.0));
+  float tar = tarLine * smoothstep(0.52, 0.72, gFbm(wp.xz * 0.05 + 130.0));
+  gAlb = mix(gAlb, vec3(0.016, 0.016, 0.018), 0.7 * tar);
+  gRgh = mix(gRgh, 0.28, tar);
+
+  // Oil stains: dark, glossier, biased toward lane centers and the gutter.
+  float oil = smoothstep(0.56, 0.78, gFbm(wp.xz * 0.14 + 31.7) + gNearC * 0.05);
+  gAlb *= 1.0 - 0.28 * oil;
   gRgh = mix(gRgh, gRgh * 0.5, oil);
-  float repair = smoothstep(0.62, 0.8, gFbm(wp.xz * 0.075 + 91.2));
+
+  // Drip spots (engine drips, gum, rust runoff) scattered mid-lane.
+  float drip = gSpots(wp.xz, 1.7, 0.1, 0.28);
+  gAlb *= 1.0 - 0.22 * drip;
+  gRgh = mix(gRgh, gRgh * 0.75, drip);
+
+  // Drainage fans: broad wet-dirt stains spreading from the curb line.
+  float fan = gNearC * smoothstep(0.42, 0.72, gFbm(wp.xz * 0.3 + 77.0));
+  gAlb *= 1.0 - 0.18 * fan;
+
+  // Repair patches: lighter fresh asphalt with a dark sealed rim.
+  float repairN = gFbm(wp.xz * 0.075 + 91.2);
+  float repair = smoothstep(0.62, 0.8, repairN);
+  float rim = smoothstep(0.575, 0.62, repairN) * (1.0 - smoothstep(0.63, 0.7, repairN));
   gAlb = mix(gAlb, gAlb * vec3(1.3, 1.27, 1.2), repair);
   gRgh = mix(gRgh, min(gRgh + 0.3, 0.9), repair);
+  gNStr *= 1.0 - 0.5 * repair; // fresh asphalt reads smoother
+  gAlb *= 1.0 - 0.3 * rim;
+  gRgh = mix(gRgh, 0.3, rim);
+
+  // Uniform damp sheen: the whole street reads recently rained-on, with
+  // large-scale variation so some stretches dried out more than others.
+  float damp = clamp(0.35 + 0.55 * gFbm(wp.xz * 0.03 + 200.0), 0.0, 1.0);
+  gAlb *= 1.0 - 0.2 * damp;
+  gRgh = mix(gRgh, gRgh * 0.55 + 0.02, damp);
 }
 
 // Puddles: pooled in gutters and low spots; mirror-smooth, slightly dark.
@@ -242,7 +294,7 @@ float gPud = 0.0;
 // Grime: alleys and block interiors far from any road get dirtier.
 if (gKind >= 1 && gKind <= 4 && gUp > 0.5) {
   float grime = smoothstep(2.5, 9.0, gDistRoad) * (0.65 + 0.35 * gFbm(wp.xz * 0.45 + 9.0));
-  gAlb *= 1.0 - 0.38 * grime;
+  gAlb *= 1.0 - 0.3 * grime;
   gRgh = mix(gRgh, min(gRgh + 0.15, 1.0), grime * 0.5);
 }
 
@@ -271,6 +323,12 @@ groundMaterial.onBeforeCompile = (shader) => {
     .replace(
       "#include <roughnessmap_fragment>",
       "#include <roughnessmap_fragment>\n  roughnessFactor = gRgh;",
+    )
+    // Puddles pick up a metalness kick so the env map reads as a real water
+    // reflection (diffuse dies, specular tint from the darkened albedo).
+    .replace(
+      "#include <metalnessmap_fragment>",
+      "#include <metalnessmap_fragment>\n  metalnessFactor = mix(metalnessFactor, 0.4, gPud);",
     )
     .replace(
       "#include <normal_fragment_begin>",

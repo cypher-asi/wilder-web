@@ -65,8 +65,8 @@ class GeoBuilder {
   normals: number[] = [];
   kinds: number[] = [];
   roadDs: number[] = [];
-  /** Signed road distance (m) applied to vertices emitted by tri/quad. */
-  roadD = 0;
+  /** Smooth signed road distance (m) sampled per vertex from local x/z. */
+  sampleRoadD: (x: number, z: number) => number = () => 0;
 
   tri(a: number[], b: number[], c: number[], kind: number) {
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
@@ -77,10 +77,10 @@ class GeoBuilder {
     const len = Math.hypot(nx, ny, nz) || 1;
     nx /= len; ny /= len; nz /= len;
     this.positions.push(...a, ...b, ...c);
-    for (let i = 0; i < 3; i++) {
+    for (const v of [a, b, c]) {
       this.normals.push(nx, ny, nz);
       this.kinds.push(kind);
-      this.roadDs.push(this.roadD);
+      this.roadDs.push(this.sampleRoadD(v[0], v[2]));
     }
   }
 
@@ -148,11 +148,36 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
     return k === CITY_ROAD || k === CITY_ROAD_LINE;
   };
 
+  // Signed road distance sampled at tile centers (1-tile margin), then
+  // bilinear-interpolated per vertex so the field is smooth across tiles;
+  // the shader's gutter/wear bands would staircase on the 2 m grid otherwise.
+  const stride = n + 2;
+  const dist = new Float32Array(stride * stride);
+  for (let tz = -1; tz <= n; tz++) {
+    for (let tx = -1; tx <= n; tx++) {
+      dist[(tz + 1) * stride + tx + 1] = signedRoadDistance(roadAt, tx, tz);
+    }
+  }
+  const distAt = (tx: number, tz: number): number => {
+    const cx = Math.min(Math.max(tx, -1), n) + 1;
+    const cz = Math.min(Math.max(tz, -1), n) + 1;
+    return dist[cz * stride + cx];
+  };
+  g.sampleRoadD = (x, z) => {
+    const u = x / TILE_SIZE - 0.5;
+    const v = z / TILE_SIZE - 0.5;
+    const u0 = Math.floor(u), v0 = Math.floor(v);
+    const fu = u - u0, fv = v - v0;
+    return (
+      (distAt(u0, v0) * (1 - fu) + distAt(u0 + 1, v0) * fu) * (1 - fv) +
+      (distAt(u0, v0 + 1) * (1 - fu) + distAt(u0 + 1, v0 + 1) * fu) * fv
+    );
+  };
+
   for (let tz = 0; tz < n; tz++) {
     for (let tx = 0; tx < n; tx++) {
       const tileKind = chunk.tiles[tz * n + tx];
       const kind = KIND_ID[tileKind] ?? 2;
-      g.roadD = tileKind === "Water" ? 99 : signedRoadDistance(roadAt, tx, tz);
       const x0 = tx * TILE_SIZE, x1 = x0 + TILE_SIZE;
       const z0 = tz * TILE_SIZE, z1 = z0 + TILE_SIZE;
 

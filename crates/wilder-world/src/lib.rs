@@ -54,9 +54,10 @@ const LOOT_TTL_SECONDS: f32 = 120.0;
 /// findable but not everywhere; count per chunk and rounds per cache.
 const AMMO_CACHE_COUNT: usize = 3;
 const AMMO_CACHE_ROUNDS: u32 = 12;
-/// Ammo caches are grabbed automatically when a player walks within this
-/// distance (metres) - no click required.
-const AMMO_PICKUP_RADIUS: f32 = 2.0;
+/// Loot (ammo caches, NPC/player drops) is grabbed automatically when a
+/// player walks within this distance (metres) - no click required. Click
+/// pickup only works with a free cursor, which mouse-look play never has.
+const LOOT_PICKUP_RADIUS: f32 = 2.0;
 /// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
 const NODE_CHARGES: u32 = 5;
 const NODE_RESPAWN_SECONDS: f32 = 60.0;
@@ -2900,14 +2901,12 @@ impl World {
     }
 
     fn tick_loot(&mut self) {
-        // Auto-pickup: walking within range of an ammo cache grabs it instantly.
+        // Auto-pickup: walking within range of any loot container (ammo
+        // cache, NPC/player drop) grabs it instantly.
         let mut grabbed: Vec<(EntityId, EntityId)> = Vec::new();
         for player in self.players.values() {
             for container in self.loot.values() {
-                if container.variant != 1 {
-                    continue;
-                }
-                if (container.position - player.character.position).length() <= AMMO_PICKUP_RADIUS {
+                if (container.position - player.character.position).length() <= LOOT_PICKUP_RADIUS {
                     grabbed.push((player.entity, container.entity));
                 }
             }
@@ -2933,6 +2932,7 @@ impl World {
             container.items = leftovers;
             let owner = container.owner.clone();
             let in_supply = container.in_supply;
+            let variant = container.variant;
             let picker = player_party(player);
             // Auto-pickup never sends `denied`: a full backpack next to a
             // cache would spam the toast every tick.
@@ -2946,8 +2946,9 @@ impl World {
             }
             let grabbed_any = !taken.is_empty();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
-            // Ammo caches (the only auto-pickup) carry a small Energy charge.
-            if grabbed_any {
+            // Only ammo caches carry the small Energy charge; ordinary drops
+            // (NPC/player loot) don't mint currency on pickup.
+            if grabbed_any && variant == 1 {
                 self.grant_energy(pid, 1);
             }
         }

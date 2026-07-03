@@ -2567,7 +2567,6 @@ body {
 .econ-kpi {
   background: var(--panel);
   border: 1px solid var(--steel-border);
-  clip-path: var(--clip-notch-sm);
   padding: 8px 12px 7px;
 }
 
@@ -2628,7 +2627,7 @@ body {
 
 .econ-row {
   display: grid;
-  grid-template-columns: 118px 1.1fr 1.1fr 108px 52px 1.3fr 70px;
+  grid-template-columns: 118px 1.1fr 1.1fr 108px 52px 56px 1.3fr 70px;
   gap: 8px;
   align-items: center;
   padding: 4px 6px;
@@ -2653,6 +2652,29 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-dim) transparent;
+}
+
+.econ-feed-list::-webkit-scrollbar,
+.econ-supply-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.econ-feed-list::-webkit-scrollbar-track,
+.econ-supply-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.econ-feed-list::-webkit-scrollbar-thumb,
+.econ-supply-list::-webkit-scrollbar-thumb {
+  background: var(--accent-dim);
+  border-radius: 0;
+}
+
+.econ-feed-list::-webkit-scrollbar-thumb:hover,
+.econ-supply-list::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 
 .econ-feed-list .econ-row:first-child {
@@ -2681,6 +2703,7 @@ body {
 }
 
 .econ-block,
+.econ-age,
 .econ-fee {
   color: var(--text-dim);
   font-size: 11px;
@@ -2691,11 +2714,11 @@ body {
 }
 
 .econ-party-agent {
-  color: #ffd75e;
+  color: var(--white);
 }
 
 .econ-party-mint {
-  color: #7ed07e;
+  color: #9fdcff;
   letter-spacing: 0.1em;
   font-size: 10px;
 }
@@ -2715,11 +2738,19 @@ body {
 }
 
 .econ-amount-wild {
-  color: #8fe06a;
+  color: #8fd6ff;
+}
+
+.econ-amount-shards {
+  color: #cfe4f5;
+}
+
+.econ-amount-energy {
+  color: #9fdcff;
 }
 
 .econ-amount-bp {
-  color: #9b7fe8;
+  color: var(--white);
 }
 
 .econ-empty {
@@ -2742,7 +2773,6 @@ body {
   letter-spacing: 0.12em;
   color: var(--text-dim);
   border: 1px solid var(--steel-border);
-  clip-path: var(--clip-notch-sm);
   padding: 3px 8px;
   cursor: pointer;
 }
@@ -2780,6 +2810,8 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-dim) transparent;
 }
 
 .econ-supply-item {

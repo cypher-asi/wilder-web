@@ -17,7 +17,7 @@ import {
 } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { useGame } from "../state/game";
-import { CATEGORY_TICK, ITEM_INFO, ItemCategory, ItemIcon, itemLabel } from "./ItemIcon";
+import { ITEM_INFO, ItemCategory, ItemIcon, itemLabel } from "./ItemIcon";
 
 // ---------------------------------------------------------------------------
 // Labels / colors
@@ -40,25 +40,56 @@ const TX_KIND_LABEL: Record<TxKind, string> = {
   Extract: "EXTRACT",
 };
 
+// Cohesive blue / white / red scheme: creation reads light-blue, destruction and
+// costs read red, ordinary flows stay mid/deep blue, and passive events fade to
+// dim steel. Item-category hues (ECON_CAT_COLOR) are the only multi-hue accents.
 const TX_KIND_COLOR: Record<TxKind, string> = {
-  Mint: "#7ed07e",
+  Mint: "#9fdcff",
   Burn: "#ff6a7c",
-  LootPickup: "#ffd75e",
-  Drop: "#9fb4c8",
+  LootPickup: "#eaf7ff",
+  Drop: "#7f8ea0",
   VendorBuy: "#4fc3ff",
   VendorSell: "#4fc3ff",
-  BankConvert: "#8fe06a",
+  BankConvert: "#8fd6ff",
   MarketList: "#4fc3ff",
   MarketBuy: "#4fc3ff",
-  MarketCancel: "#9fb4c8",
-  CraftConsume: "#9b7fe8",
-  CraftProduce: "#9b7fe8",
-  Fee: "#7f8ea0",
-  Extract: "#3fd9c2",
+  MarketCancel: "#7f8ea0",
+  CraftConsume: "#cfe4f5",
+  CraftProduce: "#cfe4f5",
+  Fee: "#e0808f",
+  Extract: "#8fd6ff",
+};
+
+// Per-category color (dashboard-local so the shared inventory tick palette in
+// ItemIcon stays untouched). Each item type reads with one consistent hue across
+// the supply panel and the transaction feed's ITEM / AMOUNT column.
+const ECON_CAT_COLOR: Record<ItemCategory, string> = {
+  weapon: "#5ad1ff",
+  armor: "#8fb4ff",
+  ammo: "#ffb072",
+  consumable: "#ffd75e",
+  resource: "#6aa7e8",
+  material: "#b79bff",
+  gadget: "#7be0c2",
+  currency: "#9fe07a",
 };
 
 function shortHash(hash: string): string {
   return hash.length > 14 ? `${hash.slice(0, 8)}…${hash.slice(-4)}` : hash;
+}
+
+// Compact relative age: seconds -> minutes -> hours -> days, then a short date
+// once older than a week (e.g. "Jul 3").
+function formatAge(atMs: number, now: number): string {
+  const s = Math.max(0, Math.floor((now - atMs) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  return new Date(atMs).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function Party({ party }: { party: TxParty }) {
@@ -78,13 +109,20 @@ function Amount({ amount }: { amount: TxAmount }) {
   switch (amount.t) {
     case "Item":
       return (
-        <span className="econ-amount">
+        <span
+          className="econ-amount"
+          style={{ color: ECON_CAT_COLOR[ITEM_INFO[amount.d.kind].category] }}
+        >
           <ItemIcon kind={amount.d.kind} size={14} />
           {amount.d.count} {itemLabel(amount.d.kind)}
         </span>
       );
     case "Wild":
       return <span className="econ-amount econ-amount-wild">{amount.d.amount} WILD</span>;
+    case "Shards":
+      return <span className="econ-amount econ-amount-shards">{amount.d.amount} SHARDS</span>;
+    case "Energy":
+      return <span className="econ-amount econ-amount-energy">{amount.d.amount} ENERGY</span>;
     case "Blueprint":
       return <span className="econ-amount econ-amount-bp">BP: {amount.d.recipe}</span>;
   }
@@ -161,10 +199,13 @@ function SupplyPanel() {
       <div className="econ-supply-list">
         {rows.map((r) => (
           <div key={r.kind} className="econ-supply-row">
-            <span className="econ-supply-item">
+            <span
+              className="econ-supply-item"
+              style={{ color: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
+            >
               <i
                 className="econ-supply-tick"
-                style={{ background: CATEGORY_TICK[ITEM_INFO[r.kind].category] }}
+                style={{ background: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
               />
               <ItemIcon kind={r.kind} size={18} />
               {itemLabel(r.kind)}
@@ -202,8 +243,8 @@ function KpiStrip() {
     <div className="econ-kpis">
       <Kpi label="BLOCK" value={`#${n(s?.block)}`} />
       <Kpi label="TRANSACTIONS" value={n(s?.tx_count)} />
-      <Kpi label="WILD CIRCULATING" value={n(s?.wild_circulating)} tone="#8fe06a" />
-      <Kpi label="WILD MINTED" value={n(s?.wild_minted)} tone="#7ed07e" />
+      <Kpi label="WILD CIRCULATING" value={n(s?.wild_circulating)} tone="#8fd6ff" />
+      <Kpi label="WILD MINTED" value={n(s?.wild_minted)} tone="#9fdcff" />
       <Kpi label="WILD BURNED" value={n(s?.wild_burned)} tone="#ff6a7c" />
       <Kpi label="VENDOR FLOAT" value={n(s?.wild_agent_held)} />
       <Kpi label="PLAYERS" value={n(s?.players_online)} />
@@ -220,7 +261,35 @@ function KpiStrip() {
 // Transaction feed
 // ---------------------------------------------------------------------------
 
-function TxRow({ tx }: { tx: EconTx }) {
+// Feed filter mirrors the supply panel's item categories, plus dedicated chips
+// for the non-item amount kinds (WILD / Shards / Energy / Blueprint).
+type FeedFilter = ItemCategory | "all" | "wild" | "shards" | "energy" | "blueprint";
+
+const FEED_EXTRA: { id: FeedFilter; label: string }[] = [
+  { id: "wild", label: "WILD" },
+  { id: "shards", label: "SHARDS" },
+  { id: "energy", label: "ENERGY" },
+  { id: "blueprint", label: "BP" },
+];
+
+function matchesFeedFilter(tx: EconTx, f: FeedFilter): boolean {
+  if (f === "all") return true;
+  const a = tx.amount;
+  switch (f) {
+    case "wild":
+      return a.t === "Wild";
+    case "shards":
+      return a.t === "Shards";
+    case "energy":
+      return a.t === "Energy";
+    case "blueprint":
+      return a.t === "Blueprint";
+    default:
+      return a.t === "Item" && ITEM_INFO[a.d.kind].category === f;
+  }
+}
+
+function TxRow({ tx, now }: { tx: EconTx; now: number }) {
   return (
     <div className="econ-row">
       <span className="econ-hash" title={tx.hash}>
@@ -236,6 +305,9 @@ function TxRow({ tx }: { tx: EconTx }) {
         {TX_KIND_LABEL[tx.kind]}
       </span>
       <span className="econ-block num">{tx.block}</span>
+      <span className="econ-age num" title={new Date(tx.at_ms).toLocaleString()}>
+        {formatAge(tx.at_ms, now)}
+      </span>
       <span className="econ-cell">
         <Amount amount={tx.amount} />
       </span>
@@ -247,11 +319,44 @@ function TxRow({ tx }: { tx: EconTx }) {
 function TxFeed() {
   const economy = useGame((s) => s.economy);
   const feed = economy?.feed ?? [];
+  const [filter, setFilter] = useState<FeedFilter>("all");
+  // Tick once a second so on-screen ages count up without new ledger data.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const shown = useMemo(
+    () => feed.filter((tx) => matchesFeedFilter(tx, filter)),
+    [feed, filter],
+  );
+
   return (
     <div className="econ-panel econ-feed">
       <div className="econ-panel-title">
         TRANSACTION FEED
         <span className="econ-panel-sub">{feed.length > 0 ? "LIVE" : "AWAITING ACTIVITY"}</span>
+      </div>
+      <div className="econ-tabs">
+        {CATEGORY_ORDER.map((c) => (
+          <div
+            key={c}
+            className={`econ-tab ${filter === c ? "active" : ""}`}
+            onClick={() => setFilter(c)}
+          >
+            {CATEGORY_LABEL[c]}
+          </div>
+        ))}
+        {FEED_EXTRA.map((e) => (
+          <div
+            key={e.id}
+            className={`econ-tab ${filter === e.id ? "active" : ""}`}
+            onClick={() => setFilter(e.id)}
+          >
+            {e.label}
+          </div>
+        ))}
       </div>
       <div className="econ-row econ-head">
         <span>HASH</span>
@@ -259,15 +364,19 @@ function TxFeed() {
         <span>TO</span>
         <span>TYPE</span>
         <span className="num">BLOCK</span>
-        <span>AMOUNT</span>
+        <span className="num">AGE</span>
+        <span>ITEM / AMOUNT</span>
         <span className="num">FEE</span>
       </div>
       <div className="econ-feed-list">
         {feed.length === 0 && (
           <div className="econ-empty">No transactions yet — the ledger records every economic event.</div>
         )}
-        {feed.map((tx) => (
-          <TxRow key={tx.seq} tx={tx} />
+        {feed.length > 0 && shown.length === 0 && (
+          <div className="econ-empty">No transactions match this filter.</div>
+        )}
+        {shown.map((tx) => (
+          <TxRow key={tx.seq} tx={tx} now={now} />
         ))}
       </div>
     </div>

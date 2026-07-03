@@ -16,10 +16,12 @@ pub const FIST: WeaponStats = WeaponStats { damage: 5.0, range: 1.5, cooldown: 0
 
 pub fn weapon_stats(kind: ItemKind) -> Option<WeaponStats> {
     match kind {
-        ItemKind::Pipe => Some(WeaponStats { damage: 12.0, range: 2.0, cooldown: 1.0, ranged: false }),
-        ItemKind::Knife => Some(WeaponStats { damage: 9.0, range: 1.6, cooldown: 0.55, ranged: false }),
-        ItemKind::Pistol => Some(WeaponStats { damage: 16.0, range: 18.0, cooldown: 0.3, ranged: true }),
-        ItemKind::Smg => Some(WeaponStats { damage: 8.0, range: 15.0, cooldown: 0.1, ranged: true }),
+        ItemKind::Pipe => Some(WeaponStats { damage: 22.0, range: 2.0, cooldown: 1.0, ranged: false }),
+        ItemKind::Knife => Some(WeaponStats { damage: 16.0, range: 1.6, cooldown: 0.55, ranged: false }),
+        // Tuned so a Scav (40 hp) drops in 2 pistol shots / 3 SMG shots and a
+        // Raider (70 hp) in 3 / 5.
+        ItemKind::Pistol => Some(WeaponStats { damage: 30.0, range: 18.0, cooldown: 0.3, ranged: true }),
+        ItemKind::Smg => Some(WeaponStats { damage: 15.0, range: 15.0, cooldown: 0.1, ranged: true }),
         _ => None,
     }
 }

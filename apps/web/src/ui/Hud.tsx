@@ -9,6 +9,7 @@ import { ChatWindow } from "./ChatWindow";
 import { GameMenu } from "./GameMenu";
 import { HoloMap } from "./HoloMap";
 import { Minimap } from "./Minimap";
+import { PerfPanel } from "./PerfPanel";
 
 export function Hud({ connection }: { connection: GameConnection }) {
   const connected = useGame((s) => s.connected);
@@ -37,6 +38,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
           <HoloMap />
+          <PerfPanel />
         </>
       )}
       {/* Outside the joined gate so exit/logout stay reachable mid-reconnect. */}
@@ -45,10 +47,22 @@ export function Hud({ connection }: { connection: GameConnection }) {
   );
 }
 
+/** Custom game pointer (themed arrow) shown when the gun is holstered. */
+const POINTER_SVG =
+  "<svg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'>" +
+  "<path d='M3 2 L3 19 L7.5 14.5 L11 22 L14 20.7 L10.6 13.6 L17 13.6 Z' " +
+  "fill='#eafcff' stroke='#0a2730' stroke-width='1.3' stroke-linejoin='round'/></svg>";
+const POINTER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  POINTER_SVG,
+)}") 3 2, auto`;
+
 /**
  * Aiming crosshair that follows the mouse whenever the gun is drawn. Reads the
  * non-reactive `game.gun.drawn` on a rAF loop and tracks the raw cursor so it
- * sits exactly on the aim point in this top-down twin-stick view.
+ * sits exactly on the aim point in this top-down twin-stick view. Also owns the
+ * page cursor: the OS pointer is hidden while aiming (the crosshair replaces
+ * it) and swapped for a custom pointer arrow otherwise, so there's never a
+ * default arrow layered under the reticle.
  */
 function Crosshair() {
   const el = useRef<HTMLDivElement>(null);
@@ -56,6 +70,7 @@ function Crosshair() {
 
   useEffect(() => {
     let raf = 0;
+    let cursor = "";
     const pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const onMove = (e: PointerEvent) => {
       pos.x = e.clientX;
@@ -67,11 +82,19 @@ function Crosshair() {
     document.documentElement.addEventListener("pointerleave", onLeave);
     const tick = () => {
       const node = el.current;
+      const drawn = game.gun.drawn;
       if (node) {
-        const show = game.gun.drawn && inside.current;
+        const show = drawn && inside.current;
         node.style.opacity = show ? "1" : "0";
         if (show)
           node.style.transform = `translate(${pos.x - 16}px, ${pos.y - 16}px)`;
+      }
+      // Aiming hides the OS cursor (crosshair stands in); otherwise a themed
+      // pointer replaces the default arrow.
+      const want = drawn ? "none" : POINTER_CURSOR;
+      if (want !== cursor) {
+        cursor = want;
+        document.body.style.cursor = want;
       }
       raf = requestAnimationFrame(tick);
     };
@@ -80,6 +103,7 @@ function Crosshair() {
       cancelAnimationFrame(raf);
       window.removeEventListener("pointermove", onMove);
       document.documentElement.removeEventListener("pointerleave", onLeave);
+      document.body.style.cursor = "";
     };
   }, []);
 

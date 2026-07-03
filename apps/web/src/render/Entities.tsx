@@ -16,6 +16,7 @@ import {
 } from "../game/collision";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { game, GameEntity, GunMount, useGame } from "../state/game";
 import { groundHeightAt } from "./Ground";
 import { isTronStyle } from "./styles";
@@ -488,6 +489,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 
   useFrame((_, dt) => {
     if (!mixer.current || !model) return;
+    perf.begin("entities.anim");
     mixer.current.update(dt);
 
     const isLocal = entity.id === game.localEntityId;
@@ -679,6 +681,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         mount.holder.quaternion.multiply(gunRecoilQ);
       }
     }
+    perf.end("entities.anim");
   });
 
   if (!model) return <ProceduralCharacter entity={entity} />;
@@ -969,6 +972,7 @@ function EntityView({ entity }: { entity: GameEntity }) {
 
   useFrame((_, dt) => {
     if (!group.current) return;
+    perf.begin("entities.move");
     const isLocal = entity.id === game.localEntityId;
     const now = performance.now();
 
@@ -978,6 +982,7 @@ function EntityView({ entity }: { entity: GameEntity }) {
         entity.y + groundHeightAt(entity.x, entity.z),
         entity.z,
       );
+      perf.end("entities.move");
       return;
     }
 
@@ -1059,6 +1064,7 @@ function EntityView({ entity }: { entity: GameEntity }) {
       const moving = entity.anim === "Walk" || entity.anim === "Run";
       void setFootsteps(moving, entity.anim === "Run");
     }
+    perf.end("entities.move");
   });
 
   let body: React.ReactNode;
@@ -1088,11 +1094,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
         <group
           onPointerOver={() => {
             game.hoverTargetId = entity.id;
-            document.body.style.cursor = "crosshair";
           }}
           onPointerOut={() => {
             if (game.hoverTargetId === entity.id) game.hoverTargetId = null;
-            document.body.style.cursor = "default";
           }}
         >
           <CharacterModel entity={entity} />

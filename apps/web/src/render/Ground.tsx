@@ -22,13 +22,10 @@ import { buildRoadMarkings, markingsMaterial } from "./roadMarkings";
 const CURB_H = 0.14;
 /** Curb-cut ramps drop the road-facing corner down to this. */
 const RAMP_H = 0.02;
-/** Chamfer on the curb's top edge so it catches light. */
-const BEVEL = 0.045;
-/** Width of the curbstone band on top of the slab edge (visible thickness). */
-const CURB_W = 0.32;
-/** Recessed seam groove between the curbstone band and the walking surface. */
-const SEAM_W = 0.035;
-const SEAM_D = 0.022;
+/** Bullnose radius on the curb's top edge (quarter-round into the face). */
+const NOSE_R = 0.07;
+/** Arc segments approximating the bullnose quarter-round. */
+const NOSE_SEG = 3;
 /** Concrete gutter pan: a lower curb apron at street grade along curb bases,
  * sloped from a small lip at the asphalt seam up to the curb face. */
 const PAN_W = 0.35;
@@ -303,72 +300,58 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
         continue;
       }
 
-      // Regular raised tile: the walking surface is inset by a visible
-      // curbstone band (CURB_W) on road-facing edges. Each such edge gets a
-      // curbstone strip: flat band top, 45-degree bevel on the street lip,
-      // and the vertical curb face down to road grade.
+      // Regular raised tile: sidewalk slabs run all the way to the curb edge
+      // (minus the rounded nose), then a bullnose quarter-round curls the top
+      // over into the vertical curb face so the edge reads as one smoothly
+      // connected poured curb instead of a flat band with a hard chamfer.
       const H = CURB_H;
-      const xi0 = x0 + (roadXm ? CURB_W : 0);
-      const xi1 = x1 - (roadXp ? CURB_W : 0);
-      const zi0 = z0 + (roadZm ? CURB_W : 0);
-      const zi1 = z1 - (roadZp ? CURB_W : 0);
+      const xi0 = x0 + (roadXm ? NOSE_R : 0);
+      const xi1 = x1 - (roadXp ? NOSE_R : 0);
+      const zi0 = z0 + (roadZm ? NOSE_R : 0);
+      const zi1 = z1 - (roadZp ? NOSE_R : 0);
       g.quad([xi0, H, zi0], [xi0, H, zi1], [xi1, H, zi1], [xi1, H, zi0], kind);
 
-      // Band tops: X-edge bands run the full tile depth (minus the bevel
-      // lip) and own the corner square; Z-edge bands span the remaining x
-      // so corners tile without overlap or holes. The inner SEAM_W of each
-      // band is replaced by a recessed V-groove where the curbstone meets
-      // the walking surface: real geometry, so it self-shadows and gains
-      // parallax instead of being a painted-on dark line.
-      const zbA = z0 + (roadZm ? BEVEL : 0);
-      const zbB = z1 - (roadZp ? BEVEL : 0);
-      // V-groove running along Z at [xs, xs + SEAM_W], z in [za, zb].
-      const seamZ = (xs: number, za: number, zb: number) => {
-        const xm = xs + SEAM_W / 2;
-        const yb = H - SEAM_D;
-        g.quad([xs, H, za], [xs, H, zb], [xm, yb, zb], [xm, yb, za], KIND_SEAM);
-        g.quad([xm, yb, za], [xm, yb, zb], [xs + SEAM_W, H, zb], [xs + SEAM_W, H, za], KIND_SEAM);
+      // Bullnose profile: quarter circle of radius NOSE_R from the walking
+      // surface over to the top of the vertical face. arc(i) gives the
+      // (inset from edge, drop from top) of the i-th profile point.
+      const arc = (i: number): [number, number] => {
+        const t = (i / NOSE_SEG) * Math.PI * 0.5;
+        return [NOSE_R * (1 - Math.sin(t)), NOSE_R * (1 - Math.cos(t))];
       };
-      // V-groove running along X at [zs, zs + SEAM_W], x in [xa, xb].
-      const seamX = (zs: number, xa: number, xb: number) => {
-        const zm = zs + SEAM_W / 2;
-        const yb = H - SEAM_D;
-        g.quad([xb, H, zs], [xa, H, zs], [xa, yb, zm], [xb, yb, zm], KIND_SEAM);
-        g.quad([xb, yb, zm], [xa, yb, zm], [xa, H, zs + SEAM_W], [xb, H, zs + SEAM_W], KIND_SEAM);
-      };
+      // Rounded noses + vertical curb faces along each road edge. Perpendicular
+      // edges both run full length; their overlap at convex corners is a
+      // NOSE_R-sized patch where the two profiles nearly coincide.
       if (roadXm) {
-        g.quad([x0 + BEVEL, H, zbA], [x0 + BEVEL, H, zbB], [x0 + CURB_W - SEAM_W, H, zbB], [x0 + CURB_W - SEAM_W, H, zbA], KIND_CURB_Z);
-        seamZ(x0 + CURB_W - SEAM_W, zbA, zbB);
+        for (let i = 0; i < NOSE_SEG; i++) {
+          const [ia, da] = arc(i);
+          const [ib, db] = arc(i + 1);
+          g.quad([x0 + ia, H - da, z0], [x0 + ib, H - db, z0], [x0 + ib, H - db, z1], [x0 + ia, H - da, z1], KIND_CURB_Z);
+        }
+        g.quad([x0, H - NOSE_R, z0], [x0, 0, z0], [x0, 0, z1], [x0, H - NOSE_R, z1], KIND_CURB_Z);
       }
       if (roadXp) {
-        g.quad([x1 - CURB_W + SEAM_W, H, zbA], [x1 - CURB_W + SEAM_W, H, zbB], [x1 - BEVEL, H, zbB], [x1 - BEVEL, H, zbA], KIND_CURB_Z);
-        seamZ(x1 - CURB_W, zbA, zbB);
+        for (let i = 0; i < NOSE_SEG; i++) {
+          const [ia, da] = arc(i);
+          const [ib, db] = arc(i + 1);
+          g.quad([x1 - ia, H - da, z1], [x1 - ib, H - db, z1], [x1 - ib, H - db, z0], [x1 - ia, H - da, z0], KIND_CURB_Z);
+        }
+        g.quad([x1, H - NOSE_R, z1], [x1, 0, z1], [x1, 0, z0], [x1, H - NOSE_R, z0], KIND_CURB_Z);
       }
       if (roadZm) {
-        g.quad([xi0, H, z0 + BEVEL], [xi0, H, z0 + CURB_W - SEAM_W], [xi1, H, z0 + CURB_W - SEAM_W], [xi1, H, z0 + BEVEL], KIND_CURB_X);
-        seamX(z0 + CURB_W - SEAM_W, xi0, xi1);
+        for (let i = 0; i < NOSE_SEG; i++) {
+          const [ia, da] = arc(i);
+          const [ib, db] = arc(i + 1);
+          g.quad([x1, H - da, z0 + ia], [x1, H - db, z0 + ib], [x0, H - db, z0 + ib], [x0, H - da, z0 + ia], KIND_CURB_X);
+        }
+        g.quad([x1, H - NOSE_R, z0], [x1, 0, z0], [x0, 0, z0], [x0, H - NOSE_R, z0], KIND_CURB_X);
       }
       if (roadZp) {
-        g.quad([xi0, H, z1 - CURB_W + SEAM_W], [xi0, H, z1 - BEVEL], [xi1, H, z1 - BEVEL], [xi1, H, z1 - CURB_W + SEAM_W], KIND_CURB_X);
-        seamX(z1 - CURB_W, xi0, xi1);
-      }
-
-      // Bevel lips + vertical curb faces along each road edge.
-      if (roadXm) {
-        g.quad([x0 + BEVEL, H, z0], [x0, H - BEVEL, z0], [x0, H - BEVEL, z1], [x0 + BEVEL, H, z1], KIND_CURB_Z);
-        g.quad([x0, H - BEVEL, z0], [x0, 0, z0], [x0, 0, z1], [x0, H - BEVEL, z1], KIND_CURB_Z);
-      }
-      if (roadXp) {
-        g.quad([x1 - BEVEL, H, z1], [x1, H - BEVEL, z1], [x1, H - BEVEL, z0], [x1 - BEVEL, H, z0], KIND_CURB_Z);
-        g.quad([x1, H - BEVEL, z1], [x1, 0, z1], [x1, 0, z0], [x1, H - BEVEL, z0], KIND_CURB_Z);
-      }
-      if (roadZm) {
-        g.quad([x1, H, z0 + BEVEL], [x1, H - BEVEL, z0], [x0, H - BEVEL, z0], [x0, H, z0 + BEVEL], KIND_CURB_X);
-        g.quad([x1, H - BEVEL, z0], [x1, 0, z0], [x0, 0, z0], [x0, H - BEVEL, z0], KIND_CURB_X);
-      }
-      if (roadZp) {
-        g.quad([x0, H, z1 - BEVEL], [x0, H - BEVEL, z1], [x1, H - BEVEL, z1], [x1, H, z1 - BEVEL], KIND_CURB_X);
-        g.quad([x0, H - BEVEL, z1], [x0, 0, z1], [x1, 0, z1], [x1, H - BEVEL, z1], KIND_CURB_X);
+        for (let i = 0; i < NOSE_SEG; i++) {
+          const [ia, da] = arc(i);
+          const [ib, db] = arc(i + 1);
+          g.quad([x0, H - da, z1 - ia], [x0, H - db, z1 - ib], [x1, H - db, z1 - ib], [x1, H - da, z1 - ia], KIND_CURB_X);
+        }
+        g.quad([x0, H - NOSE_R, z1], [x0, 0, z1], [x1, 0, z1], [x1, H - NOSE_R, z1], KIND_CURB_X);
       }
     }
   }

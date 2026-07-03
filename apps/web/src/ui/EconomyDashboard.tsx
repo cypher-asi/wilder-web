@@ -109,10 +109,11 @@ function Amount({ amount }: { amount: TxAmount }) {
   switch (amount.t) {
     case "Item":
       return (
-        <span
-          className="econ-amount"
-          style={{ color: ECON_CAT_COLOR[ITEM_INFO[amount.d.kind].category] }}
-        >
+        <span className="econ-amount">
+          <i
+            className="econ-supply-tick"
+            style={{ background: ECON_CAT_COLOR[ITEM_INFO[amount.d.kind].category] }}
+          />
           <ItemIcon kind={amount.d.kind} size={14} />
           {amount.d.count} {itemLabel(amount.d.kind)}
         </span>
@@ -199,10 +200,7 @@ function SupplyPanel() {
       <div className="econ-supply-list">
         {rows.map((r) => (
           <div key={r.kind} className="econ-supply-row">
-            <span
-              className="econ-supply-item"
-              style={{ color: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
-            >
+            <span className="econ-supply-item">
               <i
                 className="econ-supply-tick"
                 style={{ background: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}

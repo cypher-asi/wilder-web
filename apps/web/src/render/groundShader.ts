@@ -192,14 +192,20 @@ if (gKind == 0) {
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.5, 0.9) * 0.6 + 0.12, 0.25, 0.85);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.5, 0.9) * 2.0 - 1.0;
   gNStr = 0.25;
-  // Poured-curb segment joints every 3 m along the street on curb faces.
-  if (gVert > 0.25) {
-    float along = gW.x > gW.z ? wp.z : wp.x;
-    float distJoint = (0.5 - abs(fract(along / 3.0) - 0.5)) * 3.0;
-    float joint = 1.0 - smoothstep(0.015, 0.05, distJoint);
-    gAlb *= 1.0 - 0.45 * joint * gVert;
-    gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), joint * gVert);
-  }
+} else if (gKind >= 6) {
+  // Curbstone band (kind 6 runs along Z, 7 along X): slightly lighter
+  // granite-toned concrete at a fine repeat so the curb reads as its own
+  // element, with per-segment value shifts and joints every 1.8 m.
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * vec3(1.28, 1.30, 1.34);
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.18, 0.3, 0.9);
+  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
+  gNStr = 0.3;
+  float along = gKind == 6 ? wp.z : wp.x;
+  gAlb *= 0.88 + 0.24 * gHash12(vec2(floor(along / 1.8), 4.2));
+  float distJoint = (0.5 - abs(fract(along / 1.8) - 0.5)) * 1.8;
+  float joint = 1.0 - smoothstep(0.012, 0.045, distJoint);
+  gAlb *= 1.0 - 0.5 * joint;
+  gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), joint);
 } else if (gKind == 2) {
   // Plaza: large concrete slabs on the 4 m joint grid, a shade darker than
   // sidewalks. (Photo pavers alias into pixel speckle at this camera.)
@@ -306,25 +312,29 @@ if (gKind == 0) {
   gRgh = mix(gRgh, gRgh * 0.55 + 0.02, damp);
 }
 
-// Curb faces and gutters: grime streaks, painted sections, contact shadows.
+// Curb weathering and gutters: grime, painted sections, contact shadows.
 float dCurbG = max(-vRoadD, 0.0);
-if ((gKind == 1 || gKind == 2) && gVert > 0.12) {
-  float alongC = gW.x > gW.z ? wp.z : wp.x;
-  // Vertical grime streaks running down the face; heavier near the base
-  // where street water and dirt splash back.
+if (gKind >= 6) {
+  float alongC = gKind == 6 ? wp.z : wp.x;
+  float acrossC = gKind == 6 ? wp.x : wp.z;
+  // Grime streaks down the vertical face, heavier near the base where
+  // street water splashes back; band top picks up boot/tire scuff instead.
   float streak = 0.5 + 0.5 * gNoise(vec2(alongC * 5.0, 2.3));
   float baseG = 1.0 - smoothstep(0.02, 0.14, wp.y);
-  float faceGrime = gVert * (0.3 * streak + 0.35 * baseG);
-  gAlb *= 1.0 - clamp(faceGrime, 0.0, 0.7);
-  gRgh = min(gRgh + 0.15 * gVert, 1.0);
+  float faceGrime = gVert * (0.28 * streak + 0.3 * baseG);
+  float topScuff = gW.y * 0.14 * smoothstep(0.4, 0.75, gFbm(wp.xz * 0.7 + 47.0));
+  gAlb *= 1.0 - clamp(faceGrime + topScuff, 0.0, 0.7);
+  gRgh = min(gRgh + 0.12 * gVert, 1.0);
   // Chipped painted curb sections (fire lanes, loading zones), hashed per
-  // 16 m stretch of street; paint flakes off with fine noise.
+  // 16 m stretch of street; paint covers the whole curbstone and flakes
+  // off with fine noise.
   float sect = gHash12(vec2(floor(alongC / 16.0), 8.5));
-  if (sect < 0.2 && vRoadD < 2.5) {
+  if (sect < 0.2) {
     vec3 paint = sect < 0.13 ? vec3(0.40, 0.07, 0.05) : vec3(0.55, 0.42, 0.08);
-    float chip = smoothstep(0.48, 0.7, gNoise(vec2(alongC * 7.0, wp.y * 40.0)));
-    float pMask = gVert * (1.0 - chip) * smoothstep(0.015, 0.05, wp.y);
-    gAlb = mix(gAlb, paint, 0.8 * pMask);
+    float chip = smoothstep(0.45, 0.68,
+      gNoise(vec2(alongC * 7.0, wp.y * 30.0 + acrossC * 11.0)));
+    float pMask = (1.0 - chip) * 0.85;
+    gAlb = mix(gAlb, paint, pMask);
     gRgh = mix(gRgh, 0.55, pMask);
   }
 }

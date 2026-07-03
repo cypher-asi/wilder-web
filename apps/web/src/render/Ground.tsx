@@ -22,7 +22,12 @@ const CURB_H = 0.14;
 /** Curb-cut ramps drop the road-facing corner down to this. */
 const RAMP_H = 0.02;
 /** Chamfer on the curb's top edge so it catches light. */
-const BEVEL = 0.03;
+const BEVEL = 0.045;
+/** Width of the curbstone band on top of the slab edge (visible thickness). */
+const CURB_W = 0.32;
+/** aKind for curbstone bands: 6 runs along Z (x-facing edges), 7 along X. */
+const KIND_CURB_Z = 6;
+const KIND_CURB_X = 7;
 
 /** aKind vertex attribute values consumed by the ground shader. */
 const KIND_ID: Record<TileKind, number> = {
@@ -191,9 +196,20 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
       const roadZm = lowAt(tx, tz - 1);
       const roadZp = lowAt(tx, tz + 1);
 
-      // Curb-cut ramp where a sidewalk corner meets a road intersection
-      // corner (roads on two orthogonal sides): sink that corner vertex.
-      const ramp = tileKind === "Sidewalk" && (roadXm || roadXp) && (roadZm || roadZp);
+      // Curb-cut ramp only at true intersection corners: both road edges
+      // must continue straight past this tile. (Staircase steps on curved
+      // streets also have roads on two orthogonal sides; cutting a ramp at
+      // every step used to read as a sawtooth of sunken notches.)
+      const rampCorner =
+        tileKind === "Sidewalk" && (roadXm || roadXp) && (roadZm || roadZp);
+      const rx = roadXm ? tx - 1 : tx + 1;
+      const rz = roadZm ? tz - 1 : tz + 1;
+      const ramp =
+        rampCorner &&
+        lowAt(rx, tz - 1) &&
+        lowAt(rx, tz + 1) &&
+        lowAt(tx - 1, rz) &&
+        lowAt(tx + 1, rz);
       // Per-corner top heights: [x][z] with 0 = low side of the tile.
       const h = [
         [CURB_H, CURB_H],
@@ -207,7 +223,8 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
 
       if (ramp) {
         // Top surface split along the diagonal through the sunk corner so
-        // it slopes cleanly; curb faces follow the corner heights.
+        // it slopes cleanly; curb faces (kind = curbstone) follow the corner
+        // heights. No curbstone band on top: this is a poured curb cut.
         const sunk00or11 = h[0][0] < CURB_H || h[1][1] < CURB_H;
         if (sunk00or11) {
           g.tri(c00, c01, c11, kind);
@@ -216,37 +233,58 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
           g.tri(c00, c01, c10, kind);
           g.tri(c10, c01, c11, kind);
         }
-        if (roadXm) g.quad([x0, h[0][0], z0], [x0, 0, z0], [x0, 0, z1], [x0, h[0][1], z1], 1);
-        if (roadXp) g.quad([x1, h[1][1], z1], [x1, 0, z1], [x1, 0, z0], [x1, h[1][0], z0], 1);
-        if (roadZm) g.quad([x1, h[1][0], z0], [x1, 0, z0], [x0, 0, z0], [x0, h[0][0], z0], 1);
-        if (roadZp) g.quad([x0, h[0][1], z1], [x0, 0, z1], [x1, 0, z1], [x1, h[1][1], z1], 1);
+        if (roadXm) g.quad([x0, h[0][0], z0], [x0, 0, z0], [x0, 0, z1], [x0, h[0][1], z1], KIND_CURB_Z);
+        if (roadXp) g.quad([x1, h[1][1], z1], [x1, 0, z1], [x1, 0, z0], [x1, h[1][0], z0], KIND_CURB_Z);
+        if (roadZm) g.quad([x1, h[1][0], z0], [x1, 0, z0], [x0, 0, z0], [x0, h[0][0], z0], KIND_CURB_X);
+        if (roadZp) g.quad([x0, h[0][1], z1], [x0, 0, z1], [x1, 0, z1], [x1, h[1][1], z1], KIND_CURB_X);
         continue;
       }
 
-      // Regular raised tile: top plate inset on road-facing edges, a 45°
-      // bevel strip on those edges, and a vertical curb face below it.
+      // Regular raised tile: the walking surface is inset by a visible
+      // curbstone band (CURB_W) on road-facing edges. Each such edge gets a
+      // curbstone strip: flat band top, 45-degree bevel on the street lip,
+      // and the vertical curb face down to road grade.
       const H = CURB_H;
-      const xi0 = x0 + (roadXm ? BEVEL : 0);
-      const xi1 = x1 - (roadXp ? BEVEL : 0);
-      const zi0 = z0 + (roadZm ? BEVEL : 0);
-      const zi1 = z1 - (roadZp ? BEVEL : 0);
+      const xi0 = x0 + (roadXm ? CURB_W : 0);
+      const xi1 = x1 - (roadXp ? CURB_W : 0);
+      const zi0 = z0 + (roadZm ? CURB_W : 0);
+      const zi1 = z1 - (roadZp ? CURB_W : 0);
       g.quad([xi0, H, zi0], [xi0, H, zi1], [xi1, H, zi1], [xi1, H, zi0], kind);
 
+      // Band tops: X-edge bands run the full tile depth (minus the bevel
+      // lip) and own the corner square; Z-edge bands span the remaining x
+      // so corners tile without overlap or holes.
+      const zbA = z0 + (roadZm ? BEVEL : 0);
+      const zbB = z1 - (roadZp ? BEVEL : 0);
       if (roadXm) {
-        g.quad([x0 + BEVEL, H, z0], [x0, H - BEVEL, z0], [x0, H - BEVEL, z1], [x0 + BEVEL, H, z1], 1);
-        g.quad([x0, H - BEVEL, z0], [x0, 0, z0], [x0, 0, z1], [x0, H - BEVEL, z1], 1);
+        g.quad([x0 + BEVEL, H, zbA], [x0 + BEVEL, H, zbB], [x0 + CURB_W, H, zbB], [x0 + CURB_W, H, zbA], KIND_CURB_Z);
       }
       if (roadXp) {
-        g.quad([x1 - BEVEL, H, z1], [x1, H - BEVEL, z1], [x1, H - BEVEL, z0], [x1 - BEVEL, H, z0], 1);
-        g.quad([x1, H - BEVEL, z1], [x1, 0, z1], [x1, 0, z0], [x1, H - BEVEL, z0], 1);
+        g.quad([x1 - CURB_W, H, zbA], [x1 - CURB_W, H, zbB], [x1 - BEVEL, H, zbB], [x1 - BEVEL, H, zbA], KIND_CURB_Z);
       }
       if (roadZm) {
-        g.quad([x1, H, z0 + BEVEL], [x1, H - BEVEL, z0], [x0, H - BEVEL, z0], [x0, H, z0 + BEVEL], 1);
-        g.quad([x1, H - BEVEL, z0], [x1, 0, z0], [x0, 0, z0], [x0, H - BEVEL, z0], 1);
+        g.quad([xi0, H, z0 + BEVEL], [xi0, H, z0 + CURB_W], [xi1, H, z0 + CURB_W], [xi1, H, z0 + BEVEL], KIND_CURB_X);
       }
       if (roadZp) {
-        g.quad([x0, H, z1 - BEVEL], [x0, H - BEVEL, z1], [x1, H - BEVEL, z1], [x1, H, z1 - BEVEL], 1);
-        g.quad([x0, H - BEVEL, z1], [x0, 0, z1], [x1, 0, z1], [x1, H - BEVEL, z1], 1);
+        g.quad([xi0, H, z1 - CURB_W], [xi0, H, z1 - BEVEL], [xi1, H, z1 - BEVEL], [xi1, H, z1 - CURB_W], KIND_CURB_X);
+      }
+
+      // Bevel lips + vertical curb faces along each road edge.
+      if (roadXm) {
+        g.quad([x0 + BEVEL, H, z0], [x0, H - BEVEL, z0], [x0, H - BEVEL, z1], [x0 + BEVEL, H, z1], KIND_CURB_Z);
+        g.quad([x0, H - BEVEL, z0], [x0, 0, z0], [x0, 0, z1], [x0, H - BEVEL, z1], KIND_CURB_Z);
+      }
+      if (roadXp) {
+        g.quad([x1 - BEVEL, H, z1], [x1, H - BEVEL, z1], [x1, H - BEVEL, z0], [x1 - BEVEL, H, z0], KIND_CURB_Z);
+        g.quad([x1, H - BEVEL, z1], [x1, 0, z1], [x1, 0, z0], [x1, H - BEVEL, z0], KIND_CURB_Z);
+      }
+      if (roadZm) {
+        g.quad([x1, H, z0 + BEVEL], [x1, H - BEVEL, z0], [x0, H - BEVEL, z0], [x0, H, z0 + BEVEL], KIND_CURB_X);
+        g.quad([x1, H - BEVEL, z0], [x1, 0, z0], [x0, 0, z0], [x0, H - BEVEL, z0], KIND_CURB_X);
+      }
+      if (roadZp) {
+        g.quad([x0, H, z1 - BEVEL], [x0, H - BEVEL, z1], [x1, H - BEVEL, z1], [x1, H, z1 - BEVEL], KIND_CURB_X);
+        g.quad([x0, H - BEVEL, z1], [x0, 0, z1], [x1, 0, z1], [x1, H - BEVEL, z1], KIND_CURB_X);
       }
     }
   }

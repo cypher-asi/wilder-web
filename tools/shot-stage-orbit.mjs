@@ -1,12 +1,11 @@
-// Validation helper: opens the Asset Lab Building Stage, resets the default
-// prefabs (so they regenerate from the current registry), selects a prefab by
-// name and captures screenshots from two angles.
-//   PORT=5199 PREFAB="Slab" node tools/shot-building-stage.mjs
+// Orbit validation: opens the Building Stage, selects a prefab and captures
+// four azimuths around the building at fixed elevation.
+//   PREFAB="Tower" SHOT=tools/screens/orbit node tools/shot-stage-orbit.mjs
 import puppeteer from "puppeteer";
 
 const PORT = process.env.PORT ?? "5199";
-const PREFAB = process.env.PREFAB ?? "Slab";
-const PREFIX = process.env.SHOT ?? "tools/screens/building-stage";
+const PREFAB = process.env.PREFAB ?? "Tower";
+const PREFIX = process.env.SHOT ?? "tools/screens/stage-orbit";
 
 const browser = await puppeteer.launch({
   headless: "new",
@@ -17,8 +16,6 @@ const page = await browser.newPage();
 page.on("pageerror", (e) => console.log("[pageerror]", String(e).slice(0, 400)));
 
 await page.goto(`http://localhost:${PORT}`, { waitUntil: "networkidle2" });
-
-// Login screen -> Asset Lab.
 await page.waitForFunction(
   () => [...document.querySelectorAll("button")].some((b) => /asset lab/i.test(b.textContent)),
   { timeout: 15000 },
@@ -26,8 +23,6 @@ await page.waitForFunction(
 await page.evaluate(() => {
   [...document.querySelectorAll("button")].find((b) => /asset lab/i.test(b.textContent)).click();
 });
-
-// Asset Lab -> Building Stage tab.
 await page.waitForFunction(
   () => [...document.querySelectorAll("button")].some((b) => /building stage/i.test(b.textContent)),
   { timeout: 15000 },
@@ -37,15 +32,7 @@ await page.evaluate(() => {
     .find((b) => /building stage/i.test(b.textContent))
     .click();
 });
-
-// Wait for prefab list, then regenerate defaults from the live registry.
 await page.waitForSelector(".lab-asset-card", { timeout: 20000 });
-await page.evaluate(() => {
-  [...document.querySelectorAll("button")].find((b) => /reset defaults/i.test(b.textContent))?.click();
-});
-await new Promise((r) => setTimeout(r, 500));
-
-// Select the requested prefab.
 const found = await page.evaluate((name) => {
   const card = [...document.querySelectorAll(".lab-asset-card")].find((c) =>
     c.textContent.toLowerCase().includes(name.toLowerCase()),
@@ -54,26 +41,26 @@ const found = await page.evaluate((name) => {
   return Boolean(card);
 }, PREFAB);
 console.log(`prefab "${PREFAB}" found:`, found);
-
-// Let the viewport load GLBs and settle.
 await new Promise((r) => setTimeout(r, 7000));
-const stats = await page.evaluate(
-  () => document.querySelector(".stage-stats")?.innerText.replace(/\n/g, " | ") ?? "no stats",
-);
-console.log("stats:", stats);
-await page.screenshot({ path: `${PREFIX}-1.png` });
 
-// Orbit to a second angle (drag on the canvas).
 const canvas = await page.$(".lab-viewport canvas");
 const box = await canvas.boundingBox();
 const cx = box.x + box.width / 2;
 const cy = box.y + box.height / 2;
-await page.mouse.move(cx, cy);
-await page.mouse.down();
-await page.mouse.move(cx + 380, cy - 60, { steps: 20 });
-await page.mouse.up();
-await new Promise((r) => setTimeout(r, 1500));
-await page.screenshot({ path: `${PREFIX}-2.png` });
+
+async function orbit(dx, dy) {
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + dx, cy + dy, { steps: 12 });
+  await page.mouse.up();
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+for (let i = 0; i < 4; i++) {
+  await page.screenshot({ path: `${PREFIX}-az${i}.png` });
+  // Quarter turn: OrbitControls default rotate speed maps canvas width ~ PI.
+  await orbit(Math.round(box.width / 4), 0);
+}
 
 console.log("done");
 await browser.close();

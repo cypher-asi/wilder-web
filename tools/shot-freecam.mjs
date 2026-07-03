@@ -40,6 +40,14 @@ const browser = await puppeteer.launch({
 const page = await browser.newPage();
 page.on("pageerror", (e) => console.log("[pageerror]", String(e).slice(0, 400)));
 
+// STYLE=blueHour etc: pre-seed the persisted visual style before the app boots.
+if (process.env.STYLE) {
+  await page.evaluateOnNewDocument(
+    (s) => localStorage.setItem("wilder.visualStyle", s),
+    process.env.STYLE,
+  );
+}
+
 async function enterWorld() {
   await page.goto(`http://localhost:${PORT}`, { waitUntil: "networkidle2" });
   await page.waitForFunction(

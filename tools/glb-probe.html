@@ -1,0 +1,51 @@
+<!-- Minimal GLB probe: renders one imported GLB with axis markers so probe
+     scripts can verify orientation/material issues outside the game code.
+     Served by the Vite dev server; open /tools/glb-probe.html?id=<glbName>. -->
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>body{margin:0}</style></head>
+<body>
+<script type="module">
+import * as THREE from "/node_modules/three/build/three.module.js";
+import { GLTFLoader } from "/node_modules/three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "/node_modules/meshoptimizer/meshopt_decoder.module.js";
+
+const params = new URLSearchParams(location.search);
+const id = params.get("id") ?? "sm_skyscraper_module10";
+const az = Number(params.get("az") ?? 45); // camera azimuth degrees
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x30343c);
+scene.add(new THREE.HemisphereLight(0xeaf3ff, 0x4a5261, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+sun.position.set(40, 60, 30);
+scene.add(sun);
+
+// Axis markers: red pole on +x, blue pole on +z, at 10m from origin.
+const poleGeom = new THREE.CylinderGeometry(0.3, 0.3, 20);
+const px = new THREE.Mesh(poleGeom, new THREE.MeshBasicMaterial({ color: 0xff3030 }));
+px.position.set(10, 10, 0);
+scene.add(px);
+const pz = new THREE.Mesh(poleGeom, new THREE.MeshBasicMaterial({ color: 0x3060ff }));
+pz.position.set(0, 10, 10);
+scene.add(pz);
+
+const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
+const gltf = await loader.loadAsync(`/assets/models/imported/${id}.glb`);
+scene.add(gltf.scene);
+
+const cam = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 500);
+const r = 30;
+const a = (az * Math.PI) / 180;
+cam.position.set(r * Math.cos(a), 18, r * Math.sin(a));
+cam.lookAt(0, 6, 0);
+renderer.render(scene, cam);
+window.PROBE_DONE = true;
+</script>
+</body>
+</html>

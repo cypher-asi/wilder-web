@@ -45,23 +45,25 @@ export interface StageStats {
   heightM: number;
   panelCount: number;
   rows: number;
-  /** Vertical stretch applied to panel rows (1 = authored height). */
-  stretchY: number;
+  /** Bare band left under the parapet after whole authored rows (m). */
+  bareTopM: number;
   kitCount: number;
 }
 
 export function computeStageStats(prefab: BuildingPrefab, model: BuildingModel): StageStats {
-  const panelIds = new Set(prefab.kit.panels.map((p) => p.assetId));
-  const panels = model.kit.filter((k) => panelIds.has(k.assetId));
+  const panelH = new Map(
+    [...prefab.kit.panels, ...(prefab.kit.groundPanels ?? [])].map((p) => [p.assetId, p.h]),
+  );
+  const panels = model.kit.filter((k) => panelH.has(k.assetId));
   const rowYs = new Set(panels.map((k) => k.y.toFixed(3)));
-  const first = panels[0]?.scale;
+  const stackTop = panels.reduce((top, k) => Math.max(top, k.y + (panelH.get(k.assetId) ?? 0)), 0);
   return {
     widthM: model.width,
     depthM: model.depth,
     heightM: model.height,
     panelCount: panels.length,
     rows: rowYs.size,
-    stretchY: Array.isArray(first) ? first[1] : 1,
+    bareTopM: panels.length > 0 ? Math.max(0, model.height - stackTop) : 0,
     kitCount: model.kit.length,
   };
 }
@@ -109,13 +111,36 @@ function StagedBuilding({ prefab, model }: { prefab: BuildingPrefab; model: Buil
   );
 }
 
-function StageLights({ bright }: { bright: boolean }) {
+/**
+ * Key light with the same shadow settings the in-game sun uses
+ * (Atmosphere.tsx); default three.js shadows (512 px map, zero bias) cover
+ * whole buildings here and produce heavy diagonal acne striping.
+ */
+function StageKeyLight({ intensity, range }: { intensity: number; range: number }) {
+  return (
+    <directionalLight
+      position={[40, 60, 30]}
+      intensity={intensity}
+      castShadow
+      shadow-mapSize={[4096, 4096]}
+      shadow-camera-left={-range}
+      shadow-camera-right={range}
+      shadow-camera-top={range}
+      shadow-camera-bottom={-range}
+      shadow-camera-far={300}
+      shadow-bias={-0.0002}
+      shadow-normalBias={0.5}
+    />
+  );
+}
+
+function StageLights({ bright, range }: { bright: boolean; range: number }) {
   if (bright) {
     return (
       <>
         <ambientLight intensity={0.55} />
         <hemisphereLight args={["#eaf3ff", "#4a5261", 1.4]} />
-        <directionalLight position={[40, 60, 30]} intensity={3.0} castShadow />
+        <StageKeyLight intensity={3.0} range={range} />
         <directionalLight position={[-30, 20, -40]} intensity={1.2} color="#bfd8ff" />
         <directionalLight position={[0, 25, 60]} intensity={0.7} color="#ffe9c9" />
       </>
@@ -124,7 +149,7 @@ function StageLights({ bright }: { bright: boolean }) {
   return (
     <>
       <hemisphereLight args={["#cfe8ff", "#20242e", 0.9]} />
-      <directionalLight position={[40, 60, 30]} intensity={2.0} castShadow />
+      <StageKeyLight intensity={2.0} range={range} />
       <directionalLight position={[-30, 20, -40]} intensity={0.5} color="#7fb8ff" />
     </>
   );
@@ -170,7 +195,10 @@ export function BuildingStageViewport({
     <div className="lab-viewport">
       <Canvas key={prefab.id} camera={camera} gl={{ antialias: true }} shadows>
         <color attach="background" args={["#0a0d14"]} />
-        <StageLights bright={bright} />
+        <StageLights
+          bright={bright}
+          range={Math.max(60, Math.hypot(model.width, model.depth, model.height))}
+        />
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, GROUND_Y - 0.01, 0]} receiveShadow>
           <planeGeometry args={[gridTiles * TILE_SIZE, gridTiles * TILE_SIZE]} />
           <meshStandardMaterial color="#141920" roughness={0.95} />
@@ -188,7 +216,8 @@ export function BuildingStageViewport({
             {stats.widthM}m × {stats.depthM}m × {stats.heightM.toFixed(1)}m
           </span>
           <span>
-            {stats.panelCount} panels · {stats.rows} rows · stretch {stats.stretchY.toFixed(2)}x
+            {stats.panelCount} panels · {stats.rows} rows · authored 1:1 · bare top{" "}
+            {stats.bareTopM.toFixed(1)}m
           </span>
           <span>{stats.kitCount} kit placements</span>
         </div>

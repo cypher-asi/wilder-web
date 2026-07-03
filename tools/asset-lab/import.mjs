@@ -4,6 +4,7 @@
 //
 //   node tools/asset-lab/import.mjs <assetId> [<assetId> ...]
 //   node tools/asset-lab/import.mjs --count 25   (first N raw assets)
+//   node tools/asset-lab/import.mjs --all [--parallel 8]   (every raw asset)
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -100,7 +101,12 @@ if (isMain) {
   const args = process.argv.slice(2);
   let ids = [];
   const countIdx = args.indexOf("--count");
-  if (countIdx >= 0) {
+  if (args.includes("--all")) {
+    const registry = loadRegistry();
+    ids = Object.values(registry.assets)
+      .filter((a) => a.status === "raw")
+      .map((a) => a.id);
+  } else if (countIdx >= 0) {
     const n = Number(args[countIdx + 1] ?? 10);
     const registry = loadRegistry();
     ids = Object.values(registry.assets)
@@ -108,30 +114,46 @@ if (isMain) {
       .slice(0, n)
       .map((a) => a.id);
   } else {
-    ids = args.filter((a) => !a.startsWith("--"));
+    ids = args.filter((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--parallel");
   }
   if (ids.length === 0) {
-    console.error("Usage: node import.mjs <assetId>... | --count N");
+    console.error("Usage: node import.mjs <assetId>... | --count N | --all [--parallel N]");
     process.exit(1);
   }
+
+  const parallelIdx = args.indexOf("--parallel");
+  const parallel = Math.max(1, Number(parallelIdx >= 0 ? args[parallelIdx + 1] : 1) || 1);
+
+  let done = 0;
   let failed = 0;
-  for (const [i, id] of ids.entries()) {
-    console.log(`\n[${i + 1}/${ids.length}] importing ${id} ...`);
-    try {
-      const asset = await importAsset(id, { log: () => {} });
-      console.log(
-        `  ok: ${asset.meta.triangles} tris, ${asset.meta.material_count} materials, ` +
-          `${asset.meta.dimensions_m.join(" x ")} m`,
-      );
-      const untextured = asset.meta.untextured_materials ?? [];
-      if (untextured.length > 0) {
-        console.warn(`  WARN: untextured materials: ${untextured.join(", ")}`);
+  const total = ids.length;
+  const queue = [...ids];
+
+  async function worker() {
+    for (;;) {
+      const id = queue.shift();
+      if (!id) return;
+      try {
+        const asset = await importAsset(id, { log: () => {} });
+        done++;
+        console.log(
+          `[${done + failed}/${total}] ok ${id}: ${asset.meta.triangles} tris, ` +
+            `${asset.meta.material_count} materials, ${asset.meta.dimensions_m.join(" x ")} m`,
+        );
+        const untextured = asset.meta.untextured_materials ?? [];
+        if (untextured.length > 0) {
+          console.warn(`  WARN ${id}: untextured materials: ${untextured.join(", ")}`);
+        }
+      } catch (err) {
+        failed++;
+        console.error(
+          `[${done + failed}/${total}] FAILED ${id}: ${String(err.message ?? err).split("\n")[0]}`,
+        );
       }
-    } catch (err) {
-      failed++;
-      console.error(`  FAILED: ${String(err.message ?? err).split("\n")[0]}`);
     }
   }
-  console.log(`\nDone: ${ids.length - failed}/${ids.length} imported.`);
+
+  await Promise.all(Array.from({ length: Math.min(parallel, total) }, worker));
+  console.log(`\nDone: ${done}/${total} imported, ${failed} failed.`);
   process.exit(failed > 0 ? 1 : 0);
 }

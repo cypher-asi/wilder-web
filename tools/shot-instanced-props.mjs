@@ -63,16 +63,26 @@ await stats("walked:");
 await page.screenshot({ path: "tools/screens/instanced-props-2.png" });
 // Walk along streets past several building fronts for facade vantage points.
 const legs = [
-  ["a", 5000, "tools/screens/instanced-props-3.png"],
-  ["s", 5000, "tools/screens/instanced-props-4.png"],
-  ["a", 5000, "tools/screens/instanced-props-5.png"],
+  ["a", 6000, "tools/screens/instanced-props-3.png"],
+  ["s", 6000, "tools/screens/instanced-props-4.png"],
+  ["d", 6000, "tools/screens/instanced-props-5.png"],
+  ["s", 6000, "tools/screens/instanced-props-6.png"],
+  ["d", 6000, "tools/screens/instanced-props-7.png"],
+  ["w", 6000, "tools/screens/instanced-props-8.png"],
 ];
 for (const [key, ms, out] of legs) {
   await page.keyboard.down(key);
   await new Promise((r) => setTimeout(r, ms));
   await page.keyboard.up(key);
   await new Promise((r) => setTimeout(r, 1500));
+  // Tilt the camera up mid-drag so upper facades are in frame.
+  await page.mouse.move(800, 450);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(800, 310, { steps: 20 });
+  await new Promise((r) => setTimeout(r, 300));
   await page.screenshot({ path: out });
+  await page.mouse.up({ button: "right" });
+  await new Promise((r) => setTimeout(r, 700));
 }
 await stats("end:");
 console.log("done");

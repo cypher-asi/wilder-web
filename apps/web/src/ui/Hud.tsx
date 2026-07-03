@@ -3,6 +3,7 @@ import { ROLL_COOLDOWN } from "../game/collision";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
+import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
 import { HoloMap } from "./HoloMap";
@@ -22,13 +23,10 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <div className="minimap-panel">
             <Minimap />
             <PositionReadout />
+            <StylePicker />
           </div>
           <ExtractionBar />
           <ExtractHint />
-          <div className="hud-hint">
-            WASD move · SHIFT toggle run · MOUSE aim · LMB shoot · SPACE roll · Q/E/R abilities ·
-            1-4 items · CTRL crouch · Z/X rotate · M map · I inventory · ENTER chat
-          </div>
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
@@ -40,6 +38,26 @@ export function Hud({ connection }: { connection: GameConnection }) {
         </>
       )}
     </div>
+  );
+}
+
+/** Visual style dropdown: switches the whole render look live. */
+function StylePicker() {
+  const visualStyle = useGame((s) => s.visualStyle);
+  const setVisualStyle = useGame((s) => s.setVisualStyle);
+  return (
+    <select
+      className="style-picker"
+      value={visualStyle}
+      onChange={(e) => setVisualStyle(e.target.value as VisualStyleId)}
+      title="Visual style"
+    >
+      {VISUAL_STYLE_IDS.map((id) => (
+        <option key={id} value={id}>
+          {STYLES[id].label}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -195,7 +213,7 @@ function ActionSlot({
           <div
             className="action-cd"
             style={{
-              background: `conic-gradient(rgba(4, 7, 12, 0.82) ${sweep * 360}deg, transparent 0deg)`,
+              background: `conic-gradient(rgba(5, 9, 15, 0.85) ${sweep * 360}deg, transparent 0deg)`,
             }}
           />
           <span className="action-cd-num">
@@ -349,13 +367,12 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           transform: "translateX(-50%)",
           fontSize: 12,
           letterSpacing: "0.15em",
-          color: "#ffb347",
-          textShadow: "0 0 10px rgba(255,179,71,0.5)",
+          color: "var(--accent)",
+          textShadow: "0 0 10px rgba(79,195,255,0.5)",
           cursor: "pointer",
           pointerEvents: "auto",
-          background: "rgba(10,12,18,0.75)",
-          border: "1px solid rgba(255,179,71,0.4)",
-          borderRadius: 6,
+          background: "rgba(9,15,24,0.7)",
+          border: "1px solid var(--accent-dim)",
           padding: "6px 14px",
         }}
         onClick={() => {
@@ -398,7 +415,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {locked.length === 0 && (
-            <div style={{ fontSize: 12, color: "#1affc4" }}>
+            <div style={{ fontSize: 12, color: "var(--accent)" }}>
               All blueprints researched.
             </div>
           )}
@@ -422,20 +439,19 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                   alignItems: "center",
                   gap: 10,
                   padding: "6px 8px",
-                  borderRadius: 4,
-                  border: `1px solid ${canResearch ? "rgba(64,232,255,0.4)" : "rgba(120,130,150,0.2)"}`,
+                  border: `1px solid ${canResearch ? "var(--accent-dim)" : "var(--steel-border)"}`,
                   cursor: canResearch ? "pointer" : "default",
                   opacity: canResearch ? 1 : 0.55,
                 }}
                 title={canResearch ? "Click to research" : "Missing fragments/resources"}
               >
                 <div>
-                  <div style={{ fontSize: 12, color: "#e8f4ff" }}>{shortName(r.output[0])}</div>
+                  <div style={{ fontSize: 12, color: "var(--text)" }}>{shortName(r.output[0])}</div>
                   <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
                     {r.station} blueprint
                   </div>
                 </div>
-                <div style={{ fontSize: 10, color: canResearch ? "#40e8ff" : "var(--text-dim)" }}>
+                <div style={{ fontSize: 10, color: canResearch ? "var(--accent)" : "var(--text-dim)" }}>
                   {canResearch ? "RESEARCH" : "—"}
                 </div>
               </div>
@@ -471,13 +487,13 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                     display: "flex",
                     justifyContent: "space-between",
                     fontSize: 11,
-                    color: "#e8f4ff",
+                    color: "var(--text)",
                   }}
                 >
                   <span>
                     {recipe ? shortName(recipe.output[0]) : job.recipe} {job.done}/{job.count}
                   </span>
-                  <span style={{ color: job.powered || !head ? "#1affc4" : "#ff5d7a" }}>
+                  <span style={{ color: job.powered || !head ? "var(--accent)" : "var(--alert)" }}>
                     {head ? (job.powered ? "POWERED" : "NO POWER — WAITING") : "QUEUED"}
                   </span>
                 </div>
@@ -487,8 +503,8 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                     style={{
                       width: `${pct * 100}%`,
                       background: job.powered
-                        ? "linear-gradient(90deg, #0fbf93, #1affc4)"
-                        : "linear-gradient(90deg, #7a3040, #ff5d7a)",
+                        ? "linear-gradient(90deg, #1f7fc4, var(--accent))"
+                        : "linear-gradient(90deg, #7a2530, var(--alert))",
                       transition: "none",
                     }}
                   />
@@ -511,8 +527,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                 alignItems: "center",
                 gap: 10,
                 padding: "6px 8px",
-                borderRadius: 4,
-                border: `1px solid ${canQueue ? "rgba(26,255,196,0.35)" : "rgba(120,130,150,0.2)"}`,
+                border: `1px solid ${canQueue ? "var(--accent-dim)" : "var(--steel-border)"}`,
                 opacity: known ? (canQueue ? 1 : 0.7) : 0.4,
               }}
               title={
@@ -524,7 +539,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
               }
             >
               <div>
-                <div style={{ fontSize: 12, color: canQueue ? "#e8f4ff" : "var(--text-dim)" }}>
+                <div style={{ fontSize: 12, color: canQueue ? "var(--text)" : "var(--text-dim)" }}>
                   {shortName(r.output[0])}
                   {r.output[1] > 1 ? ` x${r.output[1]}` : ""}
                   {!known && " 🔒"}
@@ -549,9 +564,8 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                     }}
                     style={{
                       fontSize: 10,
-                      color: canQueue ? "#1affc4" : "var(--text-dim)",
-                      border: `1px solid ${canQueue ? "rgba(26,255,196,0.4)" : "rgba(120,130,150,0.2)"}`,
-                      borderRadius: 3,
+                      color: canQueue ? "var(--accent)" : "var(--text-dim)",
+                      border: `1px solid ${canQueue ? "var(--accent-dim)" : "var(--steel-border)"}`,
                       padding: "2px 6px",
                       cursor: canQueue ? "pointer" : "default",
                     }}
@@ -590,13 +604,12 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
           transform: "translateX(-50%)",
           fontSize: 12,
           letterSpacing: "0.15em",
-          color: "#ffd700",
-          textShadow: "0 0 10px rgba(255,215,0,0.5)",
+          color: "var(--accent)",
+          textShadow: "0 0 10px rgba(79,195,255,0.5)",
           cursor: "pointer",
           pointerEvents: "auto",
-          background: "rgba(10,12,18,0.75)",
-          border: "1px solid rgba(255,215,0,0.4)",
-          borderRadius: 6,
+          background: "rgba(9,15,24,0.7)",
+          border: "1px solid var(--accent-dim)",
           padding: "6px 14px",
         }}
         onClick={() => {
@@ -640,7 +653,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
           ✕
         </span>
       </h3>
-      <div style={{ fontSize: 12, color: "#ffd700", marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 10 }}>
         Wallet: {market?.wallet ?? 0} WILD
       </div>
 
@@ -662,12 +675,11 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
                 alignItems: "center",
                 gap: 8,
                 padding: "4px 8px",
-                borderRadius: 4,
-                border: "1px solid rgba(255,215,0,0.2)",
+                border: "1px solid var(--steel-border)",
                 fontSize: 11,
               }}
             >
-              <span style={{ color: "#e8f4ff" }}>
+              <span style={{ color: "var(--text)" }}>
                 {shortName(l.kind)} x{l.count}
               </span>
               <span style={{ color: "var(--text-dim)" }}>
@@ -676,7 +688,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
               <span style={{ display: "flex", gap: 8 }}>
                 <span
                   style={{
-                    color: canBuy ? "#1affc4" : "var(--text-dim)",
+                    color: canBuy ? "var(--accent)" : "var(--text-dim)",
                     cursor: canBuy ? "pointer" : "default",
                   }}
                   onClick={() => {
@@ -691,7 +703,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
                 </span>
                 {mine && (
                   <span
-                    style={{ color: "#ff5d7a", cursor: "pointer" }}
+                    style={{ color: "var(--alert)", cursor: "pointer" }}
                     onClick={() =>
                       connection.send({
                         t: "Market",
@@ -715,7 +727,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
         <select
           value={selectedKind}
           onChange={(e) => setListKind(e.target.value)}
-          style={{ background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px", flex: 1 }}
+          style={{ background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px", flex: 1 }}
         >
           {kinds.map((k) => (
             <option key={k} value={k}>
@@ -726,19 +738,19 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
         <input
           value={listCount}
           onChange={(e) => setListCount(e.target.value)}
-          style={{ width: 40, background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px" }}
+          style={{ width: 40, background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px" }}
           title="Count"
         />
         <input
           value={listPrice}
           onChange={(e) => setListPrice(e.target.value)}
-          style={{ width: 50, background: "#141a24", color: "#e8f4ff", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 4, fontSize: 11, padding: "3px 4px" }}
+          style={{ width: 50, background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px" }}
           title="Price each (WILD)"
         />
         <button
           type="submit"
           disabled={!selectedKind}
-          style={{ background: "rgba(255,215,0,0.15)", color: "#ffd700", border: "1px solid rgba(255,215,0,0.4)", borderRadius: 4, fontSize: 11, padding: "3px 10px", cursor: "pointer" }}
+          style={{ background: "var(--accent-faint)", color: "var(--accent)", border: "1px solid var(--accent-dim)", fontSize: 11, padding: "3px 10px", cursor: "pointer" }}
         >
           LIST
         </button>
@@ -776,9 +788,9 @@ function ExtractionBar() {
         style={{
           fontSize: 13,
           letterSpacing: "0.25em",
-          color: "#1affc4",
+          color: "var(--accent)",
           marginBottom: 8,
-          textShadow: "0 0 12px rgba(26,255,196,0.6)",
+          textShadow: "0 0 12px rgba(79,195,255,0.6)",
         }}
       >
         EXTRACTING…
@@ -788,7 +800,7 @@ function ExtractionBar() {
           className="hp-fill"
           style={{
             width: `${progress * 100}%`,
-            background: "linear-gradient(90deg, #0fbf93, #1affc4)",
+            background: "linear-gradient(90deg, #1f7fc4, var(--accent))",
             transition: "none",
           }}
         />
@@ -837,8 +849,8 @@ function ExtractHint() {
         transform: "translateX(-50%)",
         fontSize: 12,
         letterSpacing: "0.2em",
-        color: "#1affc4",
-        textShadow: "0 0 10px rgba(26,255,196,0.5)",
+        color: "var(--accent)",
+        textShadow: "0 0 10px rgba(79,195,255,0.5)",
         pointerEvents: "none",
       }}
     >
@@ -902,7 +914,7 @@ function PositionReadout() {
   return (
     <div className="hud-pos">
       {pos.x.toFixed(1)}, {pos.z.toFixed(1)} · chunk {cx}, {cz} ·{" "}
-      <span style={{ color: safe ? "#29d98c" : "#ff5d7a" }}>
+      <span style={{ color: safe ? "var(--accent)" : "var(--alert)" }}>
         {safe ? "SAFE ZONE" : "HOSTILE"}
       </span>
     </div>
@@ -954,7 +966,7 @@ function InventoryPanel({ connection }: { connection: GameConnection }) {
           <div
             key={i}
             className="inv-slot"
-            style={selected === i ? { borderColor: "#ff2d78" } : undefined}
+            style={selected === i ? { borderColor: "var(--accent)", background: "var(--hatch)" } : undefined}
             onClick={() => onSlotClick(i)}
             title={slot ? `${slot.kind} x${slot.count}` : ""}
           >

@@ -203,6 +203,32 @@ export function playAmmo(volume = 0.3) {
   }
 }
 
+/**
+ * Soft muffled "thunk" for grabbing a physical item (resources, materials,
+ * gear). A short triangle pluck dropping in pitch — distinct from the coin
+ * chime (currency) and the cartridge clack (ammo).
+ */
+export function playPickup(volume = 0.2) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(440, t0); // A4
+  osc.frequency.exponentialRampToValueAtTime(294, t0 + 0.12); // ~D4
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.linearRampToValueAtTime(volume, t0 + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.22);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.24);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
 /** Low double-buzz for refused actions (backpack full). */
 export function playDeny(volume = 0.18) {
   const ctx = getBlipCtx();

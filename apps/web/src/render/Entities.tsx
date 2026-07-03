@@ -38,7 +38,7 @@ import {
 } from "../state/game";
 import { RED_NUM } from "../ui/colors";
 import { groundHeightAt } from "./Ground";
-import { itemSpriteMaterial } from "./itemSprite";
+import { itemSpriteMaterialTinted } from "./itemSprite";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
 
@@ -1074,7 +1074,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       {entity.item && (
         <group ref={icon} position={[0, 1.02, 0]}>
           <sprite material={crateIconHaloMat} scale={[0.95, 0.95, 1]} raycast={noRaycast} />
-          <sprite material={itemSpriteMaterial(entity.item)} scale={[0.5, 0.5, 1]} raycast={noRaycast} />
+          <sprite material={itemSpriteMaterialTinted(entity.item)} scale={[0.5, 0.5, 1]} raycast={noRaycast} />
         </group>
       )}
       {/* No real pointLight here: with ~150 ammo caches replicated, per-crate

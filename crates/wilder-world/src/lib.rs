@@ -1291,10 +1291,10 @@ impl World {
             self.broadcast_combat(CombatEvent::EntityDied { id: target });
             self.grant_xp(attacker, if is_raider { XP_RAIDER_KILL } else { XP_SCAV_KILL });
             self.ledger.npc_kills += 1;
-            // The agent's spawn-minted inventory drops where it fell; the
-            // items stay owned by (attributed to) the dead agent until
-            // someone picks them up or the container expires.
-            self.spawn_loot(drop_pos, items, Some(agent), true);
+            // The agent's spawn-minted inventory scatters where it fell as
+            // separate pickups; items stay owned by (attributed to) the dead
+            // agent until picked up or the containers expire.
+            self.spawn_loot_scattered(drop_pos, items, Some(agent), true);
             // Loose currency spills out alongside the crate: a random handful
             // of WILD coins (raiders carry more), plus an occasional shard and
             // energy cell. These are walk-over collectibles (minted faucet).
@@ -1365,6 +1365,40 @@ impl World {
                 in_supply,
             },
         );
+    }
+
+    /// Drop each stack as its own loot container, jittered around `position`,
+    /// so a kill scatters distinct pickups (one object per resource/material/
+    /// item) instead of a single mixed crate. Each is grabbed - and cued -
+    /// separately on walk-over.
+    fn spawn_loot_scattered(
+        &mut self,
+        position: Vec3,
+        items: Vec<ItemStack>,
+        owner: Option<TxParty>,
+        in_supply: bool,
+    ) {
+        use rand::Rng;
+        for stack in items {
+            let jitter = Vec3::new(
+                self.rng.random_range(-1.3..=1.3),
+                0.0,
+                self.rng.random_range(-1.3..=1.3),
+            );
+            let entity = self.alloc_entity();
+            self.loot.insert(
+                entity,
+                LootContainer {
+                    entity,
+                    position: position + jitter,
+                    items: vec![stack],
+                    ttl: LOOT_TTL_SECONDS,
+                    variant: 0,
+                    owner: owner.clone(),
+                    in_supply,
+                },
+            );
+        }
     }
 
     /// A persistent, highlighted cache of ammo placed in the world. Uses an

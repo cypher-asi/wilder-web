@@ -7,6 +7,7 @@ import {
   playDeny,
   playGrunt,
   playLevelUp,
+  playPickup,
   playPowerUp,
   playPurchase,
   playSfx,
@@ -20,7 +21,7 @@ import {
   spawnEntity,
   useGame,
 } from "../state/game";
-import { itemLabel } from "../ui/ItemIcon";
+import { ITEM_INFO, itemLabel } from "../ui/ItemIcon";
 import { RED_HEX } from "../ui/colors";
 import { C2S, decode, encode, S2C } from "./protocol";
 
@@ -471,12 +472,18 @@ export class GameConnection {
           ui.pushPickup({ kind: null, text: "Backpack full", alert: true });
         }
         if (msg.d.gained.length > 0) {
-          // One cue per pickup, however many stacks came out of it. Ammo gets
-          // a mechanical cartridge/reload clack; everything else the coin chime.
-          if (msg.d.gained.some((g) => g.kind === "Ammo9mm")) {
+          // One cue per pickup, by item category: ammo gets a cartridge clack,
+          // currency (Cash) the coin chime, and everything else (resources,
+          // materials, gear) a soft item thunk.
+          const cats = new Set(
+            msg.d.gained.map((g) => ITEM_INFO[g.kind]?.category),
+          );
+          if (cats.has("ammo")) {
             playAmmo();
-          } else {
+          } else if (cats.has("currency")) {
             playCoin();
+          } else {
+            playPickup();
           }
         }
         for (const g of msg.d.gained) {

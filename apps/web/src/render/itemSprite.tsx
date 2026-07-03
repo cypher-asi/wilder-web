@@ -6,7 +6,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import * as THREE from "three";
 import { ItemKind } from "../net/protocol";
-import { GLYPHS } from "../ui/ItemIcon";
+import { CATEGORY_TICK, GLYPHS, ITEM_INFO } from "../ui/ItemIcon";
 
 const SPRITE_PX = 128;
 const textureCache = new Map<ItemKind, THREE.CanvasTexture>();
@@ -67,5 +67,28 @@ export function itemSpriteMaterial(kind: ItemKind): THREE.SpriteMaterial {
     depthWrite: false,
   });
   materialCache.set(kind, material);
+  return material;
+}
+
+const tintedMaterialCache = new Map<ItemKind, THREE.SpriteMaterial>();
+
+/**
+ * Loot-crate topper material tinted by the item's category color (ammo amber,
+ * currency green, resources blue, ...). The white silhouette texture is
+ * multiplied by the category color so a floating crate icon reads its type -
+ * and ammo boxes stand apart from regular loot - at a glance.
+ */
+export function itemSpriteMaterialTinted(kind: ItemKind): THREE.SpriteMaterial {
+  const cached = tintedMaterialCache.get(kind);
+  if (cached) return cached;
+  const tick = CATEGORY_TICK[ITEM_INFO[kind]?.category];
+  const material = new THREE.SpriteMaterial({
+    map: itemSpriteTexture(kind),
+    color: new THREE.Color(tick ?? "#ffffff"),
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+  });
+  tintedMaterialCache.set(kind, material);
   return material;
 }

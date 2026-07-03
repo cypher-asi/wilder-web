@@ -409,13 +409,16 @@ body {
 }
 
 /* Top-right minimap panel. */
+/* Top-right column: map, position readout, style picker, and chat all share
+   the map's width. */
 .minimap-panel {
   position: absolute;
   top: 12px;
   right: 12px;
+  width: 194px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   gap: 6px;
   pointer-events: auto;
   transform: perspective(900px) rotateY(-8deg);
@@ -491,15 +494,19 @@ body {
 }
 
 .hud-pos {
-  font-size: 10px;
-  letter-spacing: 0.06em;
+  width: 100%;
+  text-align: center;
+  white-space: nowrap;
+  font-size: 9px;
+  letter-spacing: 0.05em;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   background: var(--panel);
   backdrop-filter: blur(6px);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
-  padding: 3px 10px;
+  padding: 3px 6px;
+  overflow: hidden;
 }
 
 .style-picker {
@@ -544,17 +551,13 @@ body {
   white-space: nowrap;
 }
 
-/* Left tabbed chat/combat/status window. */
+/* Tabbed chat/combat/status window: lives in the top-right column, under the
+   minimap, at map width (tilt comes from the parent column). */
 .chatwin {
-  position: absolute;
-  left: 12px;
-  bottom: 122px;
-  width: 350px;
+  width: 100%;
   pointer-events: auto;
   opacity: 0.6;
   transition: opacity 0.2s;
-  transform: perspective(900px) rotateY(8deg);
-  transform-origin: left center;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.6));
 }
 
@@ -569,11 +572,13 @@ body {
 }
 
 .chatwin-tab {
+  flex: 1;
+  text-align: center;
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.18em;
-  padding: 4px 12px;
+  letter-spacing: 0.14em;
+  padding: 4px 0;
   background: rgba(9, 15, 24, 0.5);
   border: 1px solid var(--steel-border);
   border-bottom: none;

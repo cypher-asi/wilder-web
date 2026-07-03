@@ -24,13 +24,13 @@ export function Hud({ connection }: { connection: GameConnection }) {
             <Minimap />
             <PositionReadout />
             <StylePicker />
+            <ChatWindow connection={connection} />
           </div>
           <ExtractionBar />
           <ExtractHint />
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
-          <ChatWindow connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />

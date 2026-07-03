@@ -9,6 +9,7 @@
 
 import * as THREE from "three";
 import { CITY_ROAD, CITY_ROAD_LINE, cityTileAt } from "../game/citymap";
+import { groundTextureUniforms } from "./groundShader";
 import { LANE_WIDTH, MARKING_WIDTH, PARKING_LANE_WIDTH } from "../game/scale";
 import { CHUNK_SIZE, ChunkData, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 
@@ -37,7 +38,7 @@ const COLORS: THREE.Color[] = [
 ];
 
 /** Height of paint above road grade (manholes render above this). */
-const PAINT_Y = 0.012;
+const PAINT_Y = 0.006;
 
 interface Run {
   /** Inclusive tile extents of the contiguous road run. */
@@ -354,9 +355,11 @@ export const markingsMaterial = new THREE.MeshStandardMaterial({
 });
 
 // Wear shader: chip the paint away (discard shows the asphalt underneath),
-// vary the tint per stretch, and match the road's damp sheen so paint doesn't
-// float bright and dry on a wet street.
+// modulate the paint by the asphalt PBR maps so the aggregate texture reads
+// through the thin thermoplastic layer, vary the tint per stretch, and match
+// the road's damp sheen so paint doesn't float bright and dry on a wet street.
 markingsMaterial.onBeforeCompile = (shader) => {
+  Object.assign(shader.uniforms, groundTextureUniforms);
   shader.vertexShader = shader.vertexShader
     .replace("#include <common>", "#include <common>\nvarying vec3 vMWPos;")
     .replace(
@@ -369,6 +372,9 @@ markingsMaterial.onBeforeCompile = (shader) => {
       /* glsl */ `
 #include <common>
 varying vec3 vMWPos;
+uniform sampler2D uAsphaltMap;
+uniform sampler2D uAsphaltNormal;
+uniform sampler2D uAsphaltRough;
 float mHash12(vec2 p) {
   vec3 q = fract(vec3(p.xyx) * 0.1031);
   q += dot(q, q.yzx + 33.33);
@@ -402,6 +408,12 @@ float mZone = mFbm(mwp * 0.07 + 310.0);            // 0..1 wear region
 float mChip = mNoise(mwp * 9.0);                    // fine chip texture
 float mWear = smoothstep(0.35, 0.75, mZone);
 if (mChip < mWear * 0.85) discard;
+// Asphalt aggregate shows through the thin paint layer: modulate the paint
+// by the same asphalt albedo the road samples (matched 3.6 m world repeat),
+// normalized around its mean so the paint keeps its authored brightness.
+vec3 mAsph = texture2D(uAsphaltMap, mwp / 3.6).rgb;
+float mAsphLum = dot(mAsph, vec3(0.299, 0.587, 0.114));
+diffuseColor.rgb *= clamp(0.35 + mAsphLum * 2.4, 0.5, 1.35);
 // Surviving paint near worn zones is thinner: darker, dirtier.
 float mThin = smoothstep(0.2, 0.75, mWear - 0.25 * (mChip - mWear));
 diffuseColor.rgb *= 1.0 - 0.3 * mThin;
@@ -415,10 +427,25 @@ diffuseColor.rgb *= 1.0 - 0.12 * smoothstep(0.55, 0.8, mFbm(mwp * 0.4 + 90.0));
       "#include <roughnessmap_fragment>",
       /* glsl */ `
 #include <roughnessmap_fragment>
+// Asphalt micro-roughness carries into the paint film.
+roughnessFactor *= 0.7 + 0.6 * texture2D(uAsphaltRough, mwp / 3.6).r;
 // Same damp field as the road shader so wet gloss lines up.
 float mDamp = clamp(0.35 + 0.55 * mFbm(mwp * 0.03 + 200.0), 0.0, 1.0);
 roughnessFactor = mix(roughnessFactor, roughnessFactor * 0.45 + 0.02, mDamp);
 diffuseColor.rgb *= 1.0 - 0.15 * mDamp;
+`,
+    )
+    .replace(
+      "#include <normal_fragment_begin>",
+      /* glsl */ `
+#include <normal_fragment_begin>
+// Bend the flat quad normal with the asphalt normal map so paint follows
+// the bumps of the pavement instead of reading as a decal-flat sticker.
+{
+  vec2 mN2 = texture2D(uAsphaltNormal, vMWPos.xz / 3.6).rg * 2.0 - 1.0;
+  vec3 mWN = normalize(vec3(mN2.x * 0.45, 1.0, mN2.y * 0.45));
+  normal = normalize(mat3(viewMatrix) * mWN);
+}
 `,
     );
 };

@@ -26,7 +26,9 @@ const TEXTURE_SETS = [
   ["grass", "Grass"],
 ] as const;
 
-const uniforms: Record<string, THREE.IUniform> = {};
+// Shared with roadMarkings.ts so paint samples the same asphalt PBR maps.
+export const groundTextureUniforms: Record<string, THREE.IUniform> = {};
+const uniforms = groundTextureUniforms;
 for (const [, p] of TEXTURE_SETS) {
   uniforms[`u${p}Map`] = { value: solidTex(90, 90, 96, true) };
   uniforms[`u${p}Normal`] = { value: solidTex(128, 128, 255) };
@@ -197,9 +199,15 @@ vec2 gNrm2 = vec2(0.0);
 float gNStr = 0.0;
 if (gKind == 0) {
   gAlb = gTriRGB(uAsphaltMap, wp, gW, 3.6, 3.6) * 1.2;
+  // Per-block tint drift: paving batches age brown-gray or blue-black, on a
+  // ~30 m scale plus a soft fbm blend so streets don't read as one material.
+  float batch = gHash12(floor(wp.xz / 30.0) + 77.0);
+  float batchMix = clamp(batch + 0.5 * (gFbm(wp.xz * 0.02 + 640.0) - 0.5), 0.0, 1.0);
+  gAlb *= mix(vec3(1.05, 1.0, 0.93), vec3(0.93, 0.97, 1.06), batchMix);
+  gAlb *= 0.9 + 0.25 * gHash12(floor(wp.xz / 30.0) + 12.0);
   gRgh = clamp(gTriR(uAsphaltRough, wp, gW, 3.6, 3.6) * 0.5 + 0.03, 0.1, 0.6);
   gNrm2 = gTriRG(uAsphaltNormal, wp, gW, 3.6, 3.6) * 2.0 - 1.0;
-  gNStr = 0.45;
+  gNStr = 0.5;
 } else if (gKind == 1) {
   // Sidewalk: dark-gray concrete slabs with varied pour sizes (big 4 m
   // pours, standard 2 m slabs, or 1 m tile strips per zone) and per-slab
@@ -207,29 +215,70 @@ if (gKind == 0) {
   float pitch; vec2 jit; float tone; float joint;
   gSlabField(wp.xz, 2.0, pitch, jit, tone, joint);
   vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
-  gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.82 * vec3(0.94, 0.96, 1.0);
-  gAlb *= tone;
+  gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.6 * vec3(0.97, 0.95, 0.92);
+  // Bias tone downward: bright outlier slabs are what read as "white".
+  gAlb *= 0.62 + 0.6 * (tone - 0.72);
+  // Per-slab hue drift: pours cure warm (tan) or cool (blue-gray).
+  vec2 slabId = floor(wp.xz / pitch);
+  gAlb *= mix(vec3(1.05, 0.99, 0.91), vec3(0.91, 0.96, 1.05), gHash12(slabId + 47.1));
   gRgh = clamp(gTriR(uConcreteRough, wps, gW, 3.5, 0.9) * 0.6 + 0.18, 0.3, 0.9);
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 7.7) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 3.5, 0.9) * 2.0 - 1.0;
-  gNStr = 0.3;
-  // Recessed joint grooves between slabs.
-  gAlb *= 1.0 - 0.45 * joint;
+  gNStr = 0.35;
+  // Recessed joint grooves between slabs: darker core plus a V-groove
+  // normal tilt so each joint catches light like a saw cut, not a stripe.
+  gAlb *= 1.0 - 0.55 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
-} else if (gKind >= 6) {
+  vec2 jf = fract(wp.xz / pitch + 0.5) - 0.5;
+  vec2 jTilt = -sign(jf) * (1.0 - smoothstep(0.005, 0.08, abs(jf) * pitch));
+  gNrm2 += jTilt * 2.2;
+} else if (gKind == 6 || gKind == 7) {
   // Curbstone band (kind 6 runs along Z, 7 along X): granite-toned concrete
   // at a fine repeat so the curb reads as its own element, a touch lighter
   // than the dark sidewalk, with per-segment shifts and joints every 1.8 m.
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * vec3(0.92, 0.94, 0.98);
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.72 * vec3(0.95, 0.95, 0.97);
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.18, 0.3, 0.9);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
-  gNStr = 0.3;
+  gNStr = 0.4;
   float along = gKind == 6 ? wp.z : wp.x;
   gAlb *= 0.88 + 0.24 * gHash12(vec2(floor(along / 1.8), 4.2));
   float distJoint = (0.5 - abs(fract(along / 1.8) - 0.5)) * 1.8;
   float joint = 1.0 - smoothstep(0.012, 0.045, distJoint);
-  gAlb *= 1.0 - 0.5 * joint;
+  gAlb *= 1.0 - 0.6 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), joint);
+  // V-groove normal tilt across each curbstone joint.
+  float jsC = fract(along / 1.8 + 0.5) - 0.5;
+  float jtC = -sign(jsC) * (1.0 - smoothstep(0.005, 0.06, abs(jsC) * 1.8));
+  if (gKind == 6) { gNrm2.y += jtC * 2.4; } else { gNrm2.x += jtC * 2.4; }
+} else if (gKind == 8) {
+  // Seam groove between curbstone and sidewalk: packed wet dirt, near black.
+  float dn = gFbm(wp.xz * 2.6 + 12.0);
+  gAlb = vec3(0.030, 0.028, 0.025) * (0.6 + 0.8 * dn);
+  gRgh = 0.92;
+} else if (gKind >= 9) {
+  // Gutter pan (kind 9 runs along Z, 10 along X): a lower curb apron poured
+  // at street grade; concrete like the curb but heavily stained by runoff.
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.62 * vec3(0.94, 0.93, 0.9);
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.2, 0.35, 0.95);
+  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
+  gNStr = 0.35;
+  float alongP = gKind == 9 ? wp.z : wp.x;
+  gAlb *= 0.86 + 0.22 * gHash12(vec2(floor(alongP / 1.8), 6.6));
+  // Joints line up with the curbstones above, with the same V-groove tilt.
+  float distJp = (0.5 - abs(fract(alongP / 1.8) - 0.5)) * 1.8;
+  float jointP = 1.0 - smoothstep(0.012, 0.045, distJp);
+  gAlb *= 1.0 - 0.55 * jointP;
+  float jsP = fract(alongP / 1.8 + 0.5) - 0.5;
+  float jtP = -sign(jsP) * (1.0 - smoothstep(0.005, 0.06, abs(jsP) * 1.8));
+  if (gKind == 9) { gNrm2.y += jtP * 2.4; } else { gNrm2.x += jtP * 2.4; }
+  // Runoff staining: dark water-borne grime pooled along the pan.
+  float runoff = smoothstep(0.3, 0.75, gFbm(wp.xz * 0.7 + 88.0));
+  gAlb *= 1.0 - 0.35 * runoff;
+  gRgh = mix(gRgh, gRgh * 0.7, runoff);
+  // Contact AO against the curb face: pan height encodes position across the
+  // pan (lip 0.004 -> curb side 0.02), so darken toward the high edge.
+  float panAO = smoothstep(0.008, 0.019, wp.y);
+  gAlb *= 1.0 - 0.3 * panAO;
 } else if (gKind == 2) {
   // Plaza: big dark stone slabs (8/4/2 m per zone) with per-slab texture
   // offset and tone; darker and cooler than sidewalks like the reference.
@@ -242,8 +291,11 @@ if (gKind == 0) {
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 9.1) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 4.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.3;
-  gAlb *= 1.0 - 0.45 * joint;
+  gAlb *= 1.0 - 0.5 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
+  vec2 jfP = fract((wp.xz + 37.0) / pitch + 0.5) - 0.5;
+  vec2 jTiltP = -sign(jfP) * (1.0 - smoothstep(0.005, 0.08, abs(jfP) * pitch));
+  gNrm2 += jTiltP * 2.0;
 } else if (gKind == 3) {
   gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.55;
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.12, 0.2, 0.8);
@@ -267,20 +319,44 @@ gAlb *= 0.85 + 0.35 * gFbm(wp.xz * 0.06 + 7.7);
 // reference plaza (water staining, sun-bleached vs shaded pours).
 if (gKind == 1 || gKind == 2 || gKind == 3) {
   float dirt = smoothstep(0.45, 0.75, gFbm(wp.xz * 0.22 + 61.3));
-  float wea = smoothstep(0.48, 0.85, gFbm(wp.xz * 0.045 + 151.0));
-  gAlb *= (1.0 - 0.3 * dirt) * (1.0 - 0.32 * wea);
+  float wea = smoothstep(0.44, 0.82, gFbm(wp.xz * 0.045 + 151.0));
+  gAlb *= (1.0 - 0.38 * dirt) * (1.0 - 0.38 * wea);
   gRgh = min(gRgh + 0.12 * wea, 1.0);
+  // Sun-bleached pours: sparse zones that dried lighter and chalkier.
+  float bleach = smoothstep(0.66, 0.84, gFbm(wp.xz * 0.035 + 401.0));
+  gAlb *= 1.0 + 0.22 * bleach;
+  gRgh = min(gRgh + 0.1 * bleach, 1.0);
+  // Trodden-in gum and grease dots on walking surfaces.
+  float gum = gSpots(wp.xz + 17.0, 0.9, 0.16, 0.1);
+  gAlb *= 1.0 - 0.5 * gum;
+  gRgh = mix(gRgh, gRgh * 0.6, gum);
+  // Rust runoff streak spots (railings, signposts, fire escapes above).
+  float rustW = gSpots(wp.xz + 71.0, 5.5, 0.1, 0.16);
+  gAlb = mix(gAlb, vec3(0.20, 0.10, 0.05) * (0.6 + 0.8 * gFbm(wp.xz * 1.1)), 0.4 * rustW);
 }
 
-// Cracks: voronoi edges gated by a sparse density mask, denser near curbs.
+// Cracks: voronoi edges gated by a density mask, denser near curbs, plus a
+// finer secondary crack web and sparse "alligator" fatigue zones on asphalt.
 float gCrackLine = 1.0 - smoothstep(0.015, 0.045, gVoroEdge(wp.xz * 0.45));
 float gCrackDen = smoothstep(0.58, 0.85, gFbm(wp.xz * 0.09 + 17.0));
+float gCrackFine = 1.0 - smoothstep(0.015, 0.04, gVoroEdge(wp.xz * 1.1 + 9.0));
+float gFineDen = smoothstep(0.72, 0.9, gFbm(wp.xz * 0.13 + 71.0));
 float gCrack = 0.0;
 if (gKind == 0) {
   gCrack = gCrackLine * clamp(gCrackDen + gNearC * 0.3, 0.0, 1.0);
+  // Alligator cracking: sparse fatigue zones where a fine crack web runs
+  // dense with a crumbled, slightly darker fill between the cracks.
+  float alli = smoothstep(0.74, 0.85, gFbm(wp.xz * 0.045 + 301.0));
+  gCrack = max(gCrack, gCrackFine * alli * 0.8);
+  gAlb *= 1.0 - 0.1 * alli;
+  gRgh = min(gRgh + 0.08 * alli, 1.0);
+  gCrack = max(gCrack, gCrackFine * gFineDen * 0.5);
 } else if (gKind <= 2) {
-  gCrack = gCrackLine * clamp(gCrackDen * 0.6 + (1.0 - smoothstep(0.1, 1.0, gDistRoad)) * 0.25, 0.0, 1.0) * 0.7;
+  gCrack = gCrackLine * clamp(gCrackDen * 0.65 + (1.0 - smoothstep(0.1, 1.0, gDistRoad)) * 0.25, 0.0, 1.0) * 0.7;
+  gCrack = max(gCrack, gCrackFine * gFineDen * 0.4);
 }
+// Crack shading: darker core plus a roughness lift; no normal kink (a lit
+// kink turns the crack web into bright specular veins under low sun).
 gAlb *= 1.0 - 0.4 * gCrack;
 gRgh = mix(gRgh, min(gRgh + 0.15, 1.0), gCrack);
 
@@ -299,11 +375,12 @@ if (gKind == 0) {
   gAlb *= 1.0 - 0.32 * track;
   gRgh = mix(gRgh, gRgh * 0.55, track);
 
-  // Tar crack-seal: dark glossy snaking lines, sparser than the crack field.
-  float tarLine = 1.0 - smoothstep(0.05, 0.15, gVoroEdge(wp.xz * 0.17 + 5.0));
-  float tar = tarLine * smoothstep(0.52, 0.72, gFbm(wp.xz * 0.05 + 130.0));
+  // Tar crack-seal: dark snaking lines, sparser than the crack field. Kept
+  // matte enough that grazing light doesn't turn the web into bright veins.
+  float tarLine = 1.0 - smoothstep(0.04, 0.12, gVoroEdge(wp.xz * 0.17 + 5.0));
+  float tar = tarLine * smoothstep(0.6, 0.78, gFbm(wp.xz * 0.05 + 130.0));
   gAlb = mix(gAlb, vec3(0.016, 0.016, 0.018), 0.7 * tar);
-  gRgh = mix(gRgh, 0.28, tar);
+  gRgh = mix(gRgh, 0.45, tar);
 
   // Oil stains: dark, glossier, biased toward lane centers and the gutter.
   float oil = smoothstep(0.56, 0.78, gFbm(wp.xz * 0.14 + 31.7) + gNearC * 0.05);
@@ -314,6 +391,11 @@ if (gKind == 0) {
   float drip = gSpots(wp.xz, 1.7, 0.1, 0.28);
   gAlb *= 1.0 - 0.22 * drip;
   gRgh = mix(gRgh, gRgh * 0.75, drip);
+
+  // Rust stains: iron-brown blooms around street steel and runoff paths.
+  float rust = gSpots(wp.xz + 53.0, 4.5, 0.12, 0.22);
+  gAlb = mix(gAlb, vec3(0.21, 0.11, 0.05) * (0.6 + 0.8 * gFbm(wp.xz * 1.3)), 0.45 * rust);
+  gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), rust * 0.5);
 
   // Drainage fans: broad wet-dirt stains spreading from the curb line.
   float fan = gNearC * smoothstep(0.42, 0.72, gFbm(wp.xz * 0.3 + 77.0));
@@ -338,7 +420,7 @@ if (gKind == 0) {
 
 // Curb weathering and gutters: grime, painted sections, contact shadows.
 float dCurbG = max(-vRoadD, 0.0);
-if (gKind >= 6) {
+if (gKind == 6 || gKind == 7) {
   float alongC = gKind == 6 ? wp.z : wp.x;
   float acrossC = gKind == 6 ? wp.x : wp.z;
   // Grime streaks down the vertical face, heavier near the base where
@@ -355,6 +437,10 @@ if (gKind >= 6) {
   float sect = gHash12(vec2(floor(alongC / 16.0), 8.5));
   if (sect < 0.32) {
     vec3 paint = sect < 0.07 ? vec3(0.40, 0.07, 0.05) : vec3(0.62, 0.47, 0.10);
+    // Thin paint over rough concrete: modulate by the underlying albedo
+    // luminance so grime, joints and texture grain read through the coat.
+    float underLum = dot(gAlb, vec3(0.299, 0.587, 0.114));
+    paint *= clamp(0.45 + underLum * 3.2, 0.5, 1.25);
     float chip = smoothstep(0.45, 0.68,
       gNoise(vec2(alongC * 7.0, wp.y * 30.0 + acrossC * 11.0)));
     float pMask = (1.0 - chip) * 0.85;
@@ -367,9 +453,14 @@ if (gKind == 0) {
   float gut = 1.0 - smoothstep(0.1, 1.3, dCurbG);
   gut *= 0.7 + 0.3 * gFbm(wp.xz * 0.5 + 23.0);
   gAlb = mix(gAlb, gAlb * vec3(0.5, 0.48, 0.45), gut);
-  // Contact-shadow band where asphalt meets the curb face (cheap AO).
-  float contact = 1.0 - smoothstep(0.05, 0.45, dCurbG);
-  gAlb *= 1.0 - 0.3 * contact;
+  // Contact-shadow band where asphalt meets the gutter pan (cheap AO).
+  float contact = 1.0 - smoothstep(0.05, 0.55, dCurbG);
+  gAlb *= 1.0 - 0.38 * contact;
+}
+if (gKind == 1) {
+  // Contact AO where the walking surface meets the curb band groove.
+  float seamAO = 1.0 - smoothstep(0.1, 0.6, gDistRoad);
+  gAlb *= 1.0 - 0.14 * seamAO;
 }
 
 // Puddles: pooled in gutters and low spots; mirror-smooth, slightly dark.

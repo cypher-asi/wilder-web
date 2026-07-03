@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import {
   CITY_ROAD,
   CITY_ROAD_LINE,
@@ -25,9 +26,22 @@ const RAMP_H = 0.02;
 const BEVEL = 0.045;
 /** Width of the curbstone band on top of the slab edge (visible thickness). */
 const CURB_W = 0.32;
+/** Recessed seam groove between the curbstone band and the walking surface. */
+const SEAM_W = 0.035;
+const SEAM_D = 0.022;
+/** Concrete gutter pan: a lower curb apron at street grade along curb bases,
+ * sloped from a small lip at the asphalt seam up to the curb face. */
+const PAN_W = 0.35;
+const PAN_H = 0.02;
+const PAN_LIP = 0.004;
 /** aKind for curbstone bands: 6 runs along Z (x-facing edges), 7 along X. */
 const KIND_CURB_Z = 6;
 const KIND_CURB_X = 7;
+/** aKind for seam grooves and gutter pans (see groundShader.ts).
+ * Gutter pans encode their axis like curbs: 9 runs along Z, 10 along X. */
+const KIND_SEAM = 8;
+const KIND_GUTTER_Z = 9;
+const KIND_GUTTER_X = 10;
 
 /** aKind vertex attribute values consumed by the ground shader. */
 const KIND_ID: Record<TileKind, number> = {
@@ -196,6 +210,55 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
       const roadZm = lowAt(tx, tz - 1);
       const roadZp = lowAt(tx, tz + 1);
 
+      // Concrete gutter pan: a lower curb apron poured at street grade along
+      // every curb base, sloped from a small lip at the asphalt seam (with a
+      // short dark recessed edge down to the road) up to the curb face. Pans
+      // sit over the flat road quads; convex corners get a mitered patch.
+      {
+        if (roadXm) {
+          const px = x0 - PAN_W;
+          g.quad([px, PAN_LIP, z0], [px, PAN_LIP, z1], [x0, PAN_H, z1], [x0, PAN_H, z0], KIND_GUTTER_Z);
+          g.quad([px, PAN_LIP, z0], [px, 0, z0], [px, 0, z1], [px, PAN_LIP, z1], KIND_SEAM);
+        }
+        if (roadXp) {
+          const px = x1 + PAN_W;
+          g.quad([x1, PAN_H, z0], [x1, PAN_H, z1], [px, PAN_LIP, z1], [px, PAN_LIP, z0], KIND_GUTTER_Z);
+          g.quad([px, PAN_LIP, z1], [px, 0, z1], [px, 0, z0], [px, PAN_LIP, z0], KIND_SEAM);
+        }
+        if (roadZm) {
+          const pz = z0 - PAN_W;
+          g.quad([x0, PAN_LIP, pz], [x0, PAN_H, z0], [x1, PAN_H, z0], [x1, PAN_LIP, pz], KIND_GUTTER_X);
+          g.quad([x1, PAN_LIP, pz], [x1, 0, pz], [x0, 0, pz], [x0, PAN_LIP, pz], KIND_SEAM);
+        }
+        if (roadZp) {
+          const pz = z1 + PAN_W;
+          g.quad([x0, PAN_H, z1], [x0, PAN_LIP, pz], [x1, PAN_LIP, pz], [x1, PAN_H, z1], KIND_GUTTER_X);
+          g.quad([x0, PAN_LIP, pz], [x0, 0, pz], [x1, 0, pz], [x1, PAN_LIP, pz], KIND_SEAM);
+        }
+        // Mitered corner patch where two pans meet at a convex block corner:
+        // PAN_H at the curb corner, lip height at the three outer corners.
+        const panCorner = (cx: number, cz: number, sx: number, sz: number) => {
+          const ox = cx + sx * PAN_W;
+          const oz = cz + sz * PAN_W;
+          const A = [cx, PAN_H, cz];
+          const B = [ox, PAN_LIP, cz];
+          const C = [ox, PAN_LIP, oz];
+          const D = [cx, PAN_LIP, oz];
+          if (sx * sz > 0) g.quad(A, D, C, B, KIND_GUTTER_Z);
+          else g.quad(A, B, C, D, KIND_GUTTER_Z);
+          const zlo = Math.min(cz, oz), zhi = Math.max(cz, oz);
+          if (sx < 0) g.quad([ox, PAN_LIP, zlo], [ox, 0, zlo], [ox, 0, zhi], [ox, PAN_LIP, zhi], KIND_SEAM);
+          else g.quad([ox, PAN_LIP, zhi], [ox, 0, zhi], [ox, 0, zlo], [ox, PAN_LIP, zlo], KIND_SEAM);
+          const xlo = Math.min(cx, ox), xhi = Math.max(cx, ox);
+          if (sz < 0) g.quad([xhi, PAN_LIP, oz], [xhi, 0, oz], [xlo, 0, oz], [xlo, PAN_LIP, oz], KIND_SEAM);
+          else g.quad([xlo, PAN_LIP, oz], [xlo, 0, oz], [xhi, 0, oz], [xhi, PAN_LIP, oz], KIND_SEAM);
+        };
+        if (roadXm && roadZm) panCorner(x0, z0, -1, -1);
+        if (roadXm && roadZp) panCorner(x0, z1, -1, 1);
+        if (roadXp && roadZm) panCorner(x1, z0, 1, -1);
+        if (roadXp && roadZp) panCorner(x1, z1, 1, 1);
+      }
+
       // Curb-cut ramp only at true intersection corners: both road edges
       // must continue straight past this tile. (Staircase steps on curved
       // streets also have roads on two orthogonal sides; cutting a ramp at
@@ -253,20 +316,41 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
 
       // Band tops: X-edge bands run the full tile depth (minus the bevel
       // lip) and own the corner square; Z-edge bands span the remaining x
-      // so corners tile without overlap or holes.
+      // so corners tile without overlap or holes. The inner SEAM_W of each
+      // band is replaced by a recessed V-groove where the curbstone meets
+      // the walking surface: real geometry, so it self-shadows and gains
+      // parallax instead of being a painted-on dark line.
       const zbA = z0 + (roadZm ? BEVEL : 0);
       const zbB = z1 - (roadZp ? BEVEL : 0);
+      // V-groove running along Z at [xs, xs + SEAM_W], z in [za, zb].
+      const seamZ = (xs: number, za: number, zb: number) => {
+        const xm = xs + SEAM_W / 2;
+        const yb = H - SEAM_D;
+        g.quad([xs, H, za], [xs, H, zb], [xm, yb, zb], [xm, yb, za], KIND_SEAM);
+        g.quad([xm, yb, za], [xm, yb, zb], [xs + SEAM_W, H, zb], [xs + SEAM_W, H, za], KIND_SEAM);
+      };
+      // V-groove running along X at [zs, zs + SEAM_W], x in [xa, xb].
+      const seamX = (zs: number, xa: number, xb: number) => {
+        const zm = zs + SEAM_W / 2;
+        const yb = H - SEAM_D;
+        g.quad([xb, H, zs], [xa, H, zs], [xa, yb, zm], [xb, yb, zm], KIND_SEAM);
+        g.quad([xb, yb, zm], [xa, yb, zm], [xa, H, zs + SEAM_W], [xb, H, zs + SEAM_W], KIND_SEAM);
+      };
       if (roadXm) {
-        g.quad([x0 + BEVEL, H, zbA], [x0 + BEVEL, H, zbB], [x0 + CURB_W, H, zbB], [x0 + CURB_W, H, zbA], KIND_CURB_Z);
+        g.quad([x0 + BEVEL, H, zbA], [x0 + BEVEL, H, zbB], [x0 + CURB_W - SEAM_W, H, zbB], [x0 + CURB_W - SEAM_W, H, zbA], KIND_CURB_Z);
+        seamZ(x0 + CURB_W - SEAM_W, zbA, zbB);
       }
       if (roadXp) {
-        g.quad([x1 - CURB_W, H, zbA], [x1 - CURB_W, H, zbB], [x1 - BEVEL, H, zbB], [x1 - BEVEL, H, zbA], KIND_CURB_Z);
+        g.quad([x1 - CURB_W + SEAM_W, H, zbA], [x1 - CURB_W + SEAM_W, H, zbB], [x1 - BEVEL, H, zbB], [x1 - BEVEL, H, zbA], KIND_CURB_Z);
+        seamZ(x1 - CURB_W, zbA, zbB);
       }
       if (roadZm) {
-        g.quad([xi0, H, z0 + BEVEL], [xi0, H, z0 + CURB_W], [xi1, H, z0 + CURB_W], [xi1, H, z0 + BEVEL], KIND_CURB_X);
+        g.quad([xi0, H, z0 + BEVEL], [xi0, H, z0 + CURB_W - SEAM_W], [xi1, H, z0 + CURB_W - SEAM_W], [xi1, H, z0 + BEVEL], KIND_CURB_X);
+        seamX(z0 + CURB_W - SEAM_W, xi0, xi1);
       }
       if (roadZp) {
-        g.quad([xi0, H, z1 - CURB_W], [xi0, H, z1 - BEVEL], [xi1, H, z1 - BEVEL], [xi1, H, z1 - CURB_W], KIND_CURB_X);
+        g.quad([xi0, H, z1 - CURB_W + SEAM_W], [xi0, H, z1 - BEVEL], [xi1, H, z1 - BEVEL], [xi1, H, z1 - CURB_W + SEAM_W], KIND_CURB_X);
+        seamX(z1 - CURB_W, xi0, xi1);
       }
 
       // Bevel lips + vertical curb faces along each road edge.
@@ -364,9 +448,16 @@ const manholeRim = new THREE.MeshStandardMaterial({
   metalness: 0.4,
 });
 const drainGrate = new THREE.MeshStandardMaterial({
-  color: "#0b0c0e",
-  roughness: 0.6,
-  metalness: 0.5,
+  color: "#191b1e",
+  roughness: 0.55,
+  metalness: 0.6,
+});
+// Near-black matte interior for recesses (drain pits, inlet throats, seams):
+// kills bounce light so gaps read as actual holes.
+const recessMat = new THREE.MeshStandardMaterial({
+  color: "#020203",
+  roughness: 0.98,
+  metalness: 0,
 });
 const utilityCover = new THREE.MeshStandardMaterial({
   map: coverTex,
@@ -388,10 +479,40 @@ const stainMat = new THREE.MeshStandardMaterial({
   polygonOffsetFactor: -1,
   polygonOffsetUnits: -1,
 });
-const manholeGeo = new THREE.CircleGeometry(0.28, 20).rotateX(-Math.PI / 2);
-const manholeRimGeo = new THREE.RingGeometry(0.28, 0.35, 20).rotateX(-Math.PI / 2);
-const drainGeo = new THREE.BoxGeometry(0.9, 0.03, 0.4);
+// Manhole assembly: raised cast-iron rim ring, cover disc sunk below the rim
+// top, and a near-black gap ring between them so the seam has visible depth.
+const manholeGeo = new THREE.CircleGeometry(0.28, 24).rotateX(-Math.PI / 2).translate(0, 0.008, 0);
+const manholeRimGeo = mergeGeometries([
+  new THREE.RingGeometry(0.3, 0.37, 24).rotateX(-Math.PI / 2).translate(0, 0.016, 0),
+  new THREE.CylinderGeometry(0.37, 0.37, 0.016, 24, 1, true).translate(0, 0.008, 0),
+])!;
+const manholeGapGeo = new THREE.RingGeometry(0.275, 0.302, 24)
+  .rotateX(-Math.PI / 2)
+  .translate(0, 0.0105, 0);
+// Storm drain: outer frame + longitudinal bars floating over a dark recess
+// box, so the gaps between bars read as real holes; plus a curb-inlet opening
+// cut into the curb face above it (combination inlet). Local -z = curb side.
+// Heights clear the sloped gutter pan (up to PAN_H at the curb face).
+const drainGrateGeo = (() => {
+  const parts: THREE.BufferGeometry[] = [];
+  // Frame rails (long sides run along x).
+  parts.push(new THREE.BoxGeometry(0.94, 0.03, 0.05).translate(0, 0.031, -0.205));
+  parts.push(new THREE.BoxGeometry(0.94, 0.03, 0.05).translate(0, 0.031, 0.205));
+  parts.push(new THREE.BoxGeometry(0.05, 0.03, 0.36).translate(-0.445, 0.031, 0));
+  parts.push(new THREE.BoxGeometry(0.05, 0.03, 0.36).translate(0.445, 0.031, 0));
+  // Bars run toward the curb (with the water flow); they float above the dark
+  // recess top so each gap reads into shadow.
+  for (let i = 0; i < 9; i++) {
+    const bx = -0.36 + (i * 0.72) / 8;
+    parts.push(new THREE.BoxGeometry(0.038, 0.022, 0.36).translate(bx, 0.03, 0));
+  }
+  return mergeGeometries(parts)!;
+})();
+const drainRecessGeo = new THREE.BoxGeometry(0.96, 0.06, 0.46).translate(0, -0.012, 0);
+const curbInletGeo = new THREE.BoxGeometry(0.84, 0.07, 0.1).translate(0, 0.055, -0.28);
 const utilityGeo = new THREE.BoxGeometry(0.72, 0.014, 0.52);
+// Thin dark border under the utility cover: reads as a recessed seam frame.
+const utilitySeamGeo = new THREE.PlaneGeometry(0.8, 0.6).rotateX(-Math.PI / 2);
 const stainGeo = new THREE.PlaneGeometry(1.9, 1.9).rotateX(-Math.PI / 2);
 
 interface Detail {
@@ -439,10 +560,11 @@ function chunkDetails(chunk: ChunkData): Detail[] {
       const curb = cxm || cxp || czm || czp;
       if (curb && drains < 3) {
         if (rng() < 0.05) {
+          // rot points the grate's curb-inlet side (local -z) at the curb.
           if (czm) out.push({ kind: "drain", x, z: tz * TILE_SIZE + 0.28, rot: 0 });
-          else if (czp) out.push({ kind: "drain", x, z: (tz + 1) * TILE_SIZE - 0.28, rot: 0 });
+          else if (czp) out.push({ kind: "drain", x, z: (tz + 1) * TILE_SIZE - 0.28, rot: Math.PI });
           else if (cxm) out.push({ kind: "drain", x: tx * TILE_SIZE + 0.28, z, rot: Math.PI / 2 });
-          else out.push({ kind: "drain", x: (tx + 1) * TILE_SIZE - 0.28, z, rot: Math.PI / 2 });
+          else out.push({ kind: "drain", x: (tx + 1) * TILE_SIZE - 0.28, z, rot: -Math.PI / 2 });
           drains++;
         }
       } else if (!curb && manholes < 4 && rng() < 0.045) {
@@ -464,26 +586,28 @@ function RoadDetails({ chunk }: { chunk: ChunkData }) {
   return (
     <>
       {details.map((d, i) =>
-        // Kept above the painted road markings layer (y = 0.012).
+        // Kept above the painted road markings layer (y = 0.006).
         d.kind === "manhole" ? (
           <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
-            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.014, 0]} />
-            <mesh geometry={manholeGeo} material={manholeCover} position={[0, 0.016, 0]} />
-            <mesh geometry={manholeRimGeo} material={manholeRim} position={[0, 0.015, 0]} />
+            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.008, 0]} />
+            {/* Cover disc sunk below the rim top; dark gap ring reads as the seam. */}
+            <mesh geometry={manholeGapGeo} material={recessMat} />
+            <mesh geometry={manholeGeo} material={manholeCover} />
+            <mesh geometry={manholeRimGeo} material={manholeRim} castShadow />
           </group>
         ) : d.kind === "drain" ? (
           <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
-            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.014, 0]} scale={[0.9, 1, 0.7]} />
-            <mesh geometry={drainGeo} material={drainGrate} position={[0, 0.018, 0]} />
+            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.026, 0]} scale={[0.9, 1, 0.7]} />
+            <mesh geometry={drainRecessGeo} material={recessMat} />
+            <mesh geometry={drainGrateGeo} material={drainGrate} castShadow />
+            <mesh geometry={curbInletGeo} material={recessMat} />
           </group>
         ) : (
-          <mesh
-            key={i}
-            geometry={utilityGeo}
-            material={utilityCover}
-            position={[d.x, 0.147, d.z]}
-            rotation={[0, d.rot, 0]}
-          />
+          <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
+            {/* Dark border plane under the cover: recessed seam frame. */}
+            <mesh geometry={utilitySeamGeo} material={recessMat} position={[0, 0.142, 0]} />
+            <mesh geometry={utilityGeo} material={utilityCover} position={[0, 0.147, 0]} />
+          </group>
         ),
       )}
     </>

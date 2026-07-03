@@ -215,9 +215,9 @@ if (gKind == 0) {
   float pitch; vec2 jit; float tone; float joint;
   gSlabField(wp.xz, 2.0, pitch, jit, tone, joint);
   vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
-  gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.6 * vec3(0.97, 0.95, 0.92);
+  gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.44 * vec3(0.97, 0.95, 0.92);
   // Bias tone downward: bright outlier slabs are what read as "white".
-  gAlb *= 0.62 + 0.6 * (tone - 0.72);
+  gAlb *= 0.6 + 0.55 * (tone - 0.72);
   // Per-slab hue drift: pours cure warm (tan) or cool (blue-gray).
   vec2 slabId = floor(wp.xz / pitch);
   gAlb *= mix(vec3(1.05, 0.99, 0.91), vec3(0.91, 0.96, 1.05), gHash12(slabId + 47.1));
@@ -236,7 +236,7 @@ if (gKind == 0) {
   // Curbstone band (kind 6 runs along Z, 7 along X): granite-toned concrete
   // at a fine repeat so the curb reads as its own element, a touch lighter
   // than the dark sidewalk, with per-segment shifts and joints every 1.8 m.
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.72 * vec3(0.95, 0.95, 0.97);
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.56 * vec3(0.95, 0.95, 0.97);
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.18, 0.3, 0.9);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.4;
@@ -258,7 +258,7 @@ if (gKind == 0) {
 } else if (gKind >= 9) {
   // Gutter pan (kind 9 runs along Z, 10 along X): a lower curb apron poured
   // at street grade; concrete like the curb but heavily stained by runoff.
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.62 * vec3(0.94, 0.93, 0.9);
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.5 * vec3(0.94, 0.93, 0.9);
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.2, 0.35, 0.95);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.35;
@@ -285,8 +285,9 @@ if (gKind == 0) {
   float pitch; vec2 jit; float tone; float joint;
   gSlabField(wp.xz + 37.0, 4.0, pitch, jit, tone, joint);
   vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
-  gAlb = gTriRGB(uConcreteMap, wps, gW, 4.2, 0.9) * 0.68 * vec3(0.92, 0.95, 1.0);
-  gAlb *= tone;
+  gAlb = gTriRGB(uConcreteMap, wps, gW, 4.2, 0.9) * 0.46 * vec3(0.94, 0.96, 1.0);
+  // Same downward tone bias as sidewalks: kill the white outlier slabs.
+  gAlb *= 0.6 + 0.55 * (tone - 0.72);
   gRgh = clamp(gTriR(uConcreteRough, wps, gW, 4.2, 0.9) * 0.6 + 0.16, 0.3, 0.9);
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 9.1) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 4.2, 0.9) * 2.0 - 1.0;
@@ -297,7 +298,7 @@ if (gKind == 0) {
   vec2 jTiltP = -sign(jfP) * (1.0 - smoothstep(0.005, 0.08, abs(jfP) * pitch));
   gNrm2 += jTiltP * 2.0;
 } else if (gKind == 3) {
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.55;
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.42;
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.12, 0.2, 0.8);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.0, 0.9) * 2.0 - 1.0;
   gNStr = 0.4;
@@ -312,7 +313,7 @@ if (gKind == 0) {
 }
 
 // Large-scale mottle so big surfaces don't read flat in low sun.
-gAlb *= 0.85 + 0.35 * gFbm(wp.xz * 0.06 + 7.7);
+gAlb *= 0.8 + 0.3 * gFbm(wp.xz * 0.06 + 7.7);
 
 // Dirt blotches + broad weathering patches on walkable concrete: small-scale
 // boot-traffic grime plus large irregular darkened regions like the
@@ -324,7 +325,7 @@ if (gKind == 1 || gKind == 2 || gKind == 3) {
   gRgh = min(gRgh + 0.12 * wea, 1.0);
   // Sun-bleached pours: sparse zones that dried lighter and chalkier.
   float bleach = smoothstep(0.66, 0.84, gFbm(wp.xz * 0.035 + 401.0));
-  gAlb *= 1.0 + 0.22 * bleach;
+  gAlb *= 1.0 + 0.14 * bleach;
   gRgh = min(gRgh + 0.1 * bleach, 1.0);
   // Trodden-in gum and grease dots on walking surfaces.
   float gum = gSpots(wp.xz + 17.0, 0.9, 0.16, 0.1);

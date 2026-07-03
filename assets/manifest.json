@@ -274,5 +274,53 @@
     "path": "models/imported/sm_3dbillboard03.glb",
     "type": "model",
     "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_skyscraper_module01",
+    "path": "models/imported/sm_skyscraper_module01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_skyscraper_module02",
+    "path": "models/imported/sm_skyscraper_module02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_skyscraper_module03",
+    "path": "models/imported/sm_skyscraper_module03.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_skyscraper_module04",
+    "path": "models/imported/sm_skyscraper_module04.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_skyscraper_module05",
+    "path": "models/imported/sm_skyscraper_module05.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb03_09",
+    "path": "models/imported/sm_cb03_09.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_structure04",
+    "path": "models/imported/sm_structure04.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_restaurantsf01",
+    "path": "models/imported/sm_restaurantsf01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
   }
 ]

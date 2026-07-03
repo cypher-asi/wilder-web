@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { BuildingInstance, CHUNK_SIZE, ChunkData, TILE_SIZE } from "../net/protocol";
 import { mulberry, NEON_COLORS } from "./facade";
+import { getImportedBuilding } from "./importedBuilding";
 import { KitEntry } from "./InstancedKit";
 
 /** Sidewalk/building tiles are raised; buildings sit on top of them. */
@@ -26,7 +27,7 @@ export interface KitLocalPlacement {
   y: number;
   z: number;
   ry: number;
-  scale?: number;
+  scale?: number | [number, number, number];
 }
 
 export interface BuildingModel {
@@ -424,13 +425,17 @@ function buildServiceFace(
 
   // Wall AC units on the upper facade: kit models, wall-mounted on a small
   // bracket shelf, scaled down from the floor-standing source (~0.9 m tall).
-  const acCount = 1 + Math.floor(rng() * 3);
-  for (let i = 0; i < acCount; i++) {
-    const a = (rng() - 0.5) * (len - 1.6);
-    const y = 5.2 + rng() * Math.max(0.5, height - 6.6);
-    const scale = 0.55 + rng() * 0.15;
-    kit.push(facePlacement(f, KIT_AC[i % KIT_AC.length], a, y - 0.25, 0.02 + 0.25 * scale, scale));
-    faceBox(p, f, "metalDark", 0.75 * scale + 0.1, 0.05, 0.5, a, y - 0.27, 0.25);
+  // Skipped when the wall is too short (kit towers dress upper faces with
+  // facade panels instead).
+  if (height >= 6.6) {
+    const acCount = 1 + Math.floor(rng() * 3);
+    for (let i = 0; i < acCount; i++) {
+      const a = (rng() - 0.5) * (len - 1.6);
+      const y = 5.2 + rng() * Math.max(0.5, height - 6.6);
+      const scale = 0.55 + rng() * 0.15;
+      kit.push(facePlacement(f, KIT_AC[i % KIT_AC.length], a, y - 0.25, 0.02 + 0.25 * scale, scale));
+      faceBox(p, f, "metalDark", 0.75 * scale + 0.1, 0.05, 0.5, a, y - 0.27, 0.25);
+    }
   }
 
   // Vertical conduit / drain pipes.
@@ -587,12 +592,149 @@ function buildRoof(
 }
 
 // ---------------------------------------------------------------------------
+// Kit-bashed tower (archetype 3): stacked cyberpunk skyscraper modules
+// ---------------------------------------------------------------------------
+
+/**
+ * Facade wall panels: 12 m wide x ~12 m tall x ~4.2 m deep modules. In model
+ * space (bottom-center pivot, front +Z) the flat wall slab spans
+ * z -2.10..-1.81 and the balcony/AC greebles reach out to z +2.10, i.e.
+ * ~3.9 m proud of the authored wall surface.
+ */
+export interface KitTowerPanel {
+  assetId: string;
+  /** Authored module height in meters (from Asset Lab meta dimensions). */
+  h: number;
+}
+
+/**
+ * Tunable kit-tower facade parameters. The game always uses
+ * DEFAULT_KIT_TOWER_CONFIG; the Building Stage dev tool passes live-edited
+ * configs through buildBuildingModel to preview panel setups.
+ */
+export interface KitTowerConfig {
+  /** Module pool; one is picked per row (seeded by building style). */
+  panels: KitTowerPanel[];
+  /** Authored module width in meters (grid pitch along each face). */
+  moduleWidth: number;
+  /** Model-space distance from the pivot back to the wall surface. */
+  wallZ: number;
+  /**
+   * Depth (model z) compression. The authored greebles reach ~3.9 m past the
+   * wall surface, which loomed over the street; compressed they protrude
+   * ~1.4 m while the wall relief stays visible.
+   */
+  depthScale: number;
+  /** Height of the storefront base the panels stack on top of. */
+  baseHeight: number;
+  /** Render facade panels only (no procedural geometry). */
+  panelsOnly?: boolean;
+  /** Treat any building as a kit tower regardless of archetype/stories. */
+  forceKitTower?: boolean;
+}
+
+export const DEFAULT_KIT_TOWER_CONFIG: KitTowerConfig = {
+  panels: [
+    { assetId: "lab_sm_skyscraper_module01", h: 12.14 },
+    { assetId: "lab_sm_skyscraper_module02", h: 12.08 },
+    { assetId: "lab_sm_skyscraper_module03", h: 12.36 },
+  ],
+  moduleWidth: 12,
+  wallZ: 1.81,
+  depthScale: 0.35,
+  baseHeight: 4.8,
+  panelsOnly: false,
+};
+
+/**
+ * Taller archetype-3 towers keep their procedural storefront base but wrap
+ * the upper mass in kit facade panels (needs >= ~11 m of upper facade for
+ * the panels to keep sane proportions).
+ */
+export function isKitTower(b: BuildingInstance): boolean {
+  return b.archetype === 3 && b.stories >= 5;
+}
+
+/**
+ * Wrap the upper mass (above the storefront base) with facade panels at their
+ * authored 12 m scale: whole modules only, centered per face (leftover face
+ * ends stay bare and read as the core box), stacked per 12 m level. The back
+ * wall slab embeds just behind the building wall plane; depth is compressed
+ * (cfg.depthScale) so the authored deep greebles protrude modestly.
+ */
+function buildKitTowerFacade(
+  b: BuildingInstance,
+  kit: KitLocalPlacement[],
+  w: number,
+  d: number,
+  baseY: number,
+  height: number,
+  cfg: KitTowerConfig,
+): void {
+  if (cfg.panels.length === 0) return;
+  const refH = cfg.panels[0].h;
+  const sz = cfg.depthScale;
+  // Pivot offset outward from the wall plane that puts the (depth-scaled)
+  // wall slab surface 0.1 m behind the wall plane.
+  const out = cfg.wallZ * sz - 0.1;
+
+  // Whole rows only; row count picked to keep the vertical stretch closest
+  // to 1 within tolerable distortion. When even the stretched stack cannot
+  // fill the upper mass, the leftover band below the parapet stays bare and
+  // reads as the dark mechanical core.
+  const upper = height - baseY;
+  const nLow = Math.max(1, Math.floor(upper / refH));
+  let rows = nLow;
+  let sy = upper / (nLow * refH);
+  const syHigh = upper / ((nLow + 1) * refH);
+  if (syHigh >= 0.85 && (sy > 1.25 || Math.abs(Math.log(syHigh)) < Math.abs(Math.log(sy)))) {
+    rows = nLow + 1;
+    sy = syHigh;
+  }
+  sy = Math.min(sy, 1.25);
+  const rowH = refH * sy;
+
+  // One module variant per row (not per column), so each level reads as a
+  // deliberate band; seeded per building for variety across the block.
+  const rng = mulberry(b.style ^ 0x8c17f2ad);
+  const rowMods = Array.from(
+    { length: rows },
+    () => cfg.panels[Math.floor(rng() * cfg.panels.length)],
+  );
+
+  const faces: Face[] = [
+    { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 },
+    { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 },
+    { axis: "x", wall: -w / 2, sign: -1, len: d, center: 0 },
+    { axis: "x", wall: w / 2, sign: 1, len: d, center: 0 },
+  ];
+  for (const f of faces) {
+    const n = Math.floor(f.len / cfg.moduleWidth);
+    if (n < 1) continue;
+    const rowW = n * cfg.moduleWidth;
+    for (let r = 0; r < rows; r++) {
+      const mod = rowMods[r];
+      const y = baseY + r * rowH;
+      for (let k = 0; k < n; k++) {
+        const along = -rowW / 2 + (k + 0.5) * cfg.moduleWidth;
+        const pl = facePlacement(f, mod.assetId, along, y, out);
+        pl.scale = [1, rowH / mod.h, sz];
+        kit.push(pl);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry
 // ---------------------------------------------------------------------------
 
 const STORE_TRIMS = ["storeTrim0", "storeTrim1", "storeTrim2", "storeTrim3"];
 
-export function buildBuildingModel(b: BuildingInstance): BuildingModel {
+export function buildBuildingModel(
+  b: BuildingInstance,
+  cfg: KitTowerConfig = DEFAULT_KIT_TOWER_CONFIG,
+): BuildingModel {
   const w = (b.tx1 - b.tx0) * TILE_SIZE;
   const d = (b.tz1 - b.tz0) * TILE_SIZE;
   const height = 4.5 + (b.stories - 1) * 3;
@@ -601,6 +743,14 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
 
   const p = new Parts();
   const kit: KitLocalPlacement[] = [];
+  const kitTower = cfg.forceKitTower || isKitTower(b);
+  const baseY = cfg.baseHeight;
+
+  // Debug isolation: only the imported panel shell, no procedural geometry.
+  if (kitTower && cfg.panelsOnly) {
+    buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+    return { geoms: p.build(), waterTower: null, kit, x, z, width: w, depth: d, height };
+  }
 
   const styleRng = mulberry(b.style ^ 0xa511e9b3);
   const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
@@ -617,7 +767,14 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
   p.box("facade", baseW, 4.5, baseD, baseCx, 2.25, -proud / 2);
   // Cornice lip capping the storefront base.
   p.box("trim", baseW + 0.3, 0.3, baseD + 0.3, baseCx, 4.65, -proud / 2);
-  p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+  if (kitTower) {
+    // Kit towers wrap this mass in facade panels; a slightly inset dark core
+    // seals panel gaps and the bare face-end strips (the panels' back slabs
+    // sit ~0.2 m inside the wall plane, the core face at 0.25 m).
+    p.box("metalDark", w - 0.5, height - baseY, d - 0.5, 0, (baseY + height) / 2, 0);
+  } else {
+    p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+  }
 
   // Parapet ring (slightly proud, 0.9m above the roof plane) + trim caps.
   const pt = 0.28;
@@ -647,14 +804,19 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
   const right: Face = { axis: "x", wall: w / 2, sign: 1, len: d, center: 0 };
   const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
 
+  // Kit towers wrap everything above the storefront base in facade panels,
+  // so their service faces keep only ground-level detail.
+  const wallTop = kitTower ? baseY : height;
   buildStorefront(p, front, mulberry(b.style ^ 0x1f123bb5), trimKey, true);
   if (sideStorefront) buildStorefront(p, left, mulberry(b.style ^ 0x27220a95), trimKey, false);
-  else buildServiceFace(p, kit, left, mulberry(b.style ^ 0x27220a95), height);
-  buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), height);
-  buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), height);
+  else buildServiceFace(p, kit, left, mulberry(b.style ^ 0x27220a95), wallTop);
+  buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), wallTop);
+  buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), wallTop);
+  if (kitTower) buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
 
   // --- Hanging neon signs on the front face --------------------------------
-  {
+  // Kit-tower panels own the upper front face, so signs would clip them.
+  if (!kitTower) {
     const rng = mulberry(b.style ^ 0x5851f42d);
     const count = 1 + (rng() < 0.45 ? 1 : 0);
     for (let i = 0; i < count; i++) {
@@ -679,7 +841,7 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
   // --- Kit facade billboard on the upper front face (taller buildings) ------
   {
     const rng = mulberry(b.style ^ 0x77aa11d3);
-    if (b.stories >= 3 && rng() < 0.55) {
+    if (!kitTower && b.stories >= 3 && rng() < 0.55) {
       const bb = KIT_BILLBOARDS[Math.floor(rng() * KIT_BILLBOARDS.length)];
       const scale = Math.min(1.25, Math.max(0.6, (w - 1.6) / bb.w));
       const bbH = bb.h * scale;
@@ -720,6 +882,9 @@ export function collectBuildingKit(chunks: ChunkData[]): KitEntry[] {
     const ox = chunk.coord.x * CHUNK_SIZE;
     const oz = chunk.coord.z * CHUNK_SIZE;
     for (const b of chunk.buildings) {
+      // Imported buildings are complete authored models; no AC/billboard
+      // dressing (and no procedural geometry) belongs on them.
+      if (getImportedBuilding(b)) continue;
       const model = getBuildingModel(b);
       for (const pl of model.kit) {
         out.push({

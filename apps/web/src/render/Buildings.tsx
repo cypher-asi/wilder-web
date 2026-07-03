@@ -8,6 +8,7 @@ import { useAssetModel } from "../assets/catalog";
 import { BuildingInstance } from "../net/protocol";
 import { getBuildingModel, GROUND_Y, WaterTowerPlacement } from "./building";
 import { getBuildingMaterial, getSharedMaterial } from "./facade";
+import { getImportedBuilding, ImportedBuildingPlacement } from "./importedBuilding";
 
 // Material keys whose meshes are emissive/glass overlays, not solid massing.
 const NO_SHADOW = new Set(["neon", "glass"]);
@@ -65,7 +66,37 @@ function ProceduralWaterTower() {
   );
 }
 
+/** A footprint rendered as a single authored GLB; no procedural geometry. */
+function ImportedBuilding({ placement }: { placement: ImportedBuildingPlacement }) {
+  const model = useAssetModel(placement.spec.assetId);
+
+  const node = useMemo(() => {
+    if (!model) return null;
+    // Bottom-center pivot from the Asset Lab; snap the base to the ground
+    // (the offset is in model space, the parent group applies the scale).
+    model.scene.position.y = -model.minY;
+    return model.scene;
+  }, [model]);
+
+  if (!node) return null;
+  return (
+    <group
+      position={[placement.x, GROUND_Y, placement.z]}
+      rotation={[0, placement.ry, 0]}
+      scale={[placement.sx, placement.sy, placement.sz]}
+    >
+      <primitive object={node} />
+    </group>
+  );
+}
+
 export function Building({ building }: { building: BuildingInstance }) {
+  const imported = getImportedBuilding(building);
+  if (imported) return <ImportedBuilding placement={imported} />;
+  return <ProceduralBuilding building={building} />;
+}
+
+function ProceduralBuilding({ building }: { building: BuildingInstance }) {
   const model = useMemo(() => getBuildingModel(building), [building]);
 
   // Dispose merged geometries when the chunk unloads (materials are shared).

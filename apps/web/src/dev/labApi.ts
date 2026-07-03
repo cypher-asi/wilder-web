@@ -1,5 +1,7 @@
 // Client for the Asset Lab dev server (tools/asset-lab/server.mjs, proxied at /lab).
 
+import type { KitTowerConfig } from "../render/building";
+
 export type AssetStatus =
   | "raw"
   | "importing"
@@ -107,6 +109,20 @@ export interface LabJob {
   error: string | null;
 }
 
+/** A staged building configuration (Building Stage dev tool). */
+export interface BuildingPrefab {
+  id: string;
+  name: string;
+  /** Footprint in 2 m tiles. */
+  tilesX: number;
+  tilesZ: number;
+  stories: number;
+  archetype: number;
+  /** Deterministic style seed (drives all procedural variation). */
+  style: number;
+  kit: KitTowerConfig;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   const data = await res.json().catch(() => ({}));
@@ -132,6 +148,13 @@ export const labApi = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ variant: variant ?? null }),
+    }),
+  buildings: () => request<BuildingPrefab[]>("/lab/buildings"),
+  saveBuildings: (prefabs: BuildingPrefab[]) =>
+    request<BuildingPrefab[]>("/lab/buildings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(prefabs),
     }),
 };
 

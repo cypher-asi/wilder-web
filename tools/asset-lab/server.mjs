@@ -5,9 +5,13 @@
 //   POST /lab/optimize/:id      run game-ready pipeline (body = recipe overrides)
 //   POST /lab/promote/:id       copy game-ready GLB into assets/ + manifest
 //   GET  /lab/presets           recipe category presets
+//   GET  /lab/buildings         saved Building Stage prefab presets
+//   PUT  /lab/buildings         replace saved prefab list (body = JSON array)
 //   /content/*                  static imported/gameready files (thumbs, GLBs)
 //
 // Start with: npm run lab   (Vite proxies /lab and /content to :8090)
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import express from "express";
 import { CONTENT_DIR } from "./paths.mjs";
 import { importAsset } from "./import.mjs";
@@ -76,6 +80,26 @@ app.post("/lab/optimize/:id", (req, res) => {
   } catch (err) {
     res.status(409).json({ error: String(err.message ?? err) });
   }
+});
+
+// Building Stage prefab presets, stored beside the registry.
+const BUILDINGS_PATH = path.join(CONTENT_DIR, "buildings.json");
+
+app.get("/lab/buildings", (_req, res) => {
+  if (!existsSync(BUILDINGS_PATH)) return res.json([]);
+  try {
+    res.json(JSON.parse(readFileSync(BUILDINGS_PATH, "utf8")));
+  } catch (err) {
+    res.status(500).json({ error: String(err.message ?? err) });
+  }
+});
+
+app.put("/lab/buildings", (req, res) => {
+  if (!Array.isArray(req.body)) {
+    return res.status(400).json({ error: "body must be a JSON array of prefabs" });
+  }
+  writeFileSync(BUILDINGS_PATH, JSON.stringify(req.body, null, 2));
+  res.json(req.body);
 });
 
 app.post("/lab/promote/:id", (req, res) => {

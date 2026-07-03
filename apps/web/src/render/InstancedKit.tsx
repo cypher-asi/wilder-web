@@ -13,8 +13,11 @@ export interface KitPlacement {
   y: number;
   z: number;
   rotationY: number;
-  /** Extra uniform scale on top of fit normalization (default 1). */
-  scale?: number;
+  /**
+   * Extra scale on top of fit normalization (default 1). A tuple scales
+   * per model axis (before rotation), e.g. to stretch tileable panels.
+   */
+  scale?: number | [number, number, number];
 }
 
 /**
@@ -92,11 +95,15 @@ export function InstancedKitAsset({
       const im = new THREE.InstancedMesh(sub.geometry, sub.material, placements.length);
       for (let i = 0; i < placements.length; i++) {
         const p = placements[i];
-        const s = normScale * (p.scale ?? 1);
+        const ps = p.scale ?? 1;
+        if (Array.isArray(ps)) {
+          scl.set(normScale * ps[0], normScale * ps[1], normScale * ps[2]);
+        } else {
+          scl.setScalar(normScale * ps);
+        }
         // Snap the (scaled) model bottom to the placement's ground y.
-        pos.set(p.x, p.y - model.minY * s, p.z);
+        pos.set(p.x, p.y - model.minY * scl.y, p.z);
         quat.setFromAxisAngle(UP, p.rotationY);
-        scl.setScalar(s);
         place.compose(pos, quat, scl);
         final.multiplyMatrices(place, sub.matrix);
         im.setMatrixAt(i, final);

@@ -401,6 +401,71 @@
   color: var(--accent-warm);
 }
 
+/* ---- Building Stage ---- */
+
+.stage-actions {
+  padding: 10px;
+}
+
+.stage-stats {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: rgba(10, 13, 20, 0.85);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.stage-pair {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.stage-num {
+  width: 62px;
+}
+
+.stage-hex {
+  width: 96px;
+}
+
+.stage-module {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stage-module-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-module-dims {
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.stage-copy {
+  width: 100%;
+  padding: 8px;
+  font-size: 12px;
+}
+
 .lab-toast {
   position: absolute;
   bottom: 20px;

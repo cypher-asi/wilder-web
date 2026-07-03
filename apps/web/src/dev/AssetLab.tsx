@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../state/session";
 import { AssetViewport } from "./AssetViewport";
+import { BuildingStage } from "./BuildingStage";
 import { Sidekick } from "./Sidekick";
 import {
   AssetStatus,
@@ -26,6 +27,7 @@ const STATUS_FILTERS: ("all" | AssetStatus)[] = [
 
 export function AssetLab() {
   const exitAssetLab = useSession((s) => s.exitAssetLab);
+  const [section, setSection] = useState<"assets" | "stage">("assets");
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [presets, setPresets] = useState<Record<string, Recipe>>({});
   const [serverDown, setServerDown] = useState(false);
@@ -113,6 +115,20 @@ export function AssetLab() {
     <div className="lab-root">
       <header className="lab-header">
         <span className="lab-title">WILDER // ASSET LAB</span>
+        <div className="lab-viewport-toggles">
+          <button
+            className={`lab-filter ${section === "assets" ? "active" : ""}`}
+            onClick={() => setSection("assets")}
+          >
+            ASSETS
+          </button>
+          <button
+            className={`lab-filter ${section === "stage" ? "active" : ""}`}
+            onClick={() => setSection("stage")}
+          >
+            BUILDING STAGE
+          </button>
+        </div>
         <span className="lab-header-info">
           {registry
             ? `${counts.all} assets · ${counts.imported ?? 0} imported · ${counts.gameready ?? 0} game-ready · ${counts.promoted ?? 0} promoted`
@@ -126,6 +142,9 @@ export function AssetLab() {
         </button>
       </header>
 
+      {section === "stage" ? (
+        <BuildingStage registry={registry} onToast={showToast} />
+      ) : (
       <div className="lab-body">
         <aside className="lab-browser">
           <input
@@ -227,6 +246,7 @@ export function AssetLab() {
           }
         />
       </div>
+      )}
 
       {toast && <div className="lab-toast">{toast}</div>}
     </div>

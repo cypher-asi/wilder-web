@@ -1,6 +1,6 @@
 import { Canvas } from "@react-three/fiber";
 import { GameConnection } from "../net/connection";
-import { Effects, Lighting, Rain, SceneSetup } from "./Atmosphere";
+import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
 import { CameraRig } from "./CameraRig";
 import { Chunks } from "./Chunks";
 import { CombatFx } from "./CombatFx";
@@ -22,15 +22,17 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         }
       }}
     >
-      <SceneSetup />
-      <Lighting />
-      <Chunks />
-      <Entities />
-      <CombatFx />
-      <Rain />
-      <CameraRig />
-      <PlayerInput connection={connection} />
-      <Effects />
+      <SunsetAtmosphere>
+        <SceneSetup />
+        <Lighting />
+        <SkyBackdrop />
+        <Chunks />
+        <Entities />
+        <CombatFx />
+        <CameraRig />
+        <PlayerInput connection={connection} />
+        <Effects />
+      </SunsetAtmosphere>
     </Canvas>
   );
 }

@@ -27,23 +27,38 @@ await page.waitForFunction(
   () => document.querySelector(".char-card") || document.querySelector("input.field"),
   { timeout: 15000 },
 );
-// Prefer a non-first runner ("Shot") when present so we don't fight other
-// sessions holding the primary dev character.
+// Try each "Shot" runner card in turn: a card can silently fail to join when
+// a stale session still holds that character server-side.
 await page.waitForSelector(".char-card", { timeout: 15000 });
-await page.evaluate(() => {
-  const cards = [...document.querySelectorAll(".char-card")];
-  const shot = cards.find((c) => c.textContent.includes("Shot"));
-  (shot ?? cards[cards.length - 1]).click();
-});
-await page.waitForSelector("canvas", { timeout: 20000 });
-
-// Wait for the world join to complete (gateway may still be settling).
-try {
-  await page.waitForFunction(
-    () => window.__game && window.__game.localEntityId !== 0,
-    { timeout: 30000 },
-  );
-} catch {
+await new Promise((r) => setTimeout(r, 800));
+let joined = false;
+for (let attempt = 0; attempt < 4 && !joined; attempt++) {
+  await page.evaluate((i) => {
+    const cards = [...document.querySelectorAll(".char-card")];
+    const shots = cards.filter((c) => /shot/i.test(c.textContent));
+    const pick = shots.length > 0 ? shots[i % shots.length] : cards[cards.length - 1];
+    pick.click();
+  }, attempt);
+  try {
+    await page.waitForFunction(
+      () => window.__game && window.__game.localEntityId !== 0,
+      { timeout: 12000 },
+    );
+    joined = true;
+  } catch {
+    // Back to the character list and try the next card.
+    await page.reload({ waitUntil: "networkidle2" });
+    await page.evaluate(() => {
+      const dev = [...document.querySelectorAll("button")].find((b) =>
+        b.textContent.includes("DEV LOGIN"),
+      );
+      if (dev) dev.click();
+    });
+    await page.waitForSelector(".char-card", { timeout: 15000 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 800));
+  }
+}
+if (!joined) {
   console.error("world did not join; aborting shot");
   await browser.close();
   process.exit(2);

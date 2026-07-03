@@ -25,10 +25,11 @@ export const KIOSK = 9;
 export const TRAFFIC_LIGHT = 10;
 export const STOP_SIGN = 11;
 
+// Streetlights just flicking on at dusk: soft glow, no strong ground pool.
 const lampGlow = new THREE.MeshStandardMaterial({
   color: "#ffd9a0",
   emissive: "#ffb45e",
-  emissiveIntensity: 4,
+  emissiveIntensity: 1.6,
 });
 const poleMat = new THREE.MeshStandardMaterial({ color: "#1a1c20", roughness: 0.6, metalness: 0.7 });
 const darkMetal = new THREE.MeshStandardMaterial({ color: "#22252b", roughness: 0.5, metalness: 0.5 });
@@ -50,7 +51,7 @@ function Streetlight() {
       {/* Fake light pool on the ground. */}
       <mesh position={[1.1, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <circleGeometry args={[2.2, 20]} />
-        <meshBasicMaterial color="#8a6c40" transparent opacity={0.13} depthWrite={false} />
+        <meshBasicMaterial color="#8a6c40" transparent opacity={0.04} depthWrite={false} />
       </mesh>
     </group>
   );
@@ -196,6 +197,103 @@ export function NeonPlane({
   );
 }
 
+/**
+ * Standing street neon sign (archetype NEON_SIGN): pole + sign box with a
+ * flickering neon face. ~25% are dead — dark, unlit, grimy — so streets
+ * don't glow uniformly.
+ */
+function NeonSignProp({ seed }: { seed: number }) {
+  const { color, dead, h, w } = useMemo(() => {
+    const rng = mulberry(seed);
+    return {
+      color: NEON_COLORS[Math.floor(rng() * NEON_COLORS.length)],
+      dead: rng() < 0.25,
+      h: 0.6 + rng() * 0.5,
+      w: 1.0 + rng() * 0.7,
+    };
+  }, [seed]);
+  return (
+    <group>
+      <mesh material={poleMat} position={[0, 1.5, 0]} castShadow>
+        <cylinderGeometry args={[0.045, 0.06, 3.0, 6]} />
+      </mesh>
+      <mesh material={darkMetal} position={[0, 2.6, 0]} castShadow>
+        <boxGeometry args={[w + 0.14, h + 0.14, 0.12]} />
+      </mesh>
+      {dead ? (
+        <mesh position={[0, 2.6, 0.065]}>
+          <planeGeometry args={[w, h]} />
+          <meshStandardMaterial color="#15171a" roughness={0.5} />
+        </mesh>
+      ) : (
+        <>
+          <group position={[0, 2.6, 0.065]}>
+            <NeonPlane color={color} width={w} height={h} seed={seed} />
+          </group>
+          <group position={[0, 2.6, -0.065]} rotation={[0, Math.PI, 0]}>
+            <NeonPlane color={color} width={w} height={h} seed={seed + 3} />
+          </group>
+        </>
+      )}
+    </group>
+  );
+}
+
+/**
+ * Soft warm glow pool cast on the pavement under a streetlight head:
+ * emissive gradient disc standing in for a real point light + wet-road SSR.
+ */
+const poolTexture = (() => {
+  if (typeof document === "undefined") return null;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const grad = ctx.createRadialGradient(32, 32, 2, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255, 205, 140, 0.30)");
+  grad.addColorStop(0.45, "rgba(255, 185, 110, 0.10)");
+  grad.addColorStop(1, "rgba(255, 170, 90, 0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const poolMat = new THREE.MeshBasicMaterial({
+  color: "#ffbe78",
+  map: poolTexture,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  opacity: 0.5,
+  depthWrite: false,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2,
+});
+const poolGeo = new THREE.CircleGeometry(2.4, 24).rotateX(-Math.PI / 2);
+
+/** Light pools under this chunk's streetlights (they render instanced). */
+export function LightPools({ chunk }: { chunk: ChunkData }) {
+  const pools = useMemo(
+    () =>
+      chunk.props
+        .filter((p) => p.archetype === STREETLIGHT)
+        .map((p) => {
+          // Lamp head hangs ~1 m along the prop's facing.
+          const hx = p.x + Math.cos(p.rotation) * 1.0;
+          const hz = p.z - Math.sin(p.rotation) * 1.0;
+          const wx = chunk.coord.x * CHUNK_SIZE + hx;
+          const wz = chunk.coord.z * CHUNK_SIZE + hz;
+          return { x: hx, z: hz, y: groundHeightAt(wx, wz) + 0.015 };
+        }),
+    [chunk],
+  );
+  return (
+    <>
+      {pools.map((p, i) => (
+        <mesh key={i} geometry={poolGeo} material={poolMat} position={[p.x, p.y, p.z]} />
+      ))}
+    </>
+  );
+}
+
 function Kiosk({ seed }: { seed: number }) {
   const neon = useMemo(() => {
     const rng = mulberry(seed);
@@ -283,6 +381,8 @@ function Fallback({ prop }: { prop: PropInstance }) {
       );
     case TREE:
       return <Tree />;
+    case NEON_SIGN:
+      return <NeonSignProp seed={Math.floor(prop.x * 29 + prop.z * 41)} />;
     case CAR:
       return <Car seed={Math.floor(prop.x * 31 + prop.z * 17)} />;
     case KIOSK:

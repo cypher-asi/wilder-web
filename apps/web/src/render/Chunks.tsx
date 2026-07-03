@@ -9,7 +9,13 @@ import { collectBuildingKit } from "./building";
 import { Building } from "./Buildings";
 import { ChunkGround } from "./Ground";
 import { InstancedKit } from "./InstancedKit";
-import { collectInstancedProps, INSTANCED_PROP_FITS, isInstancedProp, PropMesh } from "./Props";
+import {
+  collectInstancedProps,
+  INSTANCED_PROP_FITS,
+  isInstancedProp,
+  LightPools,
+  PropMesh,
+} from "./Props";
 
 function Chunk({ chunk }: { chunk: ChunkData }) {
   const origin: [number, number, number] = [
@@ -27,6 +33,7 @@ function Chunk({ chunk }: { chunk: ChunkData }) {
       {chunk.props.map((p, i) =>
         isInstancedProp(p.archetype) ? null : <PropMesh key={`p${i}`} prop={p} chunk={chunk} />,
       )}
+      <LightPools chunk={chunk} />
     </group>
   );
 }

@@ -14,7 +14,7 @@ import { perf } from "../perf/perf";
 import { game } from "../state/game";
 import { collectBuildingKit } from "./building";
 import { Building } from "./Buildings";
-import { mountedChunks, processChunkBuilds } from "./chunkBuilder";
+import { mountedChunks, processChunkBuilds, revealedChunks } from "./chunkBuilder";
 import { ChunkGround } from "./Ground";
 import { InstancedKit } from "./InstancedKit";
 import {
@@ -28,6 +28,9 @@ import {
 
 /** Per-frame budget (ms) for building chunk models off the streamed queue. */
 const BUILD_BUDGET_MS = 3;
+/** Bigger budget while nothing is revealed yet (initial join / teleport):
+ * the join veil hides the burst, so spend the frame getting ground up fast. */
+const INITIAL_BUILD_BUDGET_MS = 10;
 
 function Chunk({ chunk }: { chunk: ChunkData }) {
   const origin: [number, number, number] = [
@@ -59,7 +62,8 @@ export function Chunks() {
   useFrame(({ gl, scene, camera }) => {
     perf.begin("chunks.build");
     const p = game.rendered;
-    if (processChunkBuilds(p.x, p.z, BUILD_BUDGET_MS, gl, scene, camera)) bumpMounted();
+    const budget = revealedChunks.size === 0 ? INITIAL_BUILD_BUDGET_MS : BUILD_BUDGET_MS;
+    if (processChunkBuilds(p.x, p.z, budget, gl, scene, camera)) bumpMounted();
     perf.end("chunks.build");
   });
 

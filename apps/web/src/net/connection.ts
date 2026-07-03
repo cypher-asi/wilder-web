@@ -3,7 +3,14 @@
 import * as THREE from "three";
 import { playSfx } from "../assets/audio";
 import { setTerritory } from "../game/territory";
-import { armorShield, game, initialAbilities, spawnEntity, useGame } from "../state/game";
+import {
+  armorShield,
+  bumpEntityRoster,
+  game,
+  initialAbilities,
+  spawnEntity,
+  useGame,
+} from "../state/game";
 import { C2S, decode, encode, S2C } from "./protocol";
 
 /** World position of an entity's gun muzzle, if a mount is registered. */
@@ -120,6 +127,7 @@ export class GameConnection {
       }
       case "EntityDespawn": {
         game.entities.delete(msg.d.id);
+        bumpEntityRoster();
         break;
       }
       case "Snapshot": {

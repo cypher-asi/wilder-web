@@ -18,7 +18,7 @@
 import * as THREE from "three";
 import { CHUNK_SIZE, ChunkData } from "../net/protocol";
 import { chunkKey } from "../game/collision";
-import { game } from "../state/game";
+import { game, useGame } from "../state/game";
 import { getBuildingModel, GROUND_Y } from "./building";
 import { getBuildingMaterial } from "./facade";
 import { getImportedBuilding } from "./importedBuilding";
@@ -210,6 +210,10 @@ export function processChunkBuilds(
     }
     prewarmed.clear();
     lastFlush = start;
+    // First flush with visible ground: the join veil can fade out now.
+    if (revealedChunks.size > 0 && !useGame.getState().worldReady) {
+      useGame.getState().set({ worldReady: true });
+    }
   }
 
   return changed;

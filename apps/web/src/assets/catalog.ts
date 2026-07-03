@@ -94,6 +94,15 @@ function getModel(id: string): Promise<LoadedModel | null> {
 }
 
 /**
+ * Warm the model cache (manifest + GLB fetch/parse) ahead of first use, so
+ * mounting components resolve instantly. Fire-and-forget; failures fall back
+ * to the normal null path.
+ */
+export function preloadModels(ids: string[]): void {
+  for (const id of ids) void getModel(id);
+}
+
+/**
  * Load a manifest model; returns a fresh clone per caller (null = use
  * procedural fallback). Uses SkeletonUtils so skinned/rigged models clone
  * correctly; animation clips are shared (they are immutable).

@@ -1,14 +1,23 @@
 // Entity rendering: interpolates remote entities between server snapshots,
 // uses the predicted transform for the local player, and animates a rigged
-// GLB character when available (procedural runner otherwise).
+// GLB character (posed off-screen, then faded in once ready).
 
-import { Html, Outlines } from "@react-three/drei";
+import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import * as THREE from "three";
 import { setFootsteps } from "../assets/audio";
 import { CHARACTER_MODEL, PISTOL_MODEL, useAssetModel } from "../assets/catalog";
 import {
+  chunkKey,
   CROUCH_SPEED,
   ROLL_DURATION,
   RUN_SPEED,
@@ -16,10 +25,27 @@ import {
 } from "../game/collision";
 import { POI_STYLES } from "../game/poi";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
-import { AnimState, EntityKind } from "../net/protocol";
+import {
+  AnimState,
+  BuildingInstance,
+  CHUNK_SIZE,
+  EntityKind,
+  TILE_SIZE,
+  TILES_PER_CHUNK,
+} from "../net/protocol";
 import { perf } from "../perf/perf";
-import { activeWeaponKind, game, GameEntity, GunMount, useGame } from "../state/game";
-import { RED_HEX, RED_NUM } from "../ui/colors";
+import {
+  activeWeaponKind,
+  game,
+  GameEntity,
+  getEntityRosterVersion,
+  GunMount,
+  subscribeEntityRoster,
+  useGame,
+} from "../state/game";
+import { RED_NUM } from "../ui/colors";
+import { buildShopUnit, ShopFrontStyle } from "./building";
+import { getBuildingMaterial } from "./facade";
 import { groundHeightAt } from "./Ground";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
@@ -120,6 +146,10 @@ const GUN_AIM_PITCH = 0.05;
 /** Duration of the red damage flash, ms. */
 const HIT_FLASH_MS = 200;
 const HIT_FLASH_COLOR = new THREE.Color(RED_NUM);
+
+/** Characters materialize over this window once their rig is posed, instead
+ * of popping in (or flashing a bind pose / placeholder). */
+const FADE_IN_MS = 350;
 
 /**
  * World speed (m/s) each locomotion clip was authored around; playback rate
@@ -569,8 +599,15 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const animAccum = useRef(0);
   /** Frame counter for the update stride (offset by entity id to spread). */
   const animFrame = useRef(0);
+  /** ms timestamp the fade-in reveal started (0 = not started yet). */
+  const fadeStartAt = useRef(0);
+  /** True once the fade-in finished and material state was restored. */
+  const fadeDone = useRef(false);
 
-  useEffect(() => {
+  // Layout effect (not passive): R3F renders on rAF after commit, so setting
+  // up the mixer here guarantees the rig is posed before its first visible
+  // frame — no bind-pose (T-pose) flash.
+  useLayoutEffect(() => {
     if (!model || model.animations.length === 0) return;
     flashMats.current = restyleMannequin(model.scene, entity.tint, isNpc);
     const m = new THREE.AnimationMixer(model.scene);
@@ -626,6 +663,23 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     seenShot.current =
       entity.id === game.localEntityId ? game.gun.shotSeq : entity.lastShotAt;
     seenHit.current = entity.hitReactAt;
+    // Pose before the first visible frame: idle at full weight + one mixer
+    // step so the skeleton starts in a real stance, never the bind pose.
+    const idle = actions.current["Idle_Loop"];
+    if (idle) {
+      idle.setEffectiveWeight(1);
+      locoWeights.current["Idle_Loop"] = 1;
+    }
+    m.update(0);
+    // Start the reveal hidden; useFrame ramps opacity to 1 over FADE_IN_MS,
+    // then applyMannequinPalette restores the exact authored material state.
+    if (!fadeDone.current) {
+      fadeStartAt.current = performance.now();
+      for (const f of flashMats.current) {
+        f.mat.transparent = true;
+        f.mat.opacity = 0;
+      }
+    }
     return () => {
       m.removeEventListener("finished", onFinished);
       m.stopAllAction();
@@ -637,6 +691,14 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const tronStyle = useGame((s) => isTronStyle(s.visualStyle));
   useEffect(() => {
     applyMannequinPalette(flashMats.current, entity.tint, isNpc, tronStyle);
+    // Don't undo an in-flight reveal (the palette resets opacity to 1); the
+    // per-frame fade ramp owns opacity until it hands material state back.
+    if (!fadeDone.current) {
+      for (const f of flashMats.current) {
+        f.mat.transparent = true;
+        f.mat.opacity = 0;
+      }
+    }
   }, [tronStyle, entity.tint, isNpc, model]);
 
   useEffect(() => {
@@ -700,6 +762,20 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     const now = performance.now();
     const dying = entity.anim === "Death" || entity.healthPct <= 0;
 
+    // Fade-in reveal: ramp the (already posed) character from invisible to
+    // full over FADE_IN_MS, then restore the exact authored material state
+    // (transparent flags, opacity) so flash/palette logic behaves as usual.
+    let fade = 1;
+    if (!fadeDone.current) {
+      fade = THREE.MathUtils.clamp((now - fadeStartAt.current) / FADE_IN_MS, 0, 1);
+      if (fade >= 1) {
+        fadeDone.current = true;
+        applyMannequinPalette(flashMats.current, entity.tint, isNpc, tronStyle);
+      } else {
+        for (const f of flashMats.current) f.mat.opacity = fade;
+      }
+    }
+
     // Upper-body shoot layer: local shots via the fire counter, remote shots
     // via their MuzzleFlash event timestamp. Works in every locomotion state.
     const shotMark = isLocal ? game.gun.shotSeq : entity.lastShotAt;
@@ -741,9 +817,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       flashActive.current = flash > 0;
     }
     if (outlineMats.current.length > 0) {
-      // Gentle breathing glow; fade the border out as the character dies.
+      // Gentle breathing glow; fade the border out as the character dies and
+      // in with the reveal.
       const pulse = 0.85 + Math.sin(now * 0.005) * 0.12;
-      const alpha = dying ? 0 : pulse;
+      const alpha = dying ? 0 : pulse * fade;
       for (const mat of outlineMats.current) mat.uniforms.opacity.value = alpha;
     }
     let anim = entity.anim;
@@ -878,10 +955,16 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     const mount = game.gunMounts.get(entity.id);
     if (mount?.holder.parent) {
       // Hide the pistol mesh when the local player has no gun equipped, so
-      // the visuals can't suggest shooting is possible bare-handed.
-      if (isLocal) {
+      // the visuals can't suggest shooting is possible bare-handed. The gun
+      // shares materials across clones (can't fade it), so it stays hidden
+      // until the body reveal completes.
+      if (fade < 1) {
+        mount.holder.visible = false;
+      } else if (isLocal) {
         const weapon = activeWeaponKind(useGame.getState().inventory);
         mount.holder.visible = weapon === "Pistol" || weapon === "Smg";
+      } else {
+        mount.holder.visible = true;
       }
       const yaw = isLocal && game.aim.active ? game.aim.yaw : entity.yaw;
       const cp = Math.cos(GUN_AIM_PITCH);
@@ -906,85 +989,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     perf.end("entities.anim");
   });
 
-  if (!model) return <ProceduralCharacter entity={entity} />;
+  // Nothing while the GLB loads (preloaded at character select, so this is
+  // typically a frame or two); the posed rig then fades in via FADE_IN_MS.
+  if (!model) return null;
   return <primitive object={model.scene} />;
-}
-
-/** Stylized runner: capsule body, emissive visor, walk bob. */
-function ProceduralCharacter({ entity }: { entity: GameEntity }) {
-  const group = useRef<THREE.Group>(null);
-  const tron = useGame((s) => isTronStyle(s.visualStyle));
-  const tint = useMemo(
-    () => (tron ? new THREE.Color("#4fd0e0") : new THREE.Color(entity.tint)),
-    [tron, entity.tint],
-  );
-  const isNpc = entity.kind === "Npc";
-  const tronNpc = tron && isNpc;
-  const bodyColor = tronNpc ? "#000000" : tron ? "#040a0e" : isNpc ? "#4a3038" : "#2b3550";
-  const visor = tron
-    ? isNpc
-      ? RED_HEX
-      : "#4fd0e0"
-    : isNpc
-      ? RED_HEX
-      : "#40e8ff";
-  /** Silhouette border: red for enemies, blue for players. */
-  const outlineColor = isNpc ? RED_HEX : PLAYER_OUTLINE_HEX;
-
-  useFrame(({ clock }) => {
-    if (!group.current) return;
-    const moving = entity.anim === "Walk" || entity.anim === "Run";
-    const speed = entity.anim === "Run" ? 11 : 6;
-    const bob = moving ? Math.abs(Math.sin(clock.elapsedTime * speed)) * 0.07 : 0;
-    group.current.position.y = bob;
-    const lean = moving ? 0.12 : 0;
-    group.current.rotation.x = lean;
-  });
-
-  return (
-    <group ref={group}>
-      <mesh position={[0, 0.85, 0]} castShadow>
-        <capsuleGeometry args={[0.32, 0.85, 6, 12]} />
-        <meshStandardMaterial
-          color={bodyColor}
-          emissive={tronNpc ? RED_HEX : "#000000"}
-          emissiveIntensity={tronNpc ? 0.55 : 1}
-          roughness={0.55}
-          metalness={0.2}
-        />
-        <Outlines
-          color={outlineColor}
-          thickness={ENEMY_OUTLINE_THICKNESS}
-          transparent
-          opacity={0.9}
-          screenspace
-          renderOrder={2}
-        />
-      </mesh>
-      {/* shoulder tint band */}
-      <mesh position={[0, 1.25, 0]}>
-        <cylinderGeometry args={[0.34, 0.34, 0.12, 12]} />
-        <meshStandardMaterial color={tint} roughness={0.4} metalness={0.4} />
-      </mesh>
-      <mesh position={[0, 1.66, 0]} castShadow>
-        <sphereGeometry args={[0.21, 12, 12]} />
-        <meshStandardMaterial color="#14161c" roughness={0.3} metalness={0.6} />
-        <Outlines
-          color={outlineColor}
-          thickness={ENEMY_OUTLINE_THICKNESS}
-          transparent
-          opacity={0.9}
-          screenspace
-          renderOrder={2}
-        />
-      </mesh>
-      {/* visor faces +X (yaw 0 looks along +X) */}
-      <mesh position={[0.14, 1.68, 0]} rotation={[0, 0, -Math.PI / 2]}>
-        <capsuleGeometry args={[0.045, 0.16, 4, 8]} />
-        <meshStandardMaterial color={visor} emissive={visor} emissiveIntensity={2.5} />
-      </mesh>
-    </group>
-  );
 }
 
 // LootCrate resources are shared across all crates (~150 ammo caches can be
@@ -1170,161 +1178,209 @@ function HoloSign({ kind, y = 3.1 }: { kind: EntityKind; y?: number }) {
   );
 }
 
-/** Industrial crafting station (refinery = amber, factory = magenta, lab = cyan). */
-function StationView({ entity }: { entity: GameEntity }) {
-  const accent =
-    entity.kind === "Refinery" ? "#ffb347" : entity.kind === "Factory" ? "#ff2d78" : "#40e8ff";
-  const fan = useRef<THREE.Mesh>(null);
-  useFrame(({ clock }) => {
-    if (fan.current) fan.current.rotation.y = clock.elapsedTime * 2.2;
-  });
-  return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        useGame.getState().set({ craftOpen: true });
-        // Fetch this station's production queue state.
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
-      {/* main housing */}
-      <mesh position={[0, 0.8, 0]} castShadow>
-        <boxGeometry args={[1.8, 1.6, 1.3]} />
-        <meshStandardMaterial color="#1a1f2a" roughness={0.45} metalness={0.7} />
-      </mesh>
-      {/* stack */}
-      <mesh position={[0.55, 2.0, -0.3]} castShadow>
-        <cylinderGeometry args={[0.16, 0.2, 1.2, 10]} />
-        <meshStandardMaterial color="#242b38" roughness={0.5} metalness={0.6} />
-      </mesh>
-      {/* rooftop fan */}
-      <mesh ref={fan} position={[-0.4, 1.68, 0.2]}>
-        <boxGeometry args={[0.7, 0.06, 0.12]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.8} />
-      </mesh>
-      {/* glowing control panel */}
-      <mesh position={[0, 0.95, 0.67]}>
-        <planeGeometry args={[1.2, 0.55]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.8} />
-      </mesh>
-      {/* accent piping */}
-      <mesh position={[-0.92, 0.6, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.07, 0.07, 0.5, 8]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
-      </mesh>
-      <HoloSign kind={entity.kind} />
-      <GroundGlow color={accent} radius={3} />
-    </group>
-  );
+// ---------------------------------------------------------------------------
+// Service POI storefronts
+// ---------------------------------------------------------------------------
+
+/** Front treatment per service kind (see buildShopUnit). */
+const SHOP_FRONTS: Partial<Record<EntityKind, ShopFrontStyle>> = {
+  Armory: "retail",
+  Bank: "retail",
+  Bodega: "retail",
+  Dealership: "retail",
+  MarketTerminal: "retail",
+  Building: "storage",
+  Refinery: "industrial",
+  Factory: "industrial",
+  Laboratory: "industrial",
+};
+
+/** Panel opened alongside the Interact message when a shop is clicked. */
+function openShopPanel(kind: EntityKind): void {
+  const { set } = useGame.getState();
+  switch (kind) {
+    case "Building":
+      set({ inventoryOpen: true });
+      break;
+    case "MarketTerminal":
+      set({ marketOpen: true });
+      break;
+    case "Refinery":
+    case "Factory":
+    case "Laboratory":
+      set({ craftOpen: true });
+      break;
+    case "Armory":
+    case "Bank":
+    case "Bodega":
+      set({ vendorOpen: true });
+      break;
+    default:
+      break; // Dealership: interact only (placeholder until vehicles ship)
+  }
 }
 
-function StashTerminal({ entity }: { entity: GameEntity }) {
-  return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-        useGame.getState().set({ inventoryOpen: true });
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
-      <mesh position={[0, 0.9, 0]} castShadow>
-        <boxGeometry args={[1.1, 1.8, 0.7]} />
-        <meshStandardMaterial color="#141a24" roughness={0.4} metalness={0.6} />
-      </mesh>
-      <mesh position={[0, 1.25, 0.36]}>
-        <planeGeometry args={[0.8, 0.5]} />
-        <meshStandardMaterial color="#40e8ff" emissive="#40e8ff" emissiveIntensity={1.6} />
-      </mesh>
-      <HoloSign kind="Building" y={2.7} />
-    </group>
-  );
+/** Fascia sign per kind: a dark board with the location name glowing in its
+ * accent color. One canvas texture + material per kind, shared by every
+ * instance. */
+const shopSignCache = new Map<string, { mat: THREE.MeshBasicMaterial; aspect: number }>();
+
+function shopSignMaterial(kind: EntityKind): { mat: THREE.MeshBasicMaterial; aspect: number } | null {
+  const style = POI_STYLES[kind];
+  if (!style) return null;
+  let entry = shopSignCache.get(kind);
+  if (entry) return entry;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  const font = "700 54px Rajdhani, system-ui, sans-serif";
+  const applyFont = () => {
+    ctx.font = font;
+    ctx.letterSpacing = "5px";
+  };
+  applyFont();
+  const pad = 30;
+  const tw = Math.ceil(ctx.measureText(style.label).width);
+  canvas.width = tw + pad * 2;
+  canvas.height = 92;
+  // Board face: near-black plate with a faint accent keyline.
+  ctx.fillStyle = "#0a0d13";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = style.color;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+  ctx.globalAlpha = 1;
+  applyFont(); // resizing the canvas reset the 2D state
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.shadowColor = style.color;
+  ctx.shadowBlur = 16;
+  ctx.fillStyle = style.color;
+  ctx.fillText(style.label, canvas.width / 2, canvas.height / 2 + 3);
+  ctx.shadowBlur = 0;
+  ctx.fillText(style.label, canvas.width / 2, canvas.height / 2 + 3);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+  entry = { mat, aspect: canvas.width / canvas.height };
+  shopSignCache.set(kind, entry);
+  return entry;
 }
 
-function MarketTerminal({ entity }: { entity: GameEntity }) {
-  const holo = useRef<THREE.Mesh>(null);
-  useFrame(({ clock }) => {
-    if (holo.current) {
-      holo.current.rotation.y = clock.elapsedTime * 0.8;
-      holo.current.position.y = 2.1 + Math.sin(clock.elapsedTime * 1.5) * 0.08;
+function tileKindAt(wx: number, wz: number): string | null {
+  const cx = Math.floor(wx / CHUNK_SIZE);
+  const cz = Math.floor(wz / CHUNK_SIZE);
+  const chunk = game.chunks.chunks.get(chunkKey(cx, cz));
+  if (!chunk) return null;
+  const tx = Math.min(Math.floor((wx - cx * CHUNK_SIZE) / TILE_SIZE), TILES_PER_CHUNK - 1);
+  const tz = Math.min(Math.floor((wz - cz * CHUNK_SIZE) / TILE_SIZE), TILES_PER_CHUNK - 1);
+  return chunk.tiles[tz * TILES_PER_CHUNK + tx];
+}
+
+/** Yaw pointing the shop's front (-z local) at the nearest road tile, snapped
+ * to a cardinal. Null while the POI's own chunk hasn't streamed in yet. */
+function shopFacingYaw(x: number, z: number): number | null {
+  if (tileKindAt(x, z) === null) return null;
+  let best: { dx: number; dz: number; d2: number } | null = null;
+  const R = 6; // search radius in tiles
+  for (let dz = -R; dz <= R; dz++) {
+    for (let dx = -R; dx <= R; dx++) {
+      if (dx === 0 && dz === 0) continue;
+      const kind = tileKindAt(x + dx * TILE_SIZE, z + dz * TILE_SIZE);
+      if (kind !== "Road" && kind !== "RoadLine") continue;
+      const d2 = dx * dx + dz * dz;
+      if (!best || d2 < best.d2) best = { dx, dz, d2 };
+    }
+  }
+  if (!best) return 0;
+  if (Math.abs(best.dx) > Math.abs(best.dz)) {
+    return best.dx > 0 ? -Math.PI / 2 : Math.PI / 2;
+  }
+  return best.dz > 0 ? Math.PI : 0;
+}
+
+// Emissive/glass overlays don't participate in shadows (mirrors Buildings.tsx).
+const SHOP_NO_SHADOW = new Set(["neon", "glass"]);
+
+/** Service POI rendered as a real one-story procedural storefront: shared
+ * city building materials, a text fascia sign, and a restrained accent. */
+function ShopFront({ entity }: { entity: GameEntity }) {
+  const accent = POI_STYLES[entity.kind]?.color ?? "#4fc3ff";
+  const front = SHOP_FRONTS[entity.kind] ?? "retail";
+  const model = useMemo(
+    () => buildShopUnit(front, accent, (entity.id * 2654435761) >>> 0),
+    [front, accent, entity.id],
+  );
+  useEffect(() => {
+    return () => {
+      for (const [, geom] of model.geoms) geom.dispose();
+    };
+  }, [model]);
+  // Synthetic building instance so getBuildingMaterial picks a per-shop
+  // facade texture/tint from the shared city palette.
+  const materialKey = useMemo<BuildingInstance>(
+    () => ({
+      archetype: entity.id % 3,
+      tx0: 0,
+      tz0: 0,
+      tx1: 3,
+      tz1: 2,
+      stories: 1,
+      style: (entity.id * 747796405 + 0x9e3779b9) >>> 0,
+    }),
+    [entity.id],
+  );
+  // Face the nearest street; chunk data may land after the entity spawns,
+  // so retry until the shop's own chunk is loaded.
+  const [yaw, setYaw] = useState<number | null>(() => shopFacingYaw(entity.x, entity.z));
+  useFrame(() => {
+    if (yaw === null) {
+      const resolved = shopFacingYaw(entity.x, entity.z);
+      if (resolved !== null) setYaw(resolved);
     }
   });
-  return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-        useGame.getState().set({ marketOpen: true });
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
-      <mesh position={[0, 0.9, 0]} castShadow>
-        <boxGeometry args={[1.2, 1.8, 0.8]} />
-        <meshStandardMaterial color="#1a1508" roughness={0.4} metalness={0.6} />
-      </mesh>
-      <mesh position={[0, 1.25, 0.41]}>
-        <planeGeometry args={[0.9, 0.55]} />
-        <meshStandardMaterial color="#ffd700" emissive="#ffd700" emissiveIntensity={1.4} />
-      </mesh>
-      {/* Rotating holographic "coin" above the terminal. */}
-      <mesh ref={holo} position={[0, 2.1, 0]}>
-        <cylinderGeometry args={[0.28, 0.28, 0.05, 16]} />
-        <meshStandardMaterial
-          color="#ffd700"
-          emissive="#ffb700"
-          emissiveIntensity={2}
-          transparent
-          opacity={0.85}
-        />
-      </mesh>
-      <HoloSign kind="MarketTerminal" />
-      <GroundGlow color="#ffd700" radius={2.6} />
-    </group>
-  );
-}
 
-/** NPC store kiosk (Armory / Bodega / Bank / Dealership): a counter booth
- * with an awning in the vendor's accent color and its holo sign. */
-function VendorKiosk({ entity }: { entity: GameEntity }) {
-  const accent = POI_STYLES[entity.kind]?.color ?? "#4fc3ff";
+  const sign = shopSignMaterial(entity.kind);
+  // Fit the label plane inside the fascia board, preserving text aspect.
+  let signH = model.sign.height - 0.14;
+  let signW = signH * (sign?.aspect ?? 1);
+  const maxW = model.sign.width - 0.1;
+  if (signW > maxW) {
+    signW = maxW;
+    signH = signW / (sign?.aspect ?? 1);
+  }
+
   return (
     <group
+      rotation={[0, yaw ?? 0, 0]}
       onClick={(e) => {
         e.stopPropagation();
         game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-        if (entity.kind !== "Dealership") {
-          useGame.getState().set({ vendorOpen: true });
-        }
+        openShopPanel(entity.kind);
       }}
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      {/* counter */}
-      <mesh position={[0, 0.55, 0.45]} castShadow>
-        <boxGeometry args={[1.9, 1.1, 0.5]} />
-        <meshStandardMaterial color="#161c28" roughness={0.5} metalness={0.6} />
-      </mesh>
-      {/* back wall */}
-      <mesh position={[0, 1.1, -0.5]} castShadow>
-        <boxGeometry args={[1.9, 2.2, 0.35]} />
-        <meshStandardMaterial color="#10151f" roughness={0.55} metalness={0.55} />
-      </mesh>
-      {/* awning */}
-      <mesh position={[0, 2.28, 0.15]} rotation={[-0.18, 0, 0]}>
-        <boxGeometry args={[2.1, 0.08, 1.35]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.9} />
-      </mesh>
-      {/* shelf glow strip */}
-      <mesh position={[0, 1.3, -0.31]}>
-        <planeGeometry args={[1.6, 0.5]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.6} />
-      </mesh>
-      <HoloSign kind={entity.kind} />
-      <GroundGlow color={accent} radius={2.8} />
+      {model.geoms.map(([key, geom]) => (
+        <mesh
+          key={key}
+          geometry={geom}
+          material={getBuildingMaterial(key, materialKey)}
+          castShadow={!SHOP_NO_SHADOW.has(key)}
+          receiveShadow={!SHOP_NO_SHADOW.has(key)}
+        />
+      ))}
+      {sign && (
+        <mesh
+          position={[0, model.sign.y, model.sign.z]}
+          rotation={[0, Math.PI, 0]}
+          material={sign.mat}
+        >
+          <planeGeometry args={[signW, signH]} />
+        </mesh>
+      )}
+      <GroundGlow color={accent} radius={2.6} opacity={0.12} />
     </group>
   );
 }
@@ -1485,25 +1541,19 @@ function EntityView({ entity }: { entity: GameEntity }) {
     case "ExtractionPoint":
       body = <ExtractionBeacon entity={entity} />;
       break;
-    case "Building":
-      body = <StashTerminal entity={entity} />;
-      break;
     case "ResourceNode":
       body = <ResourceNodeView entity={entity} />;
       break;
+    case "Building":
+    case "MarketTerminal":
     case "Refinery":
     case "Factory":
     case "Laboratory":
-      body = <StationView entity={entity} />;
-      break;
-    case "MarketTerminal":
-      body = <MarketTerminal entity={entity} />;
-      break;
     case "Armory":
     case "Bank":
     case "Bodega":
     case "Dealership":
-      body = <VendorKiosk entity={entity} />;
+      body = <ShopFront entity={entity} />;
       break;
     case "Safehouse":
       body = <SafehouseView entity={entity} />;
@@ -1618,26 +1668,15 @@ function HealthBar({ entity }: { entity: GameEntity }) {
   );
 }
 
-/** Memoized: an entity's object identity is stable for its lifetime, so the
- * 500 ms list poll only reconciles keys instead of re-rendering every view. */
+/** Memoized: an entity's object identity is stable for its lifetime, so
+ * roster changes only reconcile keys instead of re-rendering every view. */
 const MemoEntityView = memo(EntityView);
 
 export function Entities() {
-  // Re-render the entity list only when the spawned set actually changes.
-  // The 500 ms poll hashes the id set; identical hash = no React work at all
-  // (the previous version force-rendered ~100 views twice a second).
-  const [, setSig] = useState(0);
-  const joined = useGame((s) => s.joined);
-
-  useEffect(() => {
-    if (!joined) return;
-    const timer = setInterval(() => {
-      let sig = game.entities.size * 0x9e3779b9;
-      for (const id of game.entities.keys()) sig = (sig + id * 2654435761) >>> 0;
-      setSig(sig);
-    }, 500);
-    return () => clearInterval(timer);
-  }, [joined]);
+  // Mount/unmount entity views the moment the spawn/despawn arrives: the
+  // roster version bumps synchronously with the network handler (the old
+  // 500 ms poll added up to half a second before a spawned entity appeared).
+  useSyncExternalStore(subscribeEntityRoster, getEntityRosterVersion);
 
   return (
     <>

@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { CHARACTER_MODEL, PISTOL_MODEL, preloadModels } from "../assets/catalog";
+import { getCityGeo } from "../game/citymap";
 import { CharacterSummary } from "../net/protocol";
 import { api, useSession } from "../state/session";
 
@@ -19,6 +21,13 @@ export function CharacterSelect() {
     queryFn: () => api<CharacterSummary[]>("/api/characters", { token }),
     retry: false,
   });
+
+  // Warm the heavy world assets while the player picks a runner, so join is
+  // near-instant: character + pistol GLBs and the far-field city geometry.
+  useEffect(() => {
+    preloadModels([CHARACTER_MODEL, PISTOL_MODEL]);
+    getCityGeo().catch(() => {});
+  }, []);
 
   const create = useMutation({
     mutationFn: (charName: string) =>

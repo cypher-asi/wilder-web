@@ -394,6 +394,8 @@ const entityGlowTexture = (() => {
   return new THREE.CanvasTexture(c);
 })();
 const entityGlowGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
+/** Shared beacon beam cone for ammo caches (one geometry for all crates). */
+const ammoBeamGeo = new THREE.CylinderGeometry(0.18, 0.42, 6, 12, 1, true);
 /** Keep the glow disc out of interact/aim raycasts (it sits in clickable groups). */
 const noRaycast = () => null;
 
@@ -444,10 +446,11 @@ const CHARACTER_BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 1, 0), 3);
  * tone mapping disabled) so the rim reads clearly brighter than the body fill
  * and blooms into a glow: warning red for hostiles, friendly blue for players.
  */
+const PLAYER_OUTLINE_HEX = "#e6f0ff";
 const ENEMY_OUTLINE_COLOR = new THREE.Color(RED_NUM).multiplyScalar(1.7);
-const PLAYER_OUTLINE_COLOR = new THREE.Color(0x3fa0ff).multiplyScalar(1.7);
+const PLAYER_OUTLINE_COLOR = new THREE.Color(PLAYER_OUTLINE_HEX).multiplyScalar(1.7);
 /** World-space border half-width, in metres. */
-const ENEMY_OUTLINE_THICKNESS = 0.03;
+const ENEMY_OUTLINE_THICKNESS = 0.015;
 
 const OUTLINE_VERT = /* glsl */ `
   #include <common>
@@ -769,7 +772,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       flashActive.current = flash > 0;
     }
     if (outlineMats.current.length > 0) {
-      // Gentle breathing glow; fade the border out as the enemy dies.
+      // Gentle breathing glow; fade the border out as the character dies.
       const pulse = 0.85 + Math.sin(now * 0.005) * 0.12;
       const alpha = dying ? 0 : pulse;
       for (const mat of outlineMats.current) mat.uniforms.opacity.value = alpha;
@@ -956,6 +959,8 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
     : isNpc
       ? RED_HEX
       : "#40e8ff";
+  /** Silhouette border: red for enemies, blue for players. */
+  const outlineColor = isNpc ? RED_HEX : PLAYER_OUTLINE_HEX;
 
   useFrame(({ clock }) => {
     if (!group.current) return;
@@ -978,16 +983,14 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
           roughness={0.55}
           metalness={0.2}
         />
-        {isNpc && (
-          <Outlines
-            color={RED_HEX}
-            thickness={ENEMY_OUTLINE_THICKNESS}
-            transparent
-            opacity={0.9}
-            screenspace
-            renderOrder={2}
-          />
-        )}
+        <Outlines
+          color={outlineColor}
+          thickness={ENEMY_OUTLINE_THICKNESS}
+          transparent
+          opacity={0.9}
+          screenspace
+          renderOrder={2}
+        />
       </mesh>
       {/* shoulder tint band */}
       <mesh position={[0, 1.25, 0]}>
@@ -997,16 +1000,14 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
       <mesh position={[0, 1.66, 0]} castShadow>
         <sphereGeometry args={[0.21, 12, 12]} />
         <meshStandardMaterial color="#14161c" roughness={0.3} metalness={0.6} />
-        {isNpc && (
-          <Outlines
-            color={RED_HEX}
-            thickness={ENEMY_OUTLINE_THICKNESS}
-            transparent
-            opacity={0.9}
-            screenspace
-            renderOrder={2}
-          />
-        )}
+        <Outlines
+          color={outlineColor}
+          thickness={ENEMY_OUTLINE_THICKNESS}
+          transparent
+          opacity={0.9}
+          screenspace
+          renderOrder={2}
+        />
       </mesh>
       {/* visor faces +X (yaw 0 looks along +X) */}
       <mesh position={[0.14, 1.68, 0]} rotation={[0, 0, -Math.PI / 2]}>
@@ -1017,13 +1018,55 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   );
 }
 
+// LootCrate resources are shared across all crates (~150 ammo caches can be
+// streamed in at once). The pulse animations are functions of the global
+// clock, identical for every crate, so one shared material per variant is
+// driven by a single useFrame in the first mounted crate that frame.
+const crateBoxGeo = new THREE.BoxGeometry(0.6, 0.55, 0.6);
+const crateCapGeo = new THREE.BoxGeometry(0.5, 0.06, 0.5);
+const crateBodyMat = new THREE.MeshStandardMaterial({
+  color: "#3a2f1d",
+  roughness: 0.6,
+  metalness: 0.3,
+});
+const ammoBodyMat = new THREE.MeshStandardMaterial({
+  color: "#3a3410",
+  roughness: 0.6,
+  metalness: 0.3,
+});
+const crateCapMat = new THREE.MeshStandardMaterial({
+  color: "#ffe14d",
+  emissive: "#ffc93d",
+  emissiveIntensity: 2,
+});
+const ammoCapMat = new THREE.MeshStandardMaterial({
+  color: "#ffd23d",
+  emissive: "#ffb100",
+  emissiveIntensity: 2,
+});
+const ammoBeamMat = new THREE.MeshBasicMaterial({
+  color: "#ffcc33",
+  transparent: true,
+  opacity: 0.35,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+});
+let cratePulseFrame = -1;
+
 function LootCrate({ entity }: { entity: GameEntity }) {
-  const glow = useRef<THREE.Mesh>(null);
+  // Ammo caches (variant 1) get a bright beacon so ammo is easy to spot.
+  const isAmmo = entity.variant === 1;
+  const beam = useRef<THREE.Mesh>(null);
   useFrame(({ clock }) => {
-    if (glow.current) {
+    // Shared materials only need one update per frame, not one per crate.
+    if (cratePulseFrame !== clock.elapsedTime) {
+      cratePulseFrame = clock.elapsedTime;
       const pulse = 1.5 + Math.sin(clock.elapsedTime * 4) * 0.8;
-      (glow.current.material as THREE.MeshStandardMaterial).emissiveIntensity = pulse;
+      crateCapMat.emissiveIntensity = pulse;
+      ammoCapMat.emissiveIntensity = pulse + 1.5;
+      ammoBeamMat.opacity = 0.35 + Math.sin(clock.elapsedTime * 3) * 0.12;
     }
+    if (beam.current) beam.current.rotation.y = clock.elapsedTime * 0.6;
   });
   return (
     <group
@@ -1034,14 +1077,33 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      <mesh position={[0, 0.28, 0]} castShadow>
-        <boxGeometry args={[0.6, 0.55, 0.6]} />
-        <meshStandardMaterial color="#3a2f1d" roughness={0.6} metalness={0.3} />
-      </mesh>
-      <mesh ref={glow} position={[0, 0.58, 0]}>
-        <boxGeometry args={[0.5, 0.06, 0.5]} />
-        <meshStandardMaterial color="#ffe14d" emissive="#ffc93d" emissiveIntensity={2} />
-      </mesh>
+      <mesh
+        position={[0, 0.28, 0]}
+        castShadow
+        geometry={crateBoxGeo}
+        material={isAmmo ? ammoBodyMat : crateBodyMat}
+      />
+      <mesh
+        position={[0, 0.58, 0]}
+        geometry={crateCapGeo}
+        material={isAmmo ? ammoCapMat : crateCapMat}
+      />
+      {/* No real pointLight here: with ~150 ammo caches replicated, per-crate
+          lights multiply every material's shading cost (each forward-rendered
+          fragment loops over all scene lights) and force shader recompiles.
+          The additive beam + ground glow carry the beacon look instead. */}
+      {isAmmo && (
+        <>
+          <mesh
+            ref={beam}
+            position={[0, 3, 0]}
+            raycast={noRaycast}
+            geometry={ammoBeamGeo}
+            material={ammoBeamMat}
+          />
+          <GroundGlow color="#ffcc33" radius={2.2} opacity={0.5} />
+        </>
+      )}
     </group>
   );
 }

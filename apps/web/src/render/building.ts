@@ -818,6 +818,37 @@ export const DEFAULT_KIT_TOWER_CONFIG: KitTowerConfig = {
   panelsOnly: false,
 };
 
+// CB01 mid-rise walk-up, mirroring the Building Stage's latest CB01 prefab:
+// whole U-shaped floor slices of a 12 m plan stacked on 3 m rows from the
+// ground up, panels only (the slices are complete authored floors, so no
+// procedural massing or dressing belongs on them). h/w/d are the authored
+// dimensions from the Asset Lab registry.
+export const CB01_WALKUP_CONFIG: KitTowerConfig = {
+  panels: [
+    { assetId: "lab_sm_cb01_module02", h: 3.002, w: 12, d: 4.072 },
+    { assetId: "lab_sm_cb01_module08", h: 3.002, w: 12, d: 4.072 },
+  ],
+  moduleWidth: 12,
+  rowHeight: 3,
+  wallZ: 0,
+  baseHeight: 0,
+  panelsOnly: true,
+  stacked: true,
+  forceKitTower: true,
+};
+
+// The hero building block fronting the spawn street (world x 16-56, z 64-80;
+// it streams as two chunk-split pieces that share this baked style hash and
+// no other building uses it). Rendered as the CB01 walk-up prefab instead of
+// the skyscraper kit. Refresh the constant if the citymap is re-baked.
+const HERO_CB01_STYLE = 0x260d4503;
+
+/** Per-building kit config: the hero block takes the CB01 walk-up prefab. */
+function configForBuilding(b: BuildingInstance): KitTowerConfig {
+  if (b.archetype === 3 && (b.style >>> 0) === HERO_CB01_STYLE) return CB01_WALKUP_CONFIG;
+  return DEFAULT_KIT_TOWER_CONFIG;
+}
+
 /**
  * Taller archetype-3 towers keep their procedural storefront base but wrap
  * the upper mass in kit facade panels (needs >= ~11 m of upper facade for
@@ -978,8 +1009,14 @@ function buildKitTowerGround(
  * shape), or a full-plan ring — with the pivot at the plan center, not a
  * per-face wall tile. U slices go on the front and back of the footprint
  * with the same module per row so their side returns meet mid-face; ring
- * slices sit once, centered. Footprints should be one module wide and about
- * two U-slice depths deep (e.g. 12 x 8 m). Returns the stack top y.
+ * slices sit once, centered.
+ *
+ * Footprints larger than the authored 12 x ~8 m plan are covered by tiling
+ * whole plans: one 12 m column per module width across the face (centered,
+ * leftover under a module stays bare lot setback) and one slice pair per
+ * two slice depths into the footprint, so wide/deep lots read as adjoining
+ * walk-up units rather than a hollow shell. Returns the stack top y and the
+ * covered width (the roof cap must not overhang bare setbacks).
  */
 function buildStackedFacade(
   b: BuildingInstance,
@@ -989,8 +1026,8 @@ function buildStackedFacade(
   baseY: number,
   height: number,
   cfg: KitTowerConfig,
-): number {
-  if (cfg.panels.length === 0) return baseY;
+): { top: number; coverW: number } {
+  if (cfg.panels.length === 0) return { top: baseY, coverW: w };
   const rng = mulberry(b.style ^ 0x8c17f2ad);
   // Slices only join cleanly with slices of the same authored footprint:
   // mixing the 12.2 x 4.152 walkway with the 12 x 4.072 window bands leaves
@@ -1009,21 +1046,32 @@ function buildStackedFacade(
   const pool = [...groups.values()][Math.floor(rng() * groups.size)];
   const front: Face = { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 };
   const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
+  // Whole 12 m plan columns across the face, centered on the footprint.
+  const moduleW = cfg.moduleWidth;
+  const nCols = Math.max(1, Math.floor((w + 1e-6) / moduleW));
+  const colAlong = (c: number) => (c - (nCols - 1) / 2) * moduleW;
   let y = baseY;
   for (;;) {
     const fits = pool.filter((p) => y + p.h <= height + 0.6);
     if (fits.length === 0) break;
     const mod = fits[Math.floor(rng() * fits.length)];
     const sliceD = mod.d ?? 4;
-    if (sliceD >= d - 1) {
-      // Full-plan ring slice: one per row, centered, facing the street.
-      kit.push({ assetId: mod.assetId, x: 0, y, z: 0, ry: Math.PI });
-    } else {
-      // U slices front + back, placed so their open ends butt exactly at
-      // the footprint midline (coplanar side-wall overlap z-fights); any
-      // slice overrun past d/2 pokes outward past the wall plane instead.
+    for (let c = 0; c < nCols; c++) {
+      if (sliceD >= d - 1) {
+        // Full-plan ring slice: one per row and column, facing the street.
+        kit.push({ assetId: mod.assetId, x: colAlong(c), y, z: 0, ry: Math.PI });
+        continue;
+      }
+      // U slices front + back, chained from the footprint midline outward:
+      // open ends butt exactly at the midline and at every chain joint
+      // (coplanar side-wall overlap z-fights), so any leftover pokes
+      // outward past the wall plane instead — the outermost facade band
+      // may sit a few cm proud of the lot line, never inside a sibling.
+      const nBands = Math.max(1, Math.ceil(d / 2 / sliceD - 1e-6));
       for (const f of [front, back]) {
-        kit.push(facePlacement(f, mod.assetId, 0, y, (sliceD - d) / 2));
+        for (let j = 0; j < nBands; j++) {
+          kit.push(facePlacement(f, mod.assetId, colAlong(c), y, (j + 0.5) * sliceD - d / 2));
+        }
       }
     }
     // Advance by the authored height, not the rounded grid pitch: the
@@ -1031,7 +1079,7 @@ function buildStackedFacade(
     // row above by 2 mm and z-fight along every floor line.
     y += mod.h;
   }
-  return y;
+  return { top: y, coverW: Math.min(w, nCols * moduleW) };
 }
 
 /** One horizontal band of facade tiles, following the kit's assembly rules. */
@@ -1191,9 +1239,13 @@ export function buildBuildingModel(
   if (kitTower && cfg.panelsOnly) {
     if (cfg.stacked) {
       // Slices are complete authored floors (walls + recessed interiors);
-      // the only procedural geometry is a roof deck capping the open top.
-      const top = buildStackedFacade(b, kit, w, d, baseY, height, cfg);
-      if (top > baseY) p.box("roof", w - 0.3, 0.12, d - 0.3, 0, top - 0.06, 0);
+      // the only procedural geometry is a roof deck capping the open top,
+      // sized to the slice-covered extent so it never overhangs bare lot
+      // setbacks left where the footprint exceeds whole 12 m columns. The
+      // deck floats just above the slice tops: interior chain-joint lips
+      // are level with the perimeter walls and z-fight a flush cap.
+      const { top, coverW } = buildStackedFacade(b, kit, w, d, baseY, height, cfg);
+      if (top > baseY) p.box("roof", coverW - 0.3, 0.12, d - 0.3, 0, top, 0);
     } else {
       buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
     }
@@ -1354,7 +1406,7 @@ const modelCache = new WeakMap<BuildingInstance, BuildingModel>();
 export function getBuildingModel(b: BuildingInstance): BuildingModel {
   let model = modelCache.get(b);
   if (!model) {
-    model = buildBuildingModel(b);
+    model = buildBuildingModel(b, configForBuilding(b));
     modelCache.set(b, model);
   }
   return model;

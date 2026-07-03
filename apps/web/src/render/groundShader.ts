@@ -122,6 +122,25 @@ float gVoroEdge(vec2 p) {
   }
   return f2 - f1;
 }
+// Triplanar sampling: top projection at sTop meters, vertical faces at sSide
+// (curb faces are only 0.14 m tall, so they need a much finer repeat).
+// Weights come from the sharpened geometric normal, so bevels blend smoothly
+// instead of flipping projection at a threshold.
+vec3 gTriRGB(sampler2D t, vec3 wp, vec3 w, float sTop, float sSide) {
+  return texture2D(t, vec2(wp.z, -wp.y) / sSide).rgb * w.x
+       + texture2D(t, wp.xz / sTop).rgb * w.y
+       + texture2D(t, vec2(wp.x, -wp.y) / sSide).rgb * w.z;
+}
+float gTriR(sampler2D t, vec3 wp, vec3 w, float sTop, float sSide) {
+  return texture2D(t, vec2(wp.z, -wp.y) / sSide).r * w.x
+       + texture2D(t, wp.xz / sTop).r * w.y
+       + texture2D(t, vec2(wp.x, -wp.y) / sSide).r * w.z;
+}
+vec2 gTriRG(sampler2D t, vec3 wp, vec3 w, float sTop, float sSide) {
+  return texture2D(t, vec2(wp.z, -wp.y) / sSide).rg * w.x
+       + texture2D(t, wp.xz / sTop).rg * w.y
+       + texture2D(t, vec2(wp.x, -wp.y) / sSide).rg * w.z;
+}
 // Sparse round spots (drips, gum): 1 inside a spot, 0 outside. cellW meters
 // per cell, chance of a spot per cell, radius as a fraction of the cell.
 float gSpots(vec2 wp, float cellW, float chance, float radius) {
@@ -141,10 +160,12 @@ vec3 wp = vWPos;
 int gKind = int(vKind + 0.5);
 vec3 gGeoN = normalize(vWNormal);
 float gUp = clamp(gGeoN.y, 0.0, 1.0);
-// Planar UVs: XZ on tops, axis-aligned vertical planes on curb faces.
-vec2 gUV = abs(gGeoN.y) > 0.5
-  ? wp.xz
-  : (abs(gGeoN.x) > abs(gGeoN.z) ? vec2(wp.z, -wp.y) : vec2(wp.x, -wp.y));
+// Triplanar weights, sharpened so flat areas stay a clean top projection but
+// the 45-degree curb bevels blend continuously (no seam or projection flip).
+vec3 gW = pow(abs(gGeoN), vec3(4.0));
+gW /= gW.x + gW.y + gW.z;
+// Curb-face factor: vertical, road-adjacent faces are emitted as kind 1.
+float gVert = 1.0 - gW.y;
 
 // Distance to the nearest road surface (0 on roads) -> grime deep in blocks.
 float gDistRoad = max(vRoadD, 0.0);
@@ -157,40 +178,45 @@ float gRgh;
 vec2 gNrm2 = vec2(0.0);
 float gNStr = 0.0;
 if (gKind == 0) {
-  vec2 uv = gUV / 3.6;
-  gAlb = texture2D(uAsphaltMap, uv).rgb * 1.2;
-  gRgh = clamp(texture2D(uAsphaltRough, uv).r * 0.5 + 0.03, 0.1, 0.6);
-  gNrm2 = texture2D(uAsphaltNormal, uv).rg * 2.0 - 1.0;
+  gAlb = gTriRGB(uAsphaltMap, wp, gW, 3.6, 3.6) * 1.2;
+  gRgh = clamp(gTriR(uAsphaltRough, wp, gW, 3.6, 3.6) * 0.5 + 0.03, 0.1, 0.6);
+  gNrm2 = gTriRG(uAsphaltNormal, wp, gW, 3.6, 3.6) * 2.0 - 1.0;
   gNStr = 0.45;
 } else if (gKind == 1) {
-  // Sidewalk: smooth concrete slabs (pavers alias into speckle at this scale).
-  vec2 uv = gUV / 3.5;
-  gAlb = texture2D(uConcreteMap, uv).rgb * 1.25;
+  // Sidewalk: smooth concrete slabs (pavers alias into speckle at this
+  // scale). Curb faces sample at a ~0.9 m repeat: they are 0.14 m tall and
+  // the slab-scale repeat smears into an untextured band.
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 3.5, 0.9) * 1.25;
   // Per-slab value variation on the 2 m joint grid so slabs read individually.
   gAlb *= 0.92 + 0.16 * gHash12(floor(wp.xz / 2.0));
-  gRgh = clamp(texture2D(uConcreteRough, uv).r * 0.6 + 0.12, 0.25, 0.85);
-  gNrm2 = texture2D(uConcreteNormal, uv).rg * 2.0 - 1.0;
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.5, 0.9) * 0.6 + 0.12, 0.25, 0.85);
+  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.5, 0.9) * 2.0 - 1.0;
   gNStr = 0.25;
+  // Poured-curb segment joints every 3 m along the street on curb faces.
+  if (gVert > 0.25) {
+    float along = gW.x > gW.z ? wp.z : wp.x;
+    float distJoint = (0.5 - abs(fract(along / 3.0) - 0.5)) * 3.0;
+    float joint = 1.0 - smoothstep(0.015, 0.05, distJoint);
+    gAlb *= 1.0 - 0.45 * joint * gVert;
+    gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), joint * gVert);
+  }
 } else if (gKind == 2) {
   // Plaza: large concrete slabs on the 4 m joint grid, a shade darker than
   // sidewalks. (Photo pavers alias into pixel speckle at this camera.)
-  vec2 uv = gUV / 4.2;
-  gAlb = texture2D(uConcreteMap, uv).rgb * 0.95;
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 4.2, 0.9) * 0.95;
   gAlb *= 0.9 + 0.2 * gHash12(floor(wp.xz / 4.0) + 11.0);
-  gRgh = clamp(texture2D(uConcreteRough, uv).r * 0.6 + 0.12, 0.25, 0.85);
-  gNrm2 = texture2D(uConcreteNormal, uv).rg * 2.0 - 1.0;
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 4.2, 0.9) * 0.6 + 0.12, 0.25, 0.85);
+  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 4.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.25;
 } else if (gKind == 3) {
-  vec2 uv = gUV / 3.0;
-  gAlb = texture2D(uConcreteMap, uv).rgb * 0.55;
-  gRgh = clamp(texture2D(uConcreteRough, uv).r * 0.55 + 0.12, 0.2, 0.8);
-  gNrm2 = texture2D(uConcreteNormal, uv).rg * 2.0 - 1.0;
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.55;
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.12, 0.2, 0.8);
+  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.0, 0.9) * 2.0 - 1.0;
   gNStr = 0.4;
 } else if (gKind == 4) {
-  vec2 uv = gUV / 2.6;
-  gAlb = texture2D(uGrassMap, uv).rgb * 0.8;
+  gAlb = gTriRGB(uGrassMap, wp, gW, 2.6, 2.6) * 0.8;
   gRgh = 0.9;
-  gNrm2 = texture2D(uGrassNormal, uv).rg * 2.0 - 1.0;
+  gNrm2 = gTriRG(uGrassNormal, wp, gW, 2.6, 2.6) * 2.0 - 1.0;
   gNStr = 0.6;
 } else {
   gAlb = vec3(0.012, 0.028, 0.042);

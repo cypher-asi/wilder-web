@@ -622,15 +622,27 @@ async function buildGroundCells(material: THREE.Material): Promise<ProxyCell[]> 
   return cells;
 }
 
+/** Massing cells merged per edge draw (4x4 cells = ~1 km): keeps the range
+ * cull useful while collapsing hundreds of LineSegments into a handful. */
+const EDGE_MERGE = 4;
+
 /**
- * Glowing edge outlines for every building cell, built lazily the first time
+ * Glowing edge outlines for the building massing, built lazily the first time
  * the tron style is active (other styles never pay the extraction cost).
- * Shares the massing cells' bounds so the same range cull applies, and the
+ * Edges are extracted per massing cell but merged into EDGE_MERGE-sized
+ * super-cells: one draw call per ~1 km region instead of one per cell, which
+ * matters when the whole skyline is in fog range at high zoom. The merged
  * cells are appended to the live assets so the frame loop picks them up.
  */
 async function buildEdgeCells(cells: ProxyCell[]): Promise<ProxyCell[]> {
   const material = makeEdgeMaterial();
-  const out: ProxyCell[] = [];
+  interface EdgeBin {
+    arrays: Float32Array[];
+    length: number;
+    min: THREE.Vector3;
+    max: THREE.Vector3;
+  }
+  const bins = new Map<string, EdgeBin>();
   let sinceYield = 0;
   // Snapshot: the caller appends the result to the same array.
   for (const cell of [...cells]) {
@@ -640,17 +652,49 @@ async function buildEdgeCells(cells: ProxyCell[]): Promise<ProxyCell[]> {
     // 10 deg threshold: keeps every hard blockout edge, drops the coplanar
     // triangulation seams across flat roofs and walls.
     const edges = new THREE.EdgesGeometry(geo, 10);
-    edges.boundingBox = geo.boundingBox;
-    edges.boundingSphere = geo.boundingSphere;
-    const lines = new THREE.LineSegments(edges, material);
-    lines.raycast = () => {};
-    lines.visible = false;
-    out.push({ mesh: lines, center: cell.center, radius: cell.radius, tronOnly: true });
+    const positions = edges.getAttribute("position").array as Float32Array;
+    const key = `${Math.floor(cell.center.x / (CELL * EDGE_MERGE))},${Math.floor(
+      cell.center.z / (CELL * EDGE_MERGE),
+    )}`;
+    let bin = bins.get(key);
+    if (!bin) {
+      bin = {
+        arrays: [],
+        length: 0,
+        min: new THREE.Vector3(Infinity, Infinity, Infinity),
+        max: new THREE.Vector3(-Infinity, -Infinity, -Infinity),
+      };
+      bins.set(key, bin);
+    }
+    bin.arrays.push(positions);
+    bin.length += positions.length;
+    bin.min.min(geo.boundingBox!.min);
+    bin.max.max(geo.boundingBox!.max);
     sinceYield += (geo.index?.count ?? 0) / 3;
     if (sinceYield > SLICE_TRIS) {
       sinceYield = 0;
       await idle();
     }
+  }
+
+  const out: ProxyCell[] = [];
+  for (const bin of bins.values()) {
+    const merged = new Float32Array(bin.length);
+    let offset = 0;
+    for (const a of bin.arrays) {
+      merged.set(a, offset);
+      offset += a.length;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(merged, 3));
+    const center = bin.min.clone().add(bin.max).multiplyScalar(0.5);
+    const radius = bin.max.clone().sub(bin.min).length() / 2;
+    geometry.boundingBox = new THREE.Box3(bin.min, bin.max);
+    geometry.boundingSphere = new THREE.Sphere(center.clone(), radius);
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.raycast = () => {};
+    lines.visible = false;
+    out.push({ mesh: lines, center, radius, tronOnly: true });
   }
   return out;
 }

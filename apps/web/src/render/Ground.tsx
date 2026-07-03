@@ -15,9 +15,10 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { ChunkData, TileKind, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
+import { useGame } from "../state/game";
 import { groundMaterial } from "./groundShader";
 import { buildRoadMarkings, markingsMaterial } from "./roadMarkings";
-import { tronifyMaterial } from "./styles";
+import { isTronStyle, tronifyMaterial } from "./styles";
 
 /** Height of the raised sidewalk/plaza slab above road grade. */
 const CURB_H = 0.14;
@@ -615,10 +616,16 @@ export function ChunkGround({ chunk }: { chunk: ChunkData }) {
     () => (mapReady ? buildRoadMarkings(chunk) : null),
     [chunk, mapReady],
   );
+  // Tron has no painted lane lines (the shader discards every fragment), so
+  // don't submit the marking geometry at all: the vertex + rasterization cost
+  // of the thin overlay quads buys nothing in that style.
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
   return (
     <>
       <mesh geometry={geometry} material={groundMaterial} receiveShadow />
-      {markings && <mesh geometry={markings} material={markingsMaterial} receiveShadow />}
+      {markings && !tron && (
+        <mesh geometry={markings} material={markingsMaterial} receiveShadow />
+      )}
       <RoadDetails chunk={chunk} />
     </>
   );

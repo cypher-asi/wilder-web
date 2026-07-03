@@ -27,6 +27,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <div className="minimap-panel">
             <Minimap />
             <PositionReadout />
+          </div>
+          <div className="comms-panel">
             <StylePicker />
             <ChatWindow connection={connection} />
           </div>

@@ -288,9 +288,9 @@ body {
    big numerals beside them (no panel box, CP2077-style cluster). */
 .vitals {
   position: absolute;
-  top: 14px;
-  left: 16px;
-  width: 280px;
+  top: 40px;
+  left: 44px;
+  width: 400px;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
   transform: perspective(900px) rotateY(8deg);
   transform-origin: left center;
@@ -299,16 +299,16 @@ body {
 .vitals-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .vitals-badge {
-  min-width: 26px;
-  padding: 2px 5px;
+  min-width: 34px;
+  padding: 4px 8px;
   text-align: center;
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 17px;
   font-weight: 800;
   color: var(--accent-bright);
   background: rgba(9, 15, 24, 0.7);
@@ -320,7 +320,7 @@ body {
 
 .vitals-name {
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.22em;
   text-transform: uppercase;
@@ -331,40 +331,33 @@ body {
 .vitals-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
-/* Floating segmented bar: dark translucent track, no hard frame (the cluster's
-   drop-shadow gives the float). Segment ticks come from an overlay on ::after. */
+/* Floating bar: dark translucent track with chunky segment gaps baked into the
+   track background, so ticks only show in the EMPTY area — the solid fill on top
+   stays continuous. The cluster's drop-shadow gives the float. */
 .vital-bar {
   position: relative;
   flex: 1;
-  height: 9px;
-  background: rgba(4, 6, 11, 0.32);
-  box-shadow: inset 0 0 0 1px rgba(159, 180, 200, 0.16);
+  height: 15px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent 24px,
+      rgba(0, 0, 0, 0.6) 24px,
+      rgba(0, 0, 0, 0.6) 29px
+    ),
+    rgba(4, 6, 11, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(159, 180, 200, 0.18);
   clip-path: var(--clip-notch-sm);
   overflow: hidden;
 }
 
-/* Segment dividers: chunky dark gaps across the whole bar (fill + track),
-   like the AUX example's blocky segments. */
-.vital-bar::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    90deg,
-    transparent 0,
-    transparent 20px,
-    rgba(4, 6, 11, 0.9) 20px,
-    rgba(4, 6, 11, 0.9) 24px
-  );
-}
-
 .vital-bar.shield {
-  height: 6px;
+  height: 11px;
 }
 
 .vital-bar.shield.depleted {
@@ -388,14 +381,14 @@ body {
   box-shadow: 0 0 14px rgba(79, 195, 255, 0.85);
 }
 
-/* Tiny uppercase micro-label in front of each bar (CORE/AUX style). */
+/* Uppercase micro-label in front of each bar (CORE/AUX style). */
 .vital-label {
   font-family: var(--font-display);
-  font-size: 7px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.16em;
   color: var(--text-dim);
-  min-width: 26px;
+  min-width: 40px;
   text-align: right;
 }
 
@@ -405,19 +398,19 @@ body {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  min-width: 58px;
+  min-width: 80px;
   text-align: left;
   line-height: 1;
 }
 
 .vital-big.health {
-  font-size: 15px;
+  font-size: 24px;
   color: var(--white);
   text-shadow: 0 0 10px rgba(233, 245, 255, 0.5);
 }
 
 .vital-big.shield {
-  font-size: 10px;
+  font-size: 15px;
   color: var(--accent);
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
 }
@@ -435,8 +428,8 @@ body {
    the map's width. */
 .minimap-panel {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 32px;
+  right: 24px;
   width: 233px;
   display: flex;
   flex-direction: column;
@@ -777,21 +770,21 @@ body {
    tilted back like a cockpit dashboard. */
 .action-bar {
   position: absolute;
-  bottom: 12px;
+  bottom: 32px;
   left: 50%;
   transform: translateX(-50%) perspective(900px) rotateX(7deg);
   transform-origin: center bottom;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
 }
 
 .action-slot {
   position: relative;
-  width: 46px;
-  height: 46px;
+  width: 62px;
+  height: 62px;
   background: rgba(9, 15, 24, 0.45);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
@@ -820,21 +813,21 @@ body {
 }
 
 .action-glyph {
-  font-size: 21px;
+  font-size: 28px;
   color: var(--accent-bright);
   text-shadow: var(--hud-glow);
 }
 
 .action-key {
   position: absolute;
-  top: -6px;
-  right: -5px;
-  font-size: 8px;
+  top: -7px;
+  right: -6px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--text-dim);
   background: #090f18;
   border: 1px solid var(--steel-border);
-  padding: 1px 4px;
+  padding: 1px 5px;
   line-height: normal;
 }
 
@@ -851,7 +844,7 @@ body {
   align-items: center;
   justify-content: center;
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 800;
   color: #fff;
   text-shadow: 0 1px 3px #000;
@@ -861,9 +854,9 @@ body {
 
 .action-count {
   position: absolute;
-  bottom: 2px;
-  right: 4px;
-  font-size: 9px;
+  bottom: 3px;
+  right: 5px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
@@ -871,17 +864,17 @@ body {
 
 .action-sep {
   width: 1px;
-  height: 36px;
+  height: 48px;
   background: var(--steel-border);
-  margin: 0 3px;
+  margin: 0 4px;
 }
 
 /* Bottom-left weapon widget: floating name tag + gun outline + big ammo. */
 .weapon-dock {
   position: absolute;
-  left: 16px;
-  bottom: 14px;
-  min-width: 250px;
+  left: 44px;
+  bottom: 40px;
+  min-width: 320px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
   transform: perspective(900px) rotateY(8deg);
@@ -891,27 +884,27 @@ body {
 .weapon-dock-main {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 16px;
 }
 
 .weapon-dock-info {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 8px;
 }
 
-/* Small bordered name chip, like the reference's weapon tag. */
+/* Bordered name chip, like the reference's weapon tag. */
 .weapon-dock-tag {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 14px;
   font-weight: 800;
   letter-spacing: 0.2em;
   color: var(--accent-bright);
   background: var(--accent-faint);
   border: 1px solid var(--accent-dim);
   clip-path: var(--clip-notch-sm);
-  padding: 2px 8px;
+  padding: 4px 12px;
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
 }
 
@@ -919,9 +912,9 @@ body {
 .weapon-dock-ammo-tag {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   font-family: var(--font-display);
-  font-size: 8px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.22em;
   color: var(--text-dim);
@@ -931,12 +924,12 @@ body {
 .weapon-dock-ammo-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
 }
 
 .vital-bar.ammo {
-  width: 150px;
-  height: 10px;
+  width: 210px;
+  height: 16px;
   flex: none;
 }
 
@@ -954,18 +947,18 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 11px;
+  width: 20px;
+  height: 16px;
   background: var(--alert);
   color: #0a0508;
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 800;
   letter-spacing: 0;
 }
 
 .weapon-dock-ammo {
   font-family: var(--font-display);
-  font-size: 26px;
+  font-size: 34px;
   font-weight: 800;
   color: var(--white);
   font-variant-numeric: tabular-nums;
@@ -985,28 +978,28 @@ body {
 }
 
 .weapon-dock-ammo-label {
-  font-size: 13px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--text-dim);
-  margin-left: 5px;
+  margin-left: 7px;
 }
 
 .weapon-dock-swaps {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   margin-left: auto;
 }
 
 .weapon-swap-slot {
-  width: 32px;
-  height: 26px;
+  width: 42px;
+  height: 34px;
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.05em;
   color: var(--text-dim);
@@ -1022,13 +1015,13 @@ body {
 .weapon-dock-xp {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 9px;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 .weapon-dock-level {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.14em;
   color: var(--accent);
@@ -1036,7 +1029,7 @@ body {
 }
 
 .weapon-dock-xp-num {
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1045,10 +1038,10 @@ body {
 /* Bottom-right backpack quick-grid + inventory button. */
 .backpack {
   position: absolute;
-  right: 12px;
-  bottom: 12px;
+  right: 24px;
+  bottom: 32px;
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: stretch;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
@@ -1058,9 +1051,9 @@ body {
 
 .backpack-grid {
   display: grid;
-  grid-template-columns: repeat(6, 26px);
-  grid-auto-rows: 26px;
-  gap: 4px;
+  grid-template-columns: repeat(6, 34px);
+  grid-auto-rows: 34px;
+  gap: 5px;
   cursor: pointer;
 }
 
@@ -1079,14 +1072,14 @@ body {
 }
 
 .backpack-abbrev {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--accent-bright);
 }
 
 .backpack-btn {
   position: relative;
-  width: 52px;
+  width: 66px;
   background: rgba(9, 15, 24, 0.45);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
@@ -1094,7 +1087,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: 3px;
   cursor: pointer;
 }
 
@@ -1105,20 +1098,20 @@ body {
 }
 
 .backpack-btn-glyph {
-  font-size: 18px;
+  font-size: 24px;
   color: var(--accent);
   text-shadow: var(--hud-glow);
 }
 
 .backpack-btn-count {
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
 
 .xp-bar {
   flex: 1;
-  height: 5px;
+  height: 8px;
   background: rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }

@@ -178,7 +178,7 @@ function HoloScene({ view }: { view: RefObject<HoloView> }) {
       <SafeZoneOutline />
       <PlayerMarker view={view} />
       <ExtractionMarkers view={view} />
-      <DistrictLabels view={view} />
+      <DistrictLabels />
       <EffectComposer multisampling={0}>
         <Bloom
           intensity={0.55}
@@ -579,6 +579,7 @@ function makeLabelSprite(name: string): THREE.Sprite {
     transparent: true,
     depthTest: false,
     sizeAttenuation: false,
+    opacity: 0, // revealed on hover
   });
   sprite = new THREE.Sprite(mat);
   const k = 0.024;
@@ -588,20 +589,36 @@ function makeLabelSprite(name: string): THREE.Sprite {
   return sprite;
 }
 
-/** District names fade in as you zoom out to city scale. */
-function DistrictLabels({ view }: { view: RefObject<HoloView> }) {
+const HOVER_PX = 110;
+const labelProj = new THREE.Vector3();
+
+/** District name of the neighborhood under the cursor (nearest, only one). */
+function DistrictLabels() {
   const [manifest, setManifest] = useState<CityMapManifest | null>(null);
   useEffect(() => {
     void getCityMapManifest().then(setManifest);
   }, []);
   const group = useRef<THREE.Group>(null);
-  useFrame(() => {
+  useFrame(({ camera, pointer, size }) => {
     const g = group.current;
     if (!g) return;
-    const d = view.current.sDist;
-    const fade = Math.min(Math.max((d - 1200) / 1800, 0), 1) * 0.8;
-    for (const child of g.children) {
-      ((child as THREE.Sprite).material as THREE.SpriteMaterial).opacity = fade;
+    // Closest label anchor to the cursor in screen space, within reach.
+    let best = -1;
+    let bestD = HOVER_PX;
+    for (let i = 0; i < g.children.length; i++) {
+      labelProj.copy(g.children[i].position).project(camera);
+      if (labelProj.z >= 1) continue; // behind the camera
+      const dx = ((labelProj.x - pointer.x) * size.width) / 2;
+      const dy = ((labelProj.y - pointer.y) * size.height) / 2;
+      const d = Math.hypot(dx, dy);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    for (let i = 0; i < g.children.length; i++) {
+      const m = (g.children[i] as THREE.Sprite).material as THREE.SpriteMaterial;
+      m.opacity += ((i === best ? 0.9 : 0) - m.opacity) * 0.25;
     }
   });
   if (!manifest) return null;

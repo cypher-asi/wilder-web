@@ -91,6 +91,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   const lastShotAt = useRef(0);
   /** Timestamp of the latest unconsumed click, for the shot buffer. */
   const pendingShotAt = useRef(-Infinity);
+  /** Throttle for the out-of-ammo click/warning. */
+  const lastDryFireAt = useRef(0);
+  /** Throttle for auto-equip requests / melee hints on fire. */
+  const lastEquipNudgeAt = useRef(0);
   const raycaster = useRef(new THREE.Raycaster());
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
 
@@ -394,9 +398,41 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (!game.gun.drawn || now < game.gun.readyAt) return;
     if (game.roll) return; // no shooting mid-roll
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
+    // Firing bare-handed / with a melee weapon while carrying a gun in the
+    // backpack is almost never intended: auto-equip the best carried gun
+    // (server validates) and let the shot go out next frame once the
+    // InventoryUpdate confirms. Without this, clicks fall through to a
+    // 1.5 m fist swing that silently whiffs at range.
+    if (!hasRangedWeapon()) {
+      const inv = useGame.getState().inventory;
+      const gunSlot =
+        inv?.slots.findIndex((s) => s != null && RANGED_WEAPONS.has(s.kind)) ?? -1;
+      if (gunSlot >= 0) {
+        if (now - lastEquipNudgeAt.current > 800) {
+          lastEquipNudgeAt.current = now;
+          connection.send({
+            t: "InventoryAction",
+            d: { t: "Equip", d: { slot: gunSlot } },
+          });
+        }
+        return; // hold the buffered click; fires once the equip lands
+      }
+    }
     // Dry trigger: don't send a doomed Attack or play phantom shot FX that
-    // would look like hits silently not registering.
-    if (hasRangedWeapon() && ammoCount() === 0) return;
+    // would look like hits silently not registering. Surface it loudly so
+    // the player knows why nothing is firing.
+    if (hasRangedWeapon() && ammoCount() === 0) {
+      if (now - lastDryFireAt.current > 1000) {
+        lastDryFireAt.current = now;
+        useGame.getState().pushChat({
+          from: "system",
+          text: "Out of ammo! (9mm)",
+          system: true,
+        });
+      }
+      pendingShotAt.current = -Infinity;
+      return;
+    }
     pendingShotAt.current = -Infinity; // consume the buffered click
     lastShotAt.current = now;
     game.gun.lastShotAt = now;

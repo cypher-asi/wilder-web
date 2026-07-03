@@ -599,6 +599,12 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     // spine twist above so the hand bone reflects this frame's pose.
     const mount = game.gunMounts.get(entity.id);
     if (mount?.holder.parent) {
+      // Hide the pistol mesh when the local player has no gun equipped, so
+      // the visuals can't suggest shooting is possible bare-handed.
+      if (isLocal) {
+        const weapon = useGame.getState().inventory?.equipped_weapon;
+        mount.holder.visible = weapon === "Pistol" || weapon === "Smg";
+      }
       const yaw = isLocal && game.aim.active ? game.aim.yaw : entity.yaw;
       const cp = Math.cos(GUN_AIM_PITCH);
       gunAimDir.set(Math.cos(yaw) * cp, -Math.sin(GUN_AIM_PITCH), Math.sin(yaw) * cp);

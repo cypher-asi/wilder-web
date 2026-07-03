@@ -307,10 +307,56 @@ function chunkRng(cx: number, cz: number): () => number {
   };
 }
 
+/** Cast-iron cover pattern (concentric rings + stud grid) drawn once. */
+function makeCoverTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#404448";
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.strokeStyle = "#22252a";
+  ctx.lineWidth = 3;
+  for (const r of [18, 34, 50]) {
+    ctx.beginPath();
+    ctx.arc(64, 64, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#2a2d31";
+  for (let a = 0; a < 24; a++) {
+    const ang = (a / 24) * Math.PI * 2;
+    for (const r of [26, 42, 58]) {
+      ctx.beginPath();
+      ctx.arc(64 + Math.cos(ang) * r, 64 + Math.sin(ang) * r, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Soft radial stain: dark center fading out (street-steel grime halo). */
+function makeStainTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const grad = ctx.createRadialGradient(32, 32, 4, 32, 32, 32);
+  grad.addColorStop(0, "rgba(8, 8, 9, 0.5)");
+  grad.addColorStop(0.55, "rgba(10, 10, 11, 0.28)");
+  grad.addColorStop(1, "rgba(12, 12, 12, 0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+const coverTex = makeCoverTexture();
 const manholeCover = new THREE.MeshStandardMaterial({
-  color: "#191b1e",
-  roughness: 0.4,
-  metalness: 0.55,
+  map: coverTex,
+  bumpMap: coverTex,
+  bumpScale: 4,
+  color: "#5b6066",
+  roughness: 0.42,
+  metalness: 0.75,
 });
 const manholeRim = new THREE.MeshStandardMaterial({
   color: "#0d0e10",
@@ -322,12 +368,34 @@ const drainGrate = new THREE.MeshStandardMaterial({
   roughness: 0.6,
   metalness: 0.5,
 });
+const utilityCover = new THREE.MeshStandardMaterial({
+  map: coverTex,
+  bumpMap: coverTex,
+  bumpScale: 3,
+  color: "#4a4e53",
+  roughness: 0.5,
+  metalness: 0.65,
+});
+// Lit dark overlay: must participate in scene lighting or the "stain" reads
+// as a bright unlit blob at the scene's high exposure.
+const stainMat = new THREE.MeshStandardMaterial({
+  color: "#0a0a0b",
+  map: makeStainTexture(),
+  transparent: true,
+  depthWrite: false,
+  roughness: 0.75,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+});
 const manholeGeo = new THREE.CircleGeometry(0.28, 20).rotateX(-Math.PI / 2);
 const manholeRimGeo = new THREE.RingGeometry(0.28, 0.35, 20).rotateX(-Math.PI / 2);
 const drainGeo = new THREE.BoxGeometry(0.9, 0.03, 0.4);
+const utilityGeo = new THREE.BoxGeometry(0.72, 0.014, 0.52);
+const stainGeo = new THREE.PlaneGeometry(1.9, 1.9).rotateX(-Math.PI / 2);
 
 interface Detail {
-  kind: "manhole" | "drain";
+  kind: "manhole" | "drain" | "utility";
   x: number;
   z: number;
   rot: number;
@@ -341,20 +409,34 @@ function chunkDetails(chunk: ChunkData): Detail[] {
     tx >= 0 && tx < n && tz >= 0 && tz < n ? chunk.tiles[tz * n + tx] : null;
 
   // Manholes on interior road tiles; storm drains on road tiles that touch a
-  // sidewalk, snapped against that curb. Sparse via rng, capped per chunk.
+  // sidewalk, snapped against that curb; rectangular utility covers on
+  // sidewalk tiles. Sparse via rng, capped per chunk.
   let manholes = 0;
   let drains = 0;
-  for (let tz = 0; tz < n && (manholes < 3 || drains < 3); tz++) {
+  let utilities = 0;
+  for (let tz = 0; tz < n && (manholes < 4 || drains < 3 || utilities < 4); tz++) {
     for (let tx = 0; tx < n; tx++) {
       const k = tile(tx, tz);
+      const x = (tx + 0.5) * TILE_SIZE;
+      const z = (tz + 0.5) * TILE_SIZE;
+      if (k === "Sidewalk") {
+        if (utilities < 4 && rng() < 0.02) {
+          out.push({
+            kind: "utility",
+            x: x + (rng() - 0.5) * 0.6,
+            z: z + (rng() - 0.5) * 0.6,
+            rot: rng() < 0.5 ? 0 : Math.PI / 2,
+          });
+          utilities++;
+        }
+        continue;
+      }
       if (k !== "Road" && k !== "RoadLine") continue;
       const cxm = tile(tx - 1, tz) === "Sidewalk";
       const cxp = tile(tx + 1, tz) === "Sidewalk";
       const czm = tile(tx, tz - 1) === "Sidewalk";
       const czp = tile(tx, tz + 1) === "Sidewalk";
       const curb = cxm || cxp || czm || czp;
-      const x = (tx + 0.5) * TILE_SIZE;
-      const z = (tz + 0.5) * TILE_SIZE;
       if (curb && drains < 3) {
         if (rng() < 0.05) {
           if (czm) out.push({ kind: "drain", x, z: tz * TILE_SIZE + 0.28, rot: 0 });
@@ -363,7 +445,7 @@ function chunkDetails(chunk: ChunkData): Detail[] {
           else out.push({ kind: "drain", x: (tx + 1) * TILE_SIZE - 0.28, z, rot: Math.PI / 2 });
           drains++;
         }
-      } else if (!curb && manholes < 3 && rng() < 0.03) {
+      } else if (!curb && manholes < 4 && rng() < 0.045) {
         out.push({
           kind: "manhole",
           x: x + (rng() - 0.5),
@@ -385,15 +467,21 @@ function RoadDetails({ chunk }: { chunk: ChunkData }) {
         // Kept above the painted road markings layer (y = 0.012).
         d.kind === "manhole" ? (
           <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
+            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.014, 0]} />
             <mesh geometry={manholeGeo} material={manholeCover} position={[0, 0.016, 0]} />
             <mesh geometry={manholeRimGeo} material={manholeRim} position={[0, 0.015, 0]} />
+          </group>
+        ) : d.kind === "drain" ? (
+          <group key={i} position={[d.x, 0, d.z]} rotation={[0, d.rot, 0]}>
+            <mesh geometry={stainGeo} material={stainMat} position={[0, 0.014, 0]} scale={[0.9, 1, 0.7]} />
+            <mesh geometry={drainGeo} material={drainGrate} position={[0, 0.018, 0]} />
           </group>
         ) : (
           <mesh
             key={i}
-            geometry={drainGeo}
-            material={drainGrate}
-            position={[d.x, 0.018, d.z]}
+            geometry={utilityGeo}
+            material={utilityCover}
+            position={[d.x, 0.147, d.z]}
             rotation={[0, d.rot, 0]}
           />
         ),

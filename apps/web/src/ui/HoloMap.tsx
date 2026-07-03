@@ -61,7 +61,7 @@ function HoloMapView() {
     tx: game.predicted.x,
     tz: game.predicted.z,
     dist: OPEN_DIST,
-    yaw: Math.PI / 2, // camera south of target -> north (-Z) is up on screen
+    yaw: Math.PI, // camera west of target -> north (-Z) points left on screen
     topDown: false,
     follow: true,
     sTx: game.predicted.x,

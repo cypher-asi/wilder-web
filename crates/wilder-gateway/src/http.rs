@@ -155,5 +155,7 @@ fn new_character(account: AccountId, name: String, appearance: Appearance) -> Ch
         max_health: 100.0,
         shield: 0.0,
         max_shield: 0.0,
+        // All players fight for the Rebels for now.
+        faction: FACTION_REBELS,
     }
 }

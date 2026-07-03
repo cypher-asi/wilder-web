@@ -267,6 +267,7 @@ mod tests {
             max_health: 100.0,
             shield: 0.0,
             max_shield: 0.0,
+            faction: FACTION_REBELS,
         };
         s.create_character(&c).unwrap();
         let chars = s.characters_for_account(a.id).unwrap();

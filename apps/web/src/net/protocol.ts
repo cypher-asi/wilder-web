@@ -22,6 +22,44 @@ export const BUILDING_FRONT_PROUD = 0.3;
 /** Territory zone = square block of this many chunks (mirror of wilder-protocol). */
 export const REGION_CHUNKS = 2;
 
+// ---------------------------------------------------------------------------
+// Factions (mirror of wilder-types)
+// ---------------------------------------------------------------------------
+
+/** Faction identity (u8). Factions are data: see FactionInfo registry. */
+export type FactionId = number;
+export const FACTION_NEUTRAL: FactionId = 0;
+export const FACTION_REBELS: FactionId = 1;
+export const FACTION_FORUM: FactionId = 2;
+
+/** One faction's registry entry, sent in PoiList on join. */
+export interface FactionInfo {
+  id: FactionId;
+  name: string;
+  tagline: string;
+  /** Faction color (RGB packed). */
+  color: number;
+  /** Factions this one attacks on sight (symmetric). */
+  hostile_to: FactionId[];
+}
+
+/**
+ * Per-district combat/capture intensity:
+ * Sanctuary = no combat/capture; Guarded = home turf, no capture, outsider
+ * aggression blocked; Contested = full faction war; Warzone = frontier with
+ * boosted yields.
+ */
+export type DangerLevel = "Sanctuary" | "Guarded" | "Contested" | "Warzone";
+
+/** A named neighborhood: label anchor, danger level, home faction. */
+export interface DistrictInfo {
+  name: string;
+  x: number;
+  z: number;
+  danger: DangerLevel;
+  home_faction: FactionId;
+}
+
 export type TileKind =
   | "Road"
   | "RoadLine"
@@ -58,6 +96,8 @@ export interface Character {
   /** Energy shield granted by equipped armor. Absorbs damage before health. */
   shield: number;
   max_shield: number;
+  /** Faction allegiance (players default to Rebels). */
+  faction: FactionId;
 }
 
 /** Active player abilities (hotbar Q/E/R), resolved server-side. */
@@ -168,6 +208,8 @@ export interface EntitySpawnData {
   variant: number;
   /** Loot containers: primary contained item (floating icon); null otherwise. */
   item?: ItemKind | null;
+  /** Faction allegiance (drives tint/nameplate/hostility). */
+  faction: FactionId;
 }
 
 export interface PropInstance {
@@ -244,6 +286,7 @@ export type C2S =
   | Tagged<"Market", MarketActionMsg>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
+  | Tagged<"MapIntelSub", { on: boolean }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -296,14 +339,68 @@ export interface ZoneInfo {
   z: number;
 }
 
+/**
+ * One actor on the whole-map intel overlay. Coordinates are quantized to
+ * whole meters (i16).
+ */
+export interface AgentBlip {
+  id: number;
+  faction: FactionId;
+  /** 0 = player, 1 = agent, 2 = feral. */
+  kind: number;
+  x: number;
+  z: number;
+}
+
+/** One leaderboard category (e.g. "Wealth", "Kills") with its ranked rows. */
+export interface Board {
+  category: string;
+  rows: BoardRow[];
+}
+
+export interface BoardRow {
+  name: string;
+  faction: FactionId;
+  /** Guild name; null for guildless competitors (all players for now). */
+  guild: string | null;
+  value: number;
+}
+
+/** Rolled-up standing for one faction. */
+export interface FactionStanding {
+  faction: FactionId;
+  members: number;
+  kills: number;
+  deaths: number;
+  treasury: number;
+  regions_held: number;
+  districts_held: number;
+}
+
+/** Rolled-up standing for one guild (agent squad). */
+export interface GuildStanding {
+  name: string;
+  faction: FactionId;
+  members: number;
+  kills: number;
+  wealth: number;
+}
+
+/** Leaderboards payload: top-N boards + faction/guild standings. */
+export interface LeaderboardData {
+  boards: Board[];
+  factions: FactionStanding[];
+  guilds: GuildStanding[];
+}
+
 // ---------------------------------------------------------------------------
 // Economy ledger (K dashboard)
 // ---------------------------------------------------------------------------
 
 /** One side of an economy transaction (mirror of wilder-types TxParty). */
 export type TxParty =
-  | Tagged<"Player", { id: string; name: string }>
-  | Tagged<"Agent", { id: string; name: string }>
+  | Tagged<"Player", { id: string; name: string; faction: FactionId }>
+  | Tagged<"Agent", { id: string; name: string; faction: FactionId }>
   | TaggedUnit<"Mint">
   | TaggedUnit<"Burn">;
 
@@ -431,11 +528,21 @@ export type S2C =
       { vendor: number; kind: EntityKind; offers: VendorOffer[]; wallet: number }
     >
   | Tagged<"VendorResult", { ok: boolean; error: string | null }>
-  | Tagged<"PoiList", { pois: PoiInfo[]; zones: ZoneInfo[] }>
+  | Tagged<
+      "PoiList",
+      {
+        pois: PoiInfo[];
+        zones: ZoneInfo[];
+        factions: FactionInfo[];
+        districts: DistrictInfo[];
+      }
+    >
   | Tagged<"TerritoryState", { cells: TerritoryCell[] }>
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"EconomyState", { stats: EconomyStats; recent: EconTx[] }>
   | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>
+  | Tagged<"MapIntel", { blips: AgentBlip[] }>
+  | Tagged<"LeaderboardState", LeaderboardData>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>
   | Tagged<"Error", { message: string }>;

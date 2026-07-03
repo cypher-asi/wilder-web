@@ -54,6 +54,9 @@ pub enum C2S {
     Vendor { vendor: EntityId, action: VendorAction },
     /// Subscribe/unsubscribe to live economy ledger updates (K dashboard).
     EconomySub { on: bool },
+    /// Subscribe/unsubscribe to whole-map agent blips (map filters). While
+    /// on, the server streams `MapIntel` at ~1 Hz.
+    MapIntelSub { on: bool },
     Chat { text: String },
     Pong { nonce: u32 },
 }
@@ -153,7 +156,16 @@ pub enum S2C {
     /// Persistent points of interest (service buildings) and named resource
     /// zones. Sent once on join so the map can label the world beyond the
     /// player's streaming radius.
-    PoiList { pois: Vec<PoiInfo>, zones: Vec<ZoneInfo> },
+    PoiList {
+        pois: Vec<PoiInfo>,
+        zones: Vec<ZoneInfo>,
+        /// Registered factions (name, color, hostility) for client tinting.
+        #[serde(default)]
+        factions: Vec<FactionInfo>,
+        /// Named neighborhoods with danger level + home faction.
+        #[serde(default)]
+        districts: Vec<DistrictInfo>,
+    },
     /// Territory control overlay: every region not under neutral control.
     TerritoryState { cells: Vec<TerritoryCell> },
     BlueprintsUpdate { known: Vec<String> },
@@ -162,6 +174,11 @@ pub enum S2C {
     EconomyState { stats: EconomyStats, recent: Vec<EconTx> },
     /// Per-tick batch of new ledger transactions for subscribers.
     EconomyTxs { txs: Vec<EconTx>, stats: EconomyStats },
+    /// Whole-map actor blips, streamed ~1 Hz to `MapIntelSub` subscribers.
+    MapIntel { blips: Vec<AgentBlip> },
+    /// Leaderboards + faction/guild standings, refreshed for economy
+    /// dashboard subscribers.
+    LeaderboardState(LeaderboardData),
     Chat { from: String, text: String },
     Ping { nonce: u32 },
     Error { message: String },
@@ -231,6 +248,65 @@ pub struct ZoneInfo {
     pub z: f32,
 }
 
+/// One actor on the whole-map intel overlay. Coordinates are quantized to
+/// whole meters (i16) to keep 1 Hz whole-map updates small.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AgentBlip {
+    pub id: u64,
+    pub faction: FactionId,
+    /// 0 = player, 1 = agent, 2 = feral.
+    pub kind: u8,
+    pub x: i16,
+    pub z: i16,
+}
+
+/// Leaderboards payload: per-category top-N boards plus rolled-up faction and
+/// guild standings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardData {
+    pub boards: Vec<Board>,
+    pub factions: Vec<FactionStanding>,
+    pub guilds: Vec<GuildStanding>,
+}
+
+/// One leaderboard category (e.g. "Wealth", "Kills") with its ranked rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Board {
+    pub category: String,
+    pub rows: Vec<BoardRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardRow {
+    pub name: String,
+    pub faction: FactionId,
+    /// Guild name; None for guildless competitors (all players for now).
+    pub guild: Option<String>,
+    pub value: i64,
+}
+
+/// Rolled-up standing for one faction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactionStanding {
+    pub faction: FactionId,
+    pub members: u32,
+    pub kills: u64,
+    pub deaths: u64,
+    pub treasury: i64,
+    pub regions_held: u32,
+    pub districts_held: u32,
+}
+
+/// Rolled-up standing for one guild (agent squad).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildStanding {
+    pub name: String,
+    pub faction: FactionId,
+    pub members: u32,
+    pub kills: u64,
+    pub wealth: i64,
+}
+
 /// One controlled region on the territory grid. `control`: 1 = player-held,
 /// 2 = enemy-held (neutral regions are never sent).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -283,5 +359,114 @@ mod tests {
         let text = encode(&msg);
         let back: S2C = decode(&text).unwrap();
         matches!(back, S2C::Snapshot { .. });
+    }
+
+    #[test]
+    fn roundtrip_map_intel_sub() {
+        let text = encode(&C2S::MapIntelSub { on: true });
+        match decode::<C2S>(&text).unwrap() {
+            C2S::MapIntelSub { on } => assert!(on),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_map_intel() {
+        let msg = S2C::MapIntel {
+            blips: vec![AgentBlip { id: 9, faction: FACTION_FORUM, kind: 1, x: -120, z: 512 }],
+        };
+        let text = encode(&msg);
+        match decode::<S2C>(&text).unwrap() {
+            S2C::MapIntel { blips } => {
+                assert_eq!(blips.len(), 1);
+                assert_eq!(blips[0].faction, FACTION_FORUM);
+                assert_eq!(blips[0].x, -120);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_leaderboard_state() {
+        let msg = S2C::LeaderboardState(LeaderboardData {
+            boards: vec![Board {
+                category: "Wealth".into(),
+                rows: vec![BoardRow {
+                    name: "Vex".into(),
+                    faction: FACTION_REBELS,
+                    guild: Some("Dead Signal".into()),
+                    value: 4200,
+                }],
+            }],
+            factions: vec![FactionStanding {
+                faction: FACTION_REBELS,
+                members: 250,
+                kills: 12,
+                deaths: 3,
+                treasury: 9000,
+                regions_held: 4,
+                districts_held: 1,
+            }],
+            guilds: vec![GuildStanding {
+                name: "Dead Signal".into(),
+                faction: FACTION_REBELS,
+                members: 30,
+                kills: 5,
+                wealth: 777,
+            }],
+        });
+        let text = encode(&msg);
+        match decode::<S2C>(&text).unwrap() {
+            S2C::LeaderboardState(data) => {
+                assert_eq!(data.boards[0].rows[0].guild.as_deref(), Some("Dead Signal"));
+                assert_eq!(data.factions[0].regions_held, 4);
+                assert_eq!(data.guilds[0].wealth, 777);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_poi_list_with_factions_and_districts() {
+        let msg = S2C::PoiList {
+            pois: vec![],
+            zones: vec![],
+            factions: vec![FactionInfo {
+                id: FACTION_REBELS,
+                name: "Rebels".into(),
+                tagline: "Free the grid.".into(),
+                color: 0x2de0a6,
+                hostile_to: vec![FACTION_FORUM],
+            }],
+            districts: vec![DistrictInfo {
+                name: "Tranquility Gardens".into(),
+                x: 100.0,
+                z: -50.0,
+                danger: DangerLevel::Sanctuary,
+                home_faction: FACTION_REBELS,
+            }],
+        };
+        let text = encode(&msg);
+        match decode::<S2C>(&text).unwrap() {
+            S2C::PoiList { factions, districts, .. } => {
+                assert_eq!(factions[0].hostile_to, vec![FACTION_FORUM]);
+                assert_eq!(districts[0].danger, DangerLevel::Sanctuary);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Pre-faction clients/servers omit the new fields; decoding must fill
+    /// the serde defaults instead of failing.
+    #[test]
+    fn poi_list_decodes_without_faction_fields() {
+        let legacy = r#"{"t":"PoiList","d":{"pois":[],"zones":[]}}"#;
+        match decode::<S2C>(legacy).unwrap() {
+            S2C::PoiList { factions, districts, .. } => {
+                assert!(factions.is_empty());
+                assert!(districts.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

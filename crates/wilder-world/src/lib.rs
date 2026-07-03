@@ -4,6 +4,7 @@
 //! through a command channel; it replies through per-player message channels.
 
 mod chunks;
+pub mod factions;
 mod ledger;
 mod npc;
 
@@ -32,6 +33,7 @@ use wilder_terrain::TerrainGenerator;
 use wilder_types::*;
 
 pub use chunks::ChunkCache;
+use factions::faction_registry;
 use ledger::{Ledger, LedgerSave, SupplyEffect};
 use npc::{mint_agent_identity, npc_spawns_for_chunk, Npc};
 
@@ -143,19 +145,24 @@ fn ensure_starting_weapon(inventory: &mut Inventory) {
     }
 }
 
-/// Ledger party for a player character.
+/// Ledger party for a player character (players are Rebels for now).
 fn player_party(p: &Player) -> TxParty {
-    TxParty::Player { id: p.character.id, name: p.character.name.clone() }
+    TxParty::Player {
+        id: p.character.id,
+        name: p.character.name.clone(),
+        faction: FACTION_REBELS,
+    }
 }
 
-/// Ledger party for an NPC agent.
+/// Ledger party for an NPC agent (hostile NPCs are Forum-aligned ferals).
 fn npc_party(n: &Npc) -> TxParty {
-    TxParty::Agent { id: n.agent_id, name: n.agent_name.clone() }
+    TxParty::Agent { id: n.agent_id, name: n.agent_name.clone(), faction: FACTION_FORUM }
 }
 
 /// Ledger party for a service building (vendor / bank / market terminal).
+/// Services trade with everyone, so they stay neutral.
 fn static_party(s: &StaticEntity) -> TxParty {
-    TxParty::Agent { id: s.agent_id, name: s.name.clone() }
+    TxParty::Agent { id: s.agent_id, name: s.name.clone(), faction: FACTION_NEUTRAL }
 }
 
 /// Stable per-session agent id for a service building, derived from the world
@@ -470,6 +477,10 @@ struct Player {
     /// Last (wild, shards, energy) sent as a WalletUpdate; None forces the
     /// initial send after join. Checked once per tick in replicate().
     wallet_sent: Option<(u32, u32, u32)>,
+    /// Subscribed to whole-map agent blips (map open). Recorded now; the
+    /// MapIntel stream itself ships in Phase 5.
+    #[allow(dead_code)]
+    map_intel: bool,
     dirty: bool,
 }
 
@@ -556,6 +567,7 @@ impl Player {
             health_pct: 1.0,
             variant: 0,
             item: None,
+            faction: FACTION_REBELS,
         }
     }
 }
@@ -793,7 +805,11 @@ impl World {
             self.ledger.record(
                 TxKind::Mint,
                 TxParty::Mint,
-                TxParty::Player { id: character.id, name: character.name.clone() },
+                TxParty::Player {
+                    id: character.id,
+                    name: character.name.clone(),
+                    faction: FACTION_REBELS,
+                },
                 TxAmount::Wild { amount: WALLET_GRANT },
                 0,
             );
@@ -836,6 +852,7 @@ impl World {
             shards,
             energy,
             wallet_sent: None,
+            map_intel: false,
             dirty: true,
         };
         player.sync_shield();
@@ -860,7 +877,13 @@ impl World {
             known: player.blueprints.iter().cloned().collect(),
         });
         let _ = tx.send(S2C::TerritoryState { cells: self.territory_cells() });
-        let _ = tx.send(S2C::PoiList { pois: self.poi_list(), zones: zone_infos() });
+        let _ = tx.send(S2C::PoiList {
+            pois: self.poi_list(),
+            zones: zone_infos(),
+            factions: faction_registry(),
+            // Districts become a server-side concept in Phase 2.
+            districts: vec![],
+        });
         for ability in AbilityKind::ALL {
             let _ = tx.send(S2C::AbilityUpdate { ability, cooldown: 0.0, active: 0.0 });
         }
@@ -989,6 +1012,12 @@ impl World {
             C2S::Market(action) => self.market_action(entity, action),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::EconomySub { on } => self.economy_sub(entity, on),
+            C2S::MapIntelSub { on } => {
+                // Stub: record the subscription; Phase 5 streams MapIntel to it.
+                if let Some(player) = self.players.get_mut(&entity) {
+                    player.map_intel = on;
+                }
+            }
             C2S::Pong { .. } => {}
             C2S::Authenticate { .. } | C2S::JoinWorld { .. } => {}
         }
@@ -1966,6 +1995,7 @@ impl World {
                                 TxParty::Player {
                                     id: player.character.id,
                                     name: player.character.name.clone(),
+                                    faction: FACTION_REBELS,
                                 },
                                 TxAmount::Item { kind, count },
                                 0,
@@ -2138,6 +2168,7 @@ impl World {
             .unwrap_or(TxParty::Agent {
                 id: static_agent_id(self.seed, 0),
                 name: "Market".into(),
+                faction: FACTION_NEUTRAL,
             })
     }
 
@@ -2231,7 +2262,8 @@ impl World {
                 // Ledger: escrowed items leave the market agent for the
                 // buyer; the buyer's WILD splits into seller proceeds and
                 // the market fee (routed to territory holders or burned).
-                let seller_party = TxParty::Player { id: seller, name: seller_name };
+                let seller_party =
+                    TxParty::Player { id: seller, name: seller_name, faction: FACTION_REBELS };
                 self.ledger.record(
                     TxKind::MarketBuy,
                     market_agent.clone(),
@@ -3525,6 +3557,7 @@ impl World {
                         .iter()
                         .max_by_key(|s| s.count)
                         .map(|s| s.kind),
+                    faction: FACTION_NEUTRAL,
                 },
                 snap: EntitySnapshot {
                     id: container.entity,
@@ -3556,6 +3589,7 @@ impl World {
                     // Currency type drives the client's pickup look.
                     variant: pickup.currency.variant(),
                     item: None,
+                    faction: FACTION_NEUTRAL,
                 },
                 snap: EntitySnapshot {
                     id: pickup.entity,
@@ -3587,6 +3621,7 @@ impl World {
                     health_pct: health,
                     variant: node.variant,
                     item: None,
+                    faction: FACTION_NEUTRAL,
                 },
                 snap: EntitySnapshot {
                     id: node.entity,
@@ -3613,6 +3648,7 @@ impl World {
                     health_pct: 1.0,
                     variant: s.variant,
                     item: None,
+                    faction: FACTION_NEUTRAL,
                 },
                 snap: EntitySnapshot {
                     id: s.entity,

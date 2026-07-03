@@ -11,14 +11,18 @@ import { ChunkStore } from "../game/collision";
 import { VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import {
   AbilityKind,
+  AgentBlip,
   AnimState,
+  DistrictInfo,
   EconTx,
   EconomyStats,
   EntityKind,
   EntitySpawnData,
+  FactionInfo,
   Inventory,
   ItemKind,
   ItemStack,
+  LeaderboardData,
   MarketListing,
   PoiInfo,
   ProductionJob,
@@ -414,6 +418,14 @@ interface UiState {
   pois: PoiInfo[];
   /** Named resource-bias zones ringing the spawn district. */
   zones: ZoneInfo[];
+  /** Registered factions (name, color, hostility), sent in PoiList on join. */
+  factions: FactionInfo[];
+  /** Named neighborhoods with danger level + home faction (Phase 2 fills). */
+  districts: DistrictInfo[];
+  /** Whole-map actor blips from the MapIntel subscription (Phase 5 streams). */
+  mapIntel: AgentBlip[];
+  /** Latest leaderboard snapshot (Phase 4 emits). */
+  leaderboard: LeaderboardData | null;
   /** Latest vendor snapshot (offers + wallet) from the server. */
   vendor: { id: number; kind: EntityKind; offers: VendorOffer[]; wallet: number } | null;
   /** Nearest vendor building in interact range, if any. */
@@ -513,6 +525,10 @@ export const useGame: import("zustand").UseBoundStore<
   marketOpen: false,
   pois: [],
   zones: [],
+  factions: [],
+  districts: [],
+  mapIntel: [],
+  leaderboard: null,
   vendor: null,
   nearVendor: null,
   vendorOpen: false,

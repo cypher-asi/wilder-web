@@ -12,6 +12,63 @@ pub type EntityId = u64;
 /// buildings, the market). Minted fresh whenever an agent spawns.
 pub type AgentId = Uuid;
 
+// ---------------------------------------------------------------------------
+// Factions
+// ---------------------------------------------------------------------------
+
+/// Faction identity. Factions are data, not enums: the registry (name, color,
+/// hostility matrix) lives server-side in `wilder-world::factions` and is
+/// serialized to clients, so adding a faction is a data change.
+pub type FactionId = u8;
+/// Unaffiliated: players/agents/services outside the faction war. Neutral is
+/// hostile to no one and never appears in the registry.
+pub const FACTION_NEUTRAL: FactionId = 0;
+/// Player faction (all players default to Rebels for now).
+pub const FACTION_REBELS: FactionId = 1;
+/// The hostile faction; existing hostile NPCs fold into it as low-tier ferals.
+pub const FACTION_FORUM: FactionId = 2;
+
+/// One faction's registry entry, serialized to clients on join (in `PoiList`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactionInfo {
+    pub id: FactionId,
+    pub name: String,
+    pub tagline: String,
+    /// Faction color (RGB packed), used for tints, blips and leaderboards.
+    pub color: u32,
+    /// Factions this one attacks on sight. Hostility is symmetric: either
+    /// side listing the other makes the pair hostile.
+    pub hostile_to: Vec<FactionId>,
+}
+
+/// Per-district combat/capture intensity.
+///
+/// - `Sanctuary`: no combat of any kind and no territory capture; everyone
+///   rests, trades and crafts side by side.
+/// - `Guarded`: faction home turf. Capture is disabled and aggression by
+///   outsiders is blocked (combat only in self-defense).
+/// - `Contested`: full faction war — combat and capture unrestricted.
+/// - `Warzone`: frontier districts. Full war plus boosted loot/resource
+///   yields to pay for the risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DangerLevel {
+    Sanctuary,
+    Guarded,
+    Contested,
+    Warzone,
+}
+
+/// A named neighborhood with its label anchor (world meters), danger level
+/// and home faction (`FACTION_NEUTRAL` for unclaimed districts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistrictInfo {
+    pub name: String,
+    pub x: f32,
+    pub z: f32,
+    pub danger: DangerLevel,
+    pub home_faction: FactionId,
+}
+
 /// World-space chunk coordinate. Chunks are CHUNK_SIZE x CHUNK_SIZE meters on the XZ plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkCoord {
@@ -80,6 +137,9 @@ pub struct Character {
     pub shield: f32,
     #[serde(default)]
     pub max_shield: f32,
+    /// Faction allegiance (players default to Rebels).
+    #[serde(default)]
+    pub faction: FactionId,
 }
 
 impl Character {
@@ -394,6 +454,9 @@ pub struct EntitySpawnData {
     /// float its icon over the crate. None for every other entity kind.
     #[serde(default)]
     pub item: Option<ItemKind>,
+    /// Faction allegiance (drives tint/nameplate/hostility on the client).
+    #[serde(default)]
+    pub faction: FactionId,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,10 +538,20 @@ impl ChunkData {
 #[serde(tag = "t", content = "d")]
 pub enum TxParty {
     /// A player character (persistent id + display name).
-    Player { id: CharacterId, name: String },
+    Player {
+        id: CharacterId,
+        name: String,
+        #[serde(default)]
+        faction: FactionId,
+    },
     /// A non-player actor: NPCs get a fresh identity per spawn; vendor
     /// buildings and the market keep a stable identity per session.
-    Agent { id: AgentId, name: String },
+    Agent {
+        id: AgentId,
+        name: String,
+        #[serde(default)]
+        faction: FactionId,
+    },
     /// Issuance source: gather nodes, NPC spawn inventories, wallet grants,
     /// vendor stock, crafting output.
     Mint,

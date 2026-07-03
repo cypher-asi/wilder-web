@@ -576,7 +576,20 @@ export class GameConnection {
         break;
       }
       case "PoiList": {
-        ui.set({ pois: msg.d.pois, zones: msg.d.zones });
+        ui.set({
+          pois: msg.d.pois,
+          zones: msg.d.zones,
+          factions: msg.d.factions ?? [],
+          districts: msg.d.districts ?? [],
+        });
+        break;
+      }
+      case "MapIntel": {
+        ui.set({ mapIntel: msg.d.blips });
+        break;
+      }
+      case "LeaderboardState": {
+        ui.set({ leaderboard: msg.d });
         break;
       }
       case "TerritoryState": {

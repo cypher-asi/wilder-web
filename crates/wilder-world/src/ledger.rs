@@ -284,13 +284,14 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wilder_types::{FACTION_NEUTRAL, FACTION_REBELS};
 
     fn player() -> TxParty {
-        TxParty::Player { id: uuid::Uuid::nil(), name: "Runner".into() }
+        TxParty::Player { id: uuid::Uuid::nil(), name: "Runner".into(), faction: FACTION_REBELS }
     }
 
     fn agent() -> TxParty {
-        TxParty::Agent { id: uuid::Uuid::nil(), name: "Armory".into() }
+        TxParty::Agent { id: uuid::Uuid::nil(), name: "Armory".into(), faction: FACTION_NEUTRAL }
     }
 
     #[test]

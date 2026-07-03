@@ -13,6 +13,8 @@ interface SessionState {
   setAuth: (token: string, username: string) => void;
   setCharacters: (chars: CharacterSummary[]) => void;
   enterGame: (character: CharacterSummary) => void;
+  /** Leave the game world and return to the character picker. */
+  exitToCharacters: () => void;
   enterAssetLab: () => void;
   exitAssetLab: () => void;
   logout: () => void;
@@ -32,6 +34,7 @@ export const useSession = create<SessionState>((set) => ({
   },
   setCharacters: (characters) => set({ characters }),
   enterGame: (character) => set({ activeCharacter: character, screen: "game" }),
+  exitToCharacters: () => set({ activeCharacter: null, screen: "characters" }),
   enterAssetLab: () => set({ screen: "assetlab" }),
   exitAssetLab: () => set({ screen: "login" }),
   logout: () => {

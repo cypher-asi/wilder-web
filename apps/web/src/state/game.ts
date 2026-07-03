@@ -304,6 +304,8 @@ interface UiState {
   marketOpen: boolean;
   /** Fullscreen city map overlay (M key). */
   mapOpen: boolean;
+  /** Pause/game menu overlay (Escape). */
+  menuOpen: boolean;
   /** Active visual style preset (persisted to localStorage). */
   visualStyle: VisualStyleId;
 
@@ -311,6 +313,9 @@ interface UiState {
   pushChat: (line: ChatLine) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
+  toggleMenu: () => void;
+  /** Close every overlay/panel (used when leaving the game screen). */
+  closeOverlays: () => void;
   setVisualStyle: (style: VisualStyleId) => void;
 }
 
@@ -356,6 +361,7 @@ export const useGame: import("zustand").UseBoundStore<
   nearMarket: false,
   marketOpen: false,
   mapOpen: false,
+  menuOpen: false,
   visualStyle: loadVisualStyle(),
 
   set: (partial) => set(partial),
@@ -363,6 +369,16 @@ export const useGame: import("zustand").UseBoundStore<
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
+  toggleMenu: () => set((s) => ({ menuOpen: !s.menuOpen })),
+  closeOverlays: () =>
+    set({
+      menuOpen: false,
+      mapOpen: false,
+      chatOpen: false,
+      inventoryOpen: false,
+      craftOpen: false,
+      marketOpen: false,
+    }),
   setVisualStyle: (style) => {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(STYLE_STORAGE_KEY, style);

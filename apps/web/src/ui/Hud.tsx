@@ -6,6 +6,7 @@ import { AbilityKind, ItemKind } from "../net/protocol";
 import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
+import { GameMenu } from "./GameMenu";
 import { HoloMap } from "./HoloMap";
 import { Minimap } from "./Minimap";
 
@@ -37,6 +38,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <HoloMap />
         </>
       )}
+      {/* Outside the joined gate so exit/logout stay reachable mid-reconnect. */}
+      <GameMenu />
     </div>
   );
 }

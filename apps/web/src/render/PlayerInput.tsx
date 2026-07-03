@@ -107,6 +107,32 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       // While the fullscreen map is open only map keys work (HoloMap handles
       // Escape/T itself); everything else must not reach the paused game.
       if (useGame.getState().mapOpen && event.code !== "KeyM") return;
+      // While the game menu is open, Escape (resume) is the only game key.
+      if (useGame.getState().menuOpen) {
+        if (event.code === "Escape" && !event.repeat) {
+          event.preventDefault();
+          useGame.getState().set({ menuOpen: false });
+        }
+        return;
+      }
+      if (event.code === "Escape" && !event.repeat) {
+        event.preventDefault();
+        // Escape closes any visibly open panel first; with nothing open it
+        // brings up the game menu. Flags can be set while the panel renders
+        // nothing (no inventory yet, walked away from a station) — those
+        // must not swallow the keypress.
+        const ui = useGame.getState();
+        const panelVisible =
+          (ui.inventoryOpen && ui.inventory !== null) ||
+          (ui.craftOpen && ui.nearStation !== null) ||
+          (ui.marketOpen && ui.nearMarket);
+        if (panelVisible) {
+          ui.set({ inventoryOpen: false, craftOpen: false, marketOpen: false });
+        } else {
+          ui.set({ menuOpen: true });
+        }
+        return;
+      }
       keys.current[event.code] = true;
       if (event.code === "KeyI" || event.code === "Tab") {
         event.preventDefault();

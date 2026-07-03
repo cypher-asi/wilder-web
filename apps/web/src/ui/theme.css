@@ -1151,6 +1151,38 @@ body {
   pointer-events: auto;
 }
 
+/* Pause / game menu (Escape): dim backdrop over the frozen world. */
+.menu-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 6, 11, 0.72);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+.menu-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.38em;
+  text-align: center;
+  margin: 0 0 6px;
+  color: var(--white);
+  text-shadow: var(--rgb-split);
+}
+
+.menu-hint {
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  text-align: center;
+  color: var(--text-dim);
+  margin-bottom: 22px;
+}
+
 .holo-map {
   background: #010409;
   cursor: grab;

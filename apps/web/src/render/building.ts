@@ -682,21 +682,53 @@ function buildRoof(
 // ---------------------------------------------------------------------------
 
 /**
- * Facade wall tile from the skyscraper kit: 12 m wide x ~12 m tall modules
- * meant to tile on a 12 m grid at authored scale. The kit authors every
- * module with its pivot on the wall plane (front +Z), so each module carries
- * its own wall offset: flat window panels sit ~0.3 m deep while balcony
- * modules reach several meters past the wall — that overhang is authored.
+ * Facade wall tile from the skyscraper kit. The kit builds a skyscraper from
+ * three tile kinds (verified by probing the authored FBX geometry):
+ *  - flat tiles (~1 m relief window/slat panels) — safe anywhere, including
+ *    face ends where two faces meet at a building corner;
+ *  - relief tiles (balcony/greeble modules protruding 4-6.6 m) — mid-face
+ *    only; at a corner their side trusses stab through the adjacent face;
+ *  - corner/crown pieces (L-shaped plans, setback tops) — not tileable on a
+ *    flat wall grid at all, so they never enter this pool.
  */
 export interface KitTowerPanel {
   assetId: string;
   /** Authored module height in meters (from Asset Lab meta dimensions). */
   h: number;
+  /** Authored grid pitch (width). Falls back to KitTowerConfig.moduleWidth. */
+  w?: number;
+  /** Authored depth (wall relief) in meters; classifies flat vs relief. */
+  d?: number;
   /**
    * Model-space distance from the pivot back to the authored wall plane
    * (from Asset Lab meta bbox). Falls back to KitTowerConfig.wallZ.
    */
   wallZ?: number;
+  /**
+   * Rotate 180° when placing: some kit tiles (most slum storefronts) are
+   * authored facing the opposite direction from the skyscraper modules.
+   */
+  flip?: boolean;
+  /**
+   * L-shaped corner module: one 12 m facade leg along each adjacent face,
+   * authored with wall planes on the kit's x=0 / y=12 grid lines. Placed
+   * only at building corners, never as a wall tile; wallZ is the
+   * pivot-to-wall-plane distance (same on both axes).
+   */
+  corner?: boolean;
+}
+
+/** Tiles with no more relief than this are safe at face ends/corners. */
+const FLAT_TILE_DEPTH = 1.6;
+
+/**
+ * Kits stack tiles on a fixed vertical grid (6 m for the skyscraper kit,
+ * 3 m for the mid-rise kits); authored heights run a few tenths over
+ * (12.145, 12.358, ...) because tiles carry a trim lip that overlaps the
+ * seam of the row above. Stack by grid height, not bbox height.
+ */
+function gridHeight(p: KitTowerPanel, row: number): number {
+  return Math.max(row, Math.round(p.h / row) * row);
 }
 
 /**
@@ -705,31 +737,80 @@ export interface KitTowerPanel {
  * configs through buildBuildingModel to preview panel setups.
  */
 export interface KitTowerConfig {
-  /** Module pool; one is picked per row (seeded by building style). */
+  /** Upper-band module pool; one is picked per row (seeded by style). */
   panels: KitTowerPanel[];
+  /**
+   * L-corner modules for the upper bands (one picked per building). Placed
+   * at building corners on grid-multiple footprints; wall tiles then only
+   * fill the slots between the corner legs.
+   */
+  cornerPanels?: KitTowerPanel[];
+  /**
+   * Street-level storefront tiles forming the ground band. When present and
+   * the footprint fits the grid, the whole building is kit meshes and no
+   * procedural storefront is generated. Entries with corner:true are the
+   * band's L-corner pieces.
+   */
+  groundPanels?: KitTowerPanel[];
   /** Authored module width in meters (grid pitch along each face). */
   moduleWidth: number;
+  /**
+   * Vertical grid pitch in meters (row stacking height). Defaults to 6, the
+   * skyscraper kit's grid; the mid-rise kits stack on 3 m rows.
+   */
+  rowHeight?: number;
   /** Fallback wall-plane offset for panels without their own wallZ. */
   wallZ: number;
-  /** Height of the storefront base the panels stack on top of. */
+  /** Procedural storefront height used when groundPanels cannot be placed. */
   baseHeight: number;
   /** Render facade panels only (no procedural geometry). */
   panelsOnly?: boolean;
   /** Treat any building as a kit tower regardless of archetype/stories. */
   forceKitTower?: boolean;
+  /**
+   * Stacked-slice kit (CB01): each panel is a complete floor slice of the
+   * whole building plan (U-shaped 12x4 m band), not a per-face wall tile.
+   * Rows place one slice centered on the footprint instead of tiling faces.
+   */
+  stacked?: boolean;
 }
 
-// The full 12 m x 12 m wall-tile class of the skyscraper kit: balcony
-// modules (01-04) and flat window panels (16, 18). h/wallZ come from the
-// Asset Lab authored metadata (see stagePrefabs.ts for the derivation).
+// The upper-story wall classes of the skyscraper kit: 12x12 m balcony
+// modules (01-04, relief) and the flat window panel (18), plus the 6x6 m
+// flat cladding filler (17) that tops off bands whole 12 m rows cannot
+// fill. Module10 is the L-corner piece pairing with them (facade planes
+// authored on the x=0 / y=12 grid lines, ~6.07 m from the pivot).
+// h/w/d/wallZ come from the Asset Lab authored metadata.
 export const DEFAULT_KIT_TOWER_CONFIG: KitTowerConfig = {
   panels: [
-    { assetId: "lab_sm_skyscraper_module01", h: 12.145, wallZ: 1.813 },
-    { assetId: "lab_sm_skyscraper_module02", h: 12.081, wallZ: 1.843 },
-    { assetId: "lab_sm_skyscraper_module03", h: 12.358, wallZ: 1.8 },
-    { assetId: "lab_sm_skyscraper_module04", h: 12.103, wallZ: 3.012 },
-    { assetId: "lab_sm_skyscraper_module16", h: 12.179, wallZ: 0.743 },
-    { assetId: "lab_sm_skyscraper_module18", h: 12, wallZ: 0.294 },
+    { assetId: "lab_sm_skyscraper_module01", h: 12.145, d: 4.203, wallZ: 1.813 },
+    { assetId: "lab_sm_skyscraper_module02", h: 12.081, d: 4.101, wallZ: 1.843 },
+    { assetId: "lab_sm_skyscraper_module03", h: 12.358, d: 4.189, wallZ: 1.8 },
+    { assetId: "lab_sm_skyscraper_module04", h: 12.103, d: 6.614, wallZ: 3.012 },
+    { assetId: "lab_sm_skyscraper_module18", h: 12, d: 1.005, wallZ: 0.294 },
+    { assetId: "lab_sm_skyscraper_module17", h: 6, w: 6, d: 0.426, wallZ: 0.213 },
+  ],
+  cornerPanels: [
+    { assetId: "lab_sm_skyscraper_module10", h: 12.224, w: 12, wallZ: 6.07, corner: true },
+  ],
+  // Street-level tiles, in two coherent styles (grouped by authored height):
+  // - the 12 m corporate storefront chunk (skyscraper module16) plus its
+  //   L-corner variant (module15);
+  // - the 4 m slum shop strip (mixed 3/5/6 m fronts: shops, shutters, bars).
+  // Most slum fronts are authored facing +y (opposite the skyscraper
+  // modules), hence flip; 04 is a shuttered service wall authored like the
+  // skyscraper tiles.
+  groundPanels: [
+    { assetId: "lab_sm_skyscraper_module16", h: 12.179, w: 12, d: 1.485, wallZ: 0.743 },
+    { assetId: "lab_sm_skyscraper_module15", h: 12.291, w: 12, wallZ: 6.02, corner: true },
+    { assetId: "lab_sm_slum_storefront01", h: 4, w: 3, d: 0.614, wallZ: 0.258, flip: true },
+    { assetId: "lab_sm_slum_storefront02", h: 4, w: 3, d: 0.416, wallZ: 0.108, flip: true },
+    { assetId: "lab_sm_slum_storefront03", h: 4, w: 3, d: 0.455, wallZ: 0.093, flip: true },
+    { assetId: "lab_sm_slum_storefront04", h: 4, w: 6, d: 0.336, wallZ: 0.154 },
+    { assetId: "lab_sm_slum_storefront05", h: 4, w: 6, d: 0.522, wallZ: 0.176, flip: true },
+    { assetId: "lab_sm_slum_storefront06", h: 4, w: 6, d: 0.577, wallZ: 0.189, flip: true },
+    { assetId: "lab_sm_slum_storefront07", h: 4, w: 6, d: 0.44, wallZ: 0.21, flip: true },
+    { assetId: "lab_sm_storefront_closed", h: 4, w: 5, d: 0.406, wallZ: 0.125, flip: true },
   ],
   moduleWidth: 12,
   wallZ: 1.81,
@@ -747,12 +828,220 @@ export function isKitTower(b: BuildingInstance): boolean {
 }
 
 /**
- * Wrap the upper mass (above the storefront base) with facade panels exactly
- * as the kit authored them: whole modules only, at 1:1 scale, tiled on the
- * kit's grid pitch and stacked by each module's own authored height. Leftover
- * face ends and the band below the parapet stay bare and read as the dark
- * mechanical core. Each module's authored wall plane embeds 0.1 m behind the
- * building wall; balcony greebles overhang by their authored depth.
+ * Corner slots for L-corner modules: [sx, sz, ry]. The modules' facades
+ * face local +x/+z (post at that corner), so ry=0 fits the (+,+) building
+ * corner and each further corner is a 90° step.
+ */
+const CORNER_SLOTS: [number, number, number][] = [
+  [1, 1, 0],
+  [1, -1, Math.PI / 2],
+  [-1, -1, Math.PI],
+  [-1, 1, (3 * Math.PI) / 2],
+];
+
+/**
+ * Pick the building corners that take an L-corner module. Each L covers
+ * 12 m along both adjacent faces, so a 12 m face can only take one L
+ * (two would overlap); longer faces take one per corner. Greedy over the
+ * fixed slot order; on a 12x12 footprint this yields the two diagonal
+ * corners (the vendor's own thin-tower pattern).
+ */
+function selectCorners(w: number, d: number): [number, number, number][] {
+  const placed: [number, number, number][] = [];
+  const legs = new Map<string, number>();
+  for (const c of CORNER_SLOTS) {
+    const faces: [string, number][] = [
+      [c[1] > 0 ? "back" : "front", w],
+      [c[0] > 0 ? "right" : "left", d],
+    ];
+    if (faces.some(([f, len]) => (legs.get(f) ?? 0) > 0 && len < 24)) continue;
+    for (const [f] of faces) legs.set(f, (legs.get(f) ?? 0) + 1);
+    placed.push(c);
+  }
+  return placed;
+}
+
+/** Corner key ("sx,sz") for one end of a face (slot k=0 or k=n-1). */
+function faceEndCorner(f: Face, atStart: boolean): string {
+  return f.axis === "z" ? `${atStart ? -1 : 1},${f.sign}` : `${f.sign},${atStart ? -1 : 1}`;
+}
+
+/** Place one L-corner module at each selected corner of a band. */
+function placeCorners(
+  kit: KitLocalPlacement[],
+  mod: KitTowerPanel,
+  corners: [number, number, number][],
+  w: number,
+  d: number,
+  y: number,
+  cfg: KitTowerConfig,
+): void {
+  // Corner wall planes sit on the facade side of the pivot (unlike straight
+  // tiles, whose pivot is outside the wall), so the pivot goes wallZ inside
+  // the building wall, plus the same 0.1 m embed as the straight tiles.
+  const dist = (mod.wallZ ?? cfg.wallZ) + 0.1;
+  for (const [sx, sz, ry] of corners) {
+    kit.push({ assetId: mod.assetId, x: sx * (w / 2 - dist), y, z: sz * (d / 2 - dist), ry });
+  }
+}
+
+/**
+ * Randomized exact fill of a face length with the group's tile widths
+ * (recursive subset-sum). Returns the width sequence, or null when the
+ * widths cannot compose the length exactly.
+ */
+function fillWidths(len: number, widths: number[], rng: () => number): number[] | null {
+  if (len < 1e-6) return [];
+  const order = [...widths].sort(() => rng() - 0.5);
+  for (const tw of order) {
+    if (tw > len + 1e-6) continue;
+    const rest = fillWidths(len - tw, widths, rng);
+    if (rest) return [tw, ...rest];
+  }
+  return null;
+}
+
+/**
+ * Street-level band of storefront tiles around all four faces. The ground
+ * pool splits into coherent style groups by band height (the 12 m corporate
+ * storefront chunk vs the 4 m slum shop strip); one group is picked per
+ * building among those whose tile widths exactly fill every face, so the
+ * ground floor has no bare gaps. Returns the band height (the upper bands'
+ * baseY), or null when nothing fits and the caller keeps the procedural
+ * storefront.
+ */
+function buildKitTowerGround(
+  b: BuildingInstance,
+  kit: KitLocalPlacement[],
+  w: number,
+  d: number,
+  cfg: KitTowerConfig,
+): number | null {
+  const pool = cfg.groundPanels ?? [];
+  if (pool.length === 0) return null;
+  const rng = mulberry(b.style ^ 0x3d0f8b21);
+
+  const groups = new Map<number, KitTowerPanel[]>();
+  for (const p of pool) {
+    const key = Math.round(p.h);
+    groups.set(key, [...(groups.get(key) ?? []), p]);
+  }
+  const candidates = [...groups.entries()].filter(([, tiles]) => {
+    const widths = [...new Set(tiles.filter((t) => !t.corner).map((t) => t.w ?? cfg.moduleWidth))];
+    return fillWidths(w, widths, rng) !== null && fillWidths(d, widths, rng) !== null;
+  });
+  if (candidates.length === 0) return null;
+  const [bandH, group] = candidates[Math.floor(rng() * candidates.length)];
+  const tiles = group.filter((t) => !t.corner);
+  const cornerTiles = group.filter((t) => t.corner);
+  const widths = [...new Set(tiles.map((t) => t.w ?? cfg.moduleWidth))];
+
+  // L-corner pieces (12 m legs) need every face to sit on the 12 m grid.
+  const legW = cfg.moduleWidth;
+  const corners =
+    cornerTiles.length > 0 && w % legW === 0 && d % legW === 0 ? selectCorners(w, d) : [];
+  if (corners.length > 0) {
+    placeCorners(kit, cornerTiles[Math.floor(rng() * cornerTiles.length)], corners, w, d, 0, cfg);
+  }
+  const covered = new Set(corners.map(([sx, sz]) => `${sx},${sz}`));
+
+  const faces: Face[] = [
+    { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 },
+    { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 },
+    { axis: "x", wall: -w / 2, sign: -1, len: d, center: 0 },
+    { axis: "x", wall: w / 2, sign: 1, len: d, center: 0 },
+  ];
+  for (const f of faces) {
+    const startLeg = covered.has(faceEndCorner(f, true)) ? legW : 0;
+    const endLeg = covered.has(faceEndCorner(f, false)) ? legW : 0;
+    const span = f.len - startLeg - endLeg;
+    if (span <= 0) continue;
+    const run = fillWidths(span, widths, rng);
+    if (!run) continue; // leftover span the widths cannot compose stays bare
+    let along = -f.len / 2 + startLeg;
+    for (const tw of run) {
+      const options = tiles.filter((t) => (t.w ?? cfg.moduleWidth) === tw);
+      const mod = options[Math.floor(rng() * options.length)];
+      const out = (mod.wallZ ?? cfg.wallZ) - 0.1;
+      const pl = facePlacement(f, mod.assetId, along + tw / 2, 0, out);
+      if (mod.flip) pl.ry += Math.PI;
+      kit.push(pl);
+      along += tw;
+    }
+  }
+  return bandH;
+}
+
+/**
+ * Stacked-slice facade (CB01 mid-rise kit): each module is a floor slice of
+ * the whole 12 m building plan — a facade band with ~4 m side returns (U
+ * shape), or a full-plan ring — with the pivot at the plan center, not a
+ * per-face wall tile. U slices go on the front and back of the footprint
+ * with the same module per row so their side returns meet mid-face; ring
+ * slices sit once, centered. Footprints should be one module wide and about
+ * two U-slice depths deep (e.g. 12 x 8 m). Returns the stack top y.
+ */
+function buildStackedFacade(
+  b: BuildingInstance,
+  kit: KitLocalPlacement[],
+  w: number,
+  d: number,
+  baseY: number,
+  height: number,
+  cfg: KitTowerConfig,
+): number {
+  if (cfg.panels.length === 0) return baseY;
+  const rng = mulberry(b.style ^ 0x8c17f2ad);
+  const rowH = cfg.rowHeight ?? 6;
+  const front: Face = { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 };
+  const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
+  let y = baseY;
+  for (;;) {
+    const fits = cfg.panels.filter((p) => y + gridHeight(p, rowH) <= height + 0.6);
+    if (fits.length === 0) break;
+    const mod = fits[Math.floor(rng() * fits.length)];
+    const sliceD = mod.d ?? 4;
+    if (sliceD >= d - 1) {
+      // Full-plan ring slice: one per row, centered, facing the street.
+      kit.push({ assetId: mod.assetId, x: 0, y, z: 0, ry: Math.PI });
+    } else {
+      // U slices front + back, placed so their open ends butt exactly at
+      // the footprint midline (coplanar side-wall overlap z-fights); any
+      // slice overrun past d/2 pokes outward past the wall plane instead.
+      for (const f of [front, back]) {
+        kit.push(facePlacement(f, mod.assetId, 0, y, (sliceD - d) / 2));
+      }
+    }
+    y += gridHeight(mod, rowH);
+  }
+  return y;
+}
+
+/** One horizontal band of facade tiles, following the kit's assembly rules. */
+interface KitTowerRow {
+  /** Mid-face tile for this band (balcony/relief module). */
+  relief: KitTowerPanel;
+  /** Corner-safe tile used at face ends (flat panel). */
+  flat: KitTowerPanel;
+  /** Grid pitch shared by both tiles of the band. */
+  pitch: number;
+  y: number;
+  h: number;
+}
+
+/**
+ * Wrap the upper mass (above the storefront base) with facade tiles exactly
+ * as the kit assembles them: whole modules at authored 1:1 scale on the kit's
+ * 6 m grid, wall plane embedded 0.1 m into the mass. Face ends (building
+ * corners) always take flat tiles; relief balcony tiles only fill interior
+ * slots, so adjacent faces butt cleanly at corners.
+ *
+ * One flat + one relief module is chosen per building and repeated on every
+ * full row: authored heights overrun the 12 m grid by a trim lip
+ * (12.145, 12.358, ...) that is designed to mesh with a copy of the same
+ * module stacked above — mixing modules per row makes those lips interpenetrate
+ * the band above. Part-height leftovers get the small filler class (6 m);
+ * anything below that stays bare and reads as the dark core.
  */
 function buildKitTowerFacade(
   b: BuildingInstance,
@@ -764,21 +1053,61 @@ function buildKitTowerFacade(
   cfg: KitTowerConfig,
 ): void {
   if (cfg.panels.length === 0) return;
+  const flats = cfg.panels.filter((p) => (p.d ?? 0) <= FLAT_TILE_DEPTH);
+  const reliefs = cfg.panels.filter((p) => (p.d ?? 0) > FLAT_TILE_DEPTH);
 
-  // One module variant per row (not per column), so each level reads as a
-  // deliberate band; seeded per building for variety across the block.
-  // Rows stack at each module's authored height — no vertical stretch.
+  // Building-wide picks, seeded per building for variety across the block.
   const rng = mulberry(b.style ^ 0x8c17f2ad);
-  const rowMods: KitTowerPanel[] = [];
-  const rowYs: number[] = [];
-  // Allow a small tolerance so a ~12.3 m module still fits a 12 m band.
-  for (let y = baseY; height - y >= cfg.panels[0].h * 0.95; ) {
-    const candidates = cfg.panels.filter((p) => y + p.h <= height + 0.6);
-    if (candidates.length === 0) break;
-    const mod = candidates[Math.floor(rng() * candidates.length)];
-    rowMods.push(mod);
-    rowYs.push(y);
-    y += mod.h;
+  const pick = (pool: KitTowerPanel[]) => pool[Math.floor(rng() * pool.length)];
+  const rowH = cfg.rowHeight ?? 6;
+  const mainPitch = cfg.moduleWidth;
+  const mainFlats = flats.filter((p) => (p.w ?? mainPitch) === mainPitch);
+  const fillers = flats.filter((p) => (p.w ?? mainPitch) < mainPitch);
+  if (mainFlats.length === 0) return;
+  const flat = pick(mainFlats);
+  const relief = reliefs.length > 0 ? pick(reliefs) : flat;
+  const filler = fillers.length > 0 ? pick(fillers) : undefined;
+
+  // L-corner module: takes the corner slots of every full-height row when
+  // the footprint sits on the kit's 12 m grid (its legs are 12 m long).
+  const cornerPool = (cfg.cornerPanels ?? []).filter((p) => p.corner);
+  const useCorners = cornerPool.length > 0 && w % mainPitch === 0 && d % mainPitch === 0;
+  const cornerMod = useCorners ? pick(cornerPool) : undefined;
+  const corners = cornerMod ? selectCorners(w, d) : [];
+  const covered = new Set(corners.map(([sx, sz]) => `${sx},${sz}`));
+
+  const rows: KitTowerRow[] = [];
+  // Tolerance covers the authored trim lip that overhangs the grid height.
+  for (let y = baseY; ; ) {
+    const fits = (p: KitTowerPanel) => y + gridHeight(p, rowH) <= height + 0.6;
+    let band: KitTowerRow | undefined;
+    if (fits(flat)) {
+      band = {
+        relief: fits(relief) ? relief : flat,
+        flat,
+        pitch: mainPitch,
+        y,
+        h: gridHeight(flat, rowH),
+      };
+    } else if (filler && fits(filler)) {
+      band = {
+        relief: filler,
+        flat: filler,
+        pitch: filler.w ?? mainPitch,
+        y,
+        h: gridHeight(filler, rowH),
+      };
+    }
+    if (!band) break;
+    rows.push(band);
+    y += band.h;
+  }
+
+  for (const row of rows) {
+    // Corner legs only mesh with full-pitch rows of matching grid height.
+    if (cornerMod && row.pitch === mainPitch && row.h === gridHeight(cornerMod, rowH)) {
+      placeCorners(kit, cornerMod, corners, w, d, row.y, cfg);
+    }
   }
 
   const faces: Face[] = [
@@ -788,17 +1117,28 @@ function buildKitTowerFacade(
     { axis: "x", wall: w / 2, sign: 1, len: d, center: 0 },
   ];
   for (const f of faces) {
-    const n = Math.floor(f.len / cfg.moduleWidth);
-    if (n < 1) continue;
-    const rowW = n * cfg.moduleWidth;
-    for (let r = 0; r < rowMods.length; r++) {
-      const mod = rowMods[r];
-      // Pivot offset that puts this module's authored wall plane 0.1 m
-      // behind the building wall.
-      const out = (mod.wallZ ?? cfg.wallZ) - 0.1;
+    for (const row of rows) {
+      const rowHasCorners =
+        cornerMod !== undefined &&
+        row.pitch === mainPitch &&
+        row.h === gridHeight(cornerMod, rowH);
+      const n = Math.floor(f.len / row.pitch);
+      if (n < 1) continue;
+      const rowW = n * row.pitch;
       for (let k = 0; k < n; k++) {
-        const along = -rowW / 2 + (k + 0.5) * cfg.moduleWidth;
-        kit.push(facePlacement(f, mod.assetId, along, rowYs[r], out));
+        const atStart = k === 0;
+        const atEnd = k === n - 1;
+        // Slots occupied by an L-corner leg on this face.
+        if (rowHasCorners) {
+          if (atStart && covered.has(faceEndCorner(f, true))) continue;
+          if (atEnd && covered.has(faceEndCorner(f, false))) continue;
+        }
+        const mod = atStart || atEnd ? row.flat : row.relief;
+        const out = (mod.wallZ ?? cfg.wallZ) - 0.1;
+        const along = -rowW / 2 + (k + 0.5) * row.pitch;
+        const pl = facePlacement(f, mod.assetId, along, row.y, out);
+        if (mod.flip) pl.ry += Math.PI;
+        kit.push(pl);
       }
     }
   }
@@ -823,17 +1163,29 @@ export function buildBuildingModel(
   const p = new Parts();
   const kit: KitLocalPlacement[] = [];
   const kitTower = cfg.forceKitTower || isKitTower(b);
-  const baseY = cfg.baseHeight;
+
+  // Kit towers with a grid-fitting footprint get a full storefront band of
+  // kit tiles; every visible wall is then an authored mesh and all the
+  // procedural street-level dressing is skipped.
+  const kitGroundH = kitTower ? buildKitTowerGround(b, kit, w, d, cfg) : null;
+  const baseY = kitGroundH ?? cfg.baseHeight;
 
   // Debug isolation: only the imported panel shell, no procedural geometry.
   if (kitTower && cfg.panelsOnly) {
-    buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+    if (cfg.stacked) {
+      // Slices are complete authored floors (walls + recessed interiors);
+      // the only procedural geometry is a roof deck capping the open top.
+      const top = buildStackedFacade(b, kit, w, d, baseY, height, cfg);
+      if (top > baseY) p.box("roof", w - 0.3, 0.12, d - 0.3, 0, top - 0.06, 0);
+    } else {
+      buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+    }
     return { geoms: p.build(), waterTower: null, kit, x, z, width: w, depth: d, height };
   }
 
   const styleRng = mulberry(b.style ^ 0xa511e9b3);
   const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
-  const sideStorefront = styleRng() < 0.5;
+  const sideStorefront = !kitGroundH && styleRng() < 0.5;
   const proud = 0.3;
 
   // --- Massing -------------------------------------------------------------
@@ -843,16 +1195,22 @@ export function buildBuildingModel(
   const baseD = d + proud;
   const baseW = sideStorefront ? w + proud : w;
   const baseCx = sideStorefront ? -proud / 2 : 0;
-  p.box("facade", baseW, 4.5, baseD, baseCx, 2.25, -proud / 2);
-  // Cornice lip capping the storefront base.
-  p.box("trim", baseW + 0.3, 0.3, baseD + 0.3, baseCx, 4.65, -proud / 2);
-  if (kitTower) {
-    // Kit towers wrap this mass in facade panels; a slightly inset dark core
-    // seals panel gaps and the bare face-end strips (the panels' back slabs
-    // sit ~0.2 m inside the wall plane, the core face at 0.25 m).
-    p.box("metalDark", w - 0.5, height - baseY, d - 0.5, 0, (baseY + height) / 2, 0);
+  if (kitGroundH) {
+    // Fully tiled walls; the slightly inset dark core just seals the thin
+    // corner slivers between the tiles' authored wall slabs.
+    p.box("metalDark", w - 0.5, height, d - 0.5, 0, height / 2, 0);
   } else {
-    p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+    p.box("facade", baseW, 4.5, baseD, baseCx, 2.25, -proud / 2);
+    // Cornice lip capping the storefront base.
+    p.box("trim", baseW + 0.3, 0.3, baseD + 0.3, baseCx, 4.65, -proud / 2);
+    if (kitTower) {
+      // Kit towers wrap this mass in facade panels; a slightly inset dark
+      // core seals panel gaps and the bare face-end strips (the panels'
+      // back slabs sit ~0.2 m inside the wall plane, the core at 0.25 m).
+      p.box("metalDark", w - 0.5, height - baseY, d - 0.5, 0, (baseY + height) / 2, 0);
+    } else {
+      p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+    }
   }
 
   // Parapet ring (slightly proud, 0.9m above the roof plane) + trim caps.
@@ -884,14 +1242,20 @@ export function buildBuildingModel(
   const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
 
   // Kit towers wrap everything above the storefront base in facade panels,
-  // so their service faces keep only ground-level detail.
-  const wallTop = kitTower ? baseY : height;
-  buildStorefront(p, front, mulberry(b.style ^ 0x1f123bb5), trimKey, true);
-  if (sideStorefront) buildStorefront(p, left, mulberry(b.style ^ 0x27220a95), trimKey, false);
-  else buildServiceFace(p, kit, left, mulberry(b.style ^ 0x27220a95), wallTop);
-  buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), wallTop);
-  buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), wallTop);
-  if (kitTower) buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+  // so their service faces keep only ground-level detail. A kit ground band
+  // replaces all procedural street-level dressing entirely.
+  if (!kitGroundH) {
+    const wallTop = kitTower ? baseY : height;
+    buildStorefront(p, front, mulberry(b.style ^ 0x1f123bb5), trimKey, true);
+    if (sideStorefront) buildStorefront(p, left, mulberry(b.style ^ 0x27220a95), trimKey, false);
+    else buildServiceFace(p, kit, left, mulberry(b.style ^ 0x27220a95), wallTop);
+    buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), wallTop);
+    buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), wallTop);
+  }
+  if (kitTower) {
+    if (cfg.stacked) buildStackedFacade(b, kit, w, d, baseY, height, cfg);
+    else buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+  }
 
   // --- Fire escape + window AC units on the front face ----------------------
   if (!kitTower && b.stories >= 3 && (b.archetype & 3) < 2) {

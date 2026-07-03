@@ -83,6 +83,8 @@ if bpy.data.objects:
 SUFFIX_ROLES = {
     "b": "base", "bc": "base", "base": "base", "basecolor": "base", "d": "base", "alb": "base",
     "a": "base", "a01": "base", "a02": "base",
+    # Animated billboard sheets; UVs sample one frame, fine as base color.
+    "spritesheet": "base",
     "n": "normal", "normal": "normal", "nrm": "normal",
     "orm": "orm",
     "r": "roughness", "roughness": "roughness",
@@ -95,6 +97,17 @@ SUFFIX_ROLES = {
 KIT_ALIASES = {
     "3dbillboard": "3dsigns01",
     "roadsides": "roads_sides",
+    # MI_Skyscraper_Color is a plain color-tint material in Unreal (the FBX
+    # ships no texture nodes), but the faces carry authored UVs; map it to
+    # the kit's dark panel-cladding set so big facades don't render flat.
+    "skyscrapercolor": "skys_wall09",
+    # CB01 materials whose CPB7 texture names don't follow the digit
+    # patterns the prefix alias can rewrite (exact candidate matches).
+    "cb01_module03_04_05_10": "cpb7_module03",
+    "cb01_module17_18_19": "cpb7_modules171819",
+    # Window glass materials (MI_GlassCB01_2, ...) must resolve to the glass
+    # texture, not fall through to the asset-name texture set.
+    "glasscb": "glass",
 }
 
 # Digit-preserving prefix rewrites for kits whose material names abbreviate
@@ -105,6 +118,13 @@ PREFIX_ALIASES = {
     "skyscraper": "skys",
     # MI_RstSFWall01 -> sm_restaurantsfwall01 matches T_SM_RestaurantSFWall01_*.
     "rstsf": "sm_restaurantsf",
+    # MI_Slums_SF02 -> slum_storefront02 matches T_Slum_StoreFront02_*.
+    "slums_sf": "slum_storefront",
+    # The CB01 building's texture sets ship under the vendor's internal
+    # "CyberPunk Building 7" name: MI_CB01_Module01 -> T_CPB7_Module01_*,
+    # MI_CB01Module11_12 -> T_CPB7_Module11_12_*.
+    "cb01_": "cpb7_",
+    "cb01": "cpb7_",
 }
 
 
@@ -162,20 +182,23 @@ def norm_key(key):
 
 def find_texture_set(mat_name, key_hints=()):
     candidates = [c for c in list(key_hints) + texture_key_candidates(mat_name, args.name) if c]
-    # 1. Exact key match.
-    for key in candidates:
-        if key in TEX_INDEX:
-            return key, TEX_INDEX[key]
-    # 2. Normalized match (ignore underscores + trailing digits on both sides).
     norm_index = {}
     for k in sorted(TEX_INDEX):
         norm_index.setdefault(norm_key(k), k)
+    # Candidates are ordered by signal strength (FBX refs > material name >
+    # asset name), so resolve each candidate fully (exact, then normalized)
+    # before falling through to weaker ones. Otherwise a weak candidate with
+    # an exact texture match shadows a strong one that only matches after
+    # normalization (e.g. MI_Slums_Concrete01 -> T_SlumsConcrete on an asset
+    # named SM_Slum_Storefront01, which is itself an exact texture key).
     for key in candidates:
+        if key in TEX_INDEX:
+            return key, TEX_INDEX[key]
         hit = norm_index.get(norm_key(key))
         if hit:
             return hit, TEX_INDEX[hit]
-    # 3. Loose prefix fallback on normalized keys (e.g. material "aircon" vs
-    #    key "airconditioner01"). Deterministic: shortest match, alphabetical.
+    # Loose prefix fallback on normalized keys (e.g. material "aircon" vs
+    # key "airconditioner01"). Deterministic: shortest match, alphabetical.
     for key in candidates:
         nk = norm_key(key)
         if len(nk) < 4:

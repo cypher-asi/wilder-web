@@ -12,134 +12,8 @@
     "license": "CC0 Quaternius"
   },
   {
-    "id": "prop_streetlight",
-    "path": "models/streetlight.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_bench",
-    "path": "models/bench.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_trash",
-    "path": "models/trash_A.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_hydrant",
-    "path": "models/firehydrant.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_vent",
-    "path": "models/dumpster.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_car_sedan",
-    "path": "models/car_sedan.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_car_hatchback",
-    "path": "models/car_hatchback.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_car_taxi",
-    "path": "models/car_taxi.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_car_police",
-    "path": "models/car_police.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_car_stationwagon",
-    "path": "models/car_stationwagon.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_trafficlight",
-    "path": "models/trafficlight_A.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
     "id": "prop_watertower",
     "path": "models/watertower.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "prop_box",
-    "path": "models/box_A.gltf",
-    "type": "model",
-    "license": "CC0 KayKit"
-  },
-  {
-    "id": "mk_ac_unit",
-    "path": "models/megakit/Prop_ACUnit.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_bollard",
-    "path": "models/megakit/Prop_Bollard.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_drain",
-    "path": "models/megakit/Prop_Drain.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_manhole",
-    "path": "models/megakit/Prop_ManholeCover.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_planter",
-    "path": "models/megakit/Prop_Planter_Single.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_door_1",
-    "path": "models/megakit/Door_1.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_door_2",
-    "path": "models/megakit/Door_2.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "mk_door_3",
-    "path": "models/megakit/Door_3.gltf",
-    "type": "model",
-    "license": "CC0 Quaternius"
-  },
-  {
-    "id": "prop_bush",
-    "path": "models/bush.gltf",
     "type": "model",
     "license": "CC0 KayKit"
   },
@@ -398,6 +272,282 @@
   {
     "id": "lab_sm_skyscraper_module18",
     "path": "models/imported/sm_skyscraper_module18.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_shopfront",
+    "path": "models/imported/sm_shopfront.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_storefront_closed",
+    "path": "models/imported/sm_storefront_closed.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront01",
+    "path": "models/imported/sm_slum_storefront01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront02",
+    "path": "models/imported/sm_slum_storefront02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront03",
+    "path": "models/imported/sm_slum_storefront03.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront04",
+    "path": "models/imported/sm_slum_storefront04.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront05",
+    "path": "models/imported/sm_slum_storefront05.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront06",
+    "path": "models/imported/sm_slum_storefront06.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_slum_storefront07",
+    "path": "models/imported/sm_slum_storefront07.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_storefront01",
+    "path": "models/imported/sm_cb01_storefront01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module01",
+    "path": "models/imported/sm_cb01_module01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module02",
+    "path": "models/imported/sm_cb01_module02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module03",
+    "path": "models/imported/sm_cb01_module03.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module04",
+    "path": "models/imported/sm_cb01_module04.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module06",
+    "path": "models/imported/sm_cb01_module06.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module07",
+    "path": "models/imported/sm_cb01_module07.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module08",
+    "path": "models/imported/sm_cb01_module08.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module09",
+    "path": "models/imported/sm_cb01_module09.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module10",
+    "path": "models/imported/sm_cb01_module10.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module11",
+    "path": "models/imported/sm_cb01_module11.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module12",
+    "path": "models/imported/sm_cb01_module12.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module14",
+    "path": "models/imported/sm_cb01_module14.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module15",
+    "path": "models/imported/sm_cb01_module15.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module16",
+    "path": "models/imported/sm_cb01_module16.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module17",
+    "path": "models/imported/sm_cb01_module17.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module18",
+    "path": "models/imported/sm_cb01_module18.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module19",
+    "path": "models/imported/sm_cb01_module19.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_one_l",
+    "path": "models/imported/sm_floor_one_l.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_one_r",
+    "path": "models/imported/sm_floor_one_r.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_two_l",
+    "path": "models/imported/sm_floor_two_l.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_two_r",
+    "path": "models/imported/sm_floor_two_r.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_three_l",
+    "path": "models/imported/sm_floor_three_l.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_floor_three_r",
+    "path": "models/imported/sm_floor_three_r.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_groundfloor_wall",
+    "path": "models/imported/sm_groundfloor_wall.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_groundfloor_door",
+    "path": "models/imported/sm_groundfloor_door.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_motorbike01",
+    "path": "models/imported/sm_motorbike01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_traffic_lamp_001",
+    "path": "models/imported/sm_traffic_lamp_001.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_traffic_lamp_002",
+    "path": "models/imported/sm_traffic_lamp_002.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_trafficsign01",
+    "path": "models/imported/sm_trafficsign01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_trafficsign02",
+    "path": "models/imported/sm_trafficsign02.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_trafficsign05",
+    "path": "models/imported/sm_trafficsign05.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_citybarrels_01",
+    "path": "models/imported/sm_citybarrels_01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cyberbarrels01",
+    "path": "models/imported/sm_cyberbarrels01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_recylcer_01",
+    "path": "models/imported/sm_recylcer_01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cpticketmachine01",
+    "path": "models/imported/sm_cpticketmachine01.glb",
+    "type": "model",
+    "license": "Purchased (cyberpunk kit)"
+  },
+  {
+    "id": "lab_sm_cb01_module05",
+    "path": "models/imported/sm_cb01_module05.glb",
     "type": "model",
     "license": "Purchased (cyberpunk kit)"
   }

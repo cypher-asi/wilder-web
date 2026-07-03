@@ -7,6 +7,7 @@ import { BuildingStageViewport } from "./BuildingStageViewport";
 import { SunIcon } from "./icons";
 import {
   findStageModules,
+  groupModuleClasses,
   makeDefaultPrefabs,
   moduleToPanel,
   prefabToCode,
@@ -32,6 +33,7 @@ export function BuildingStage({
   const [bright, setBright] = useState(true);
 
   const modules = useMemo(() => findStageModules(registry), [registry]);
+  const moduleClasses = useMemo(() => groupModuleClasses(modules), [modules]);
 
   // Load saved presets once; seed with generated defaults when none exist.
   // Seeding waits for the registry so defaults reflect the promoted kit.
@@ -276,22 +278,85 @@ export function BuildingStage({
               {modules.length === 0 && (
                 <div className="sk-empty">no promoted facade modules found in the registry</div>
               )}
-              {modules.map((m) => {
-                const checked = selected.kit.panels.some((panel) => panel.assetId === m.manifestId);
+              {moduleClasses.map((cls) => {
+                // Panels only assemble with siblings from the same kit
+                // family (shared texture sets / authored grid), and classes
+                // mix only when their grid pitches nest: equal, or a smaller
+                // filler pitch that divides the larger one.
+                const checkedMods = moduleClasses
+                  .flat()
+                  .filter((m) =>
+                    selected.kit.panels.some((panel) => panel.assetId === m.manifestId),
+                  );
+                const compatible =
+                  checkedMods.length === 0 ||
+                  (checkedMods.every((m) => m.family === cls[0].family) &&
+                    checkedMods.every(
+                      (m) => m.width % cls[0].width === 0 || cls[0].width % m.width === 0,
+                    ));
                 return (
-                  <label key={m.manifestId} className="stage-module">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => togglePanel(m.manifestId)}
-                    />
-                    <span className="stage-module-name">{m.asset.name}</span>
-                    <span className="stage-module-dims">
-                      {m.width}×{m.height} m · {m.triangles} tris
-                    </span>
-                  </label>
+                  <div key={cls[0].manifestId}>
+                    <div className="sk-label" style={{ margin: "6px 0 2px" }}>
+                      {cls[0].family} · {Math.round(cls[0].width)}×{Math.round(cls[0].height)} m
+                      tile class
+                    </div>
+                    {cls.map((m) => {
+                      const checked = selected.kit.panels.some(
+                        (panel) => panel.assetId === m.manifestId,
+                      );
+                      const enabled = checked || compatible;
+                      return (
+                        <label
+                          key={m.manifestId}
+                          className="stage-module"
+                          style={enabled ? undefined : { opacity: 0.4 }}
+                          title={
+                            enabled
+                              ? undefined
+                              : "grid pitch does not nest with the selected tiles"
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={!enabled}
+                            onChange={() => togglePanel(m.manifestId)}
+                          />
+                          <span className="stage-module-name">{m.asset.name}</span>
+                          <span className="stage-module-dims">
+                            {m.width}×{m.height}×{m.depth} m ·{" "}
+                            {m.depth <= 1.6 ? "flat" : "relief"}
+                            {m.flip ? " · flip" : ""} · {m.triangles} tris
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 );
               })}
+              {modules.some((m) => !m.wallTile) && (
+                <>
+                  <div className="sk-label" style={{ margin: "6px 0 2px" }}>
+                    corner / crown pieces — not wall-tileable
+                  </div>
+                  {modules
+                    .filter((m) => !m.wallTile)
+                    .map((m) => (
+                      <label
+                        key={m.manifestId}
+                        className="stage-module"
+                        style={{ opacity: 0.4 }}
+                        title="L-shaped or freestanding piece; cannot tile on a flat wall grid"
+                      >
+                        <input type="checkbox" checked={false} disabled />
+                        <span className="stage-module-name">{m.asset.name}</span>
+                        <span className="stage-module-dims">
+                          {m.width}×{m.height}×{m.depth} m · {m.triangles} tris
+                        </span>
+                      </label>
+                    ))}
+                </>
+              )}
               {selected.kit.panels
                 .filter((panel) => !modules.some((m) => m.manifestId === panel.assetId))
                 .map((panel) => (
@@ -322,24 +387,33 @@ export function BuildingStage({
                 />
               </div>
               <div className="sk-row">
-                <span className="sk-label">depth scale</span>
+                <span className="sk-label">row height (m)</span>
                 <input
                   className="sk-input stage-num"
                   type="number"
-                  step={0.05}
-                  min={0.05}
-                  max={1}
-                  value={selected.kit.depthScale}
+                  step={0.5}
+                  min={1}
+                  value={selected.kit.rowHeight ?? 6}
                   onChange={(e) =>
                     update((p) => ({
                       ...p,
-                      kit: { ...p.kit, depthScale: num(e.target.value, p.kit.depthScale) },
+                      kit: { ...p.kit, rowHeight: num(e.target.value, p.kit.rowHeight ?? 6) },
                     }))
                   }
                 />
               </div>
               <div className="sk-row">
-                <span className="sk-label">wall z (m)</span>
+                <span className="sk-label">stacked slices</span>
+                <input
+                  type="checkbox"
+                  checked={selected.kit.stacked ?? false}
+                  onChange={(e) =>
+                    update((p) => ({ ...p, kit: { ...p.kit, stacked: e.target.checked } }))
+                  }
+                />
+              </div>
+              <div className="sk-row">
+                <span className="sk-label">wall z fallback (m)</span>
                 <input
                   className="sk-input stage-num"
                   type="number"

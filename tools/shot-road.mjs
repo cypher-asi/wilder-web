@@ -27,17 +27,28 @@ await page.waitForFunction(
   () => document.querySelector(".char-card") || document.querySelector("input.field"),
   { timeout: 15000 },
 );
-await page.click(".char-card");
+// Prefer a non-first runner ("Shot") when present so we don't fight other
+// sessions holding the primary dev character.
+await page.waitForSelector(".char-card", { timeout: 15000 });
+await page.evaluate(() => {
+  const cards = [...document.querySelectorAll(".char-card")];
+  const shot = cards.find((c) => c.textContent.includes("Shot"));
+  (shot ?? cards[cards.length - 1]).click();
+});
 await page.waitForSelector("canvas", { timeout: 20000 });
-await new Promise((r) => setTimeout(r, 8000));
 
-// Verify the world actually joined (HUD up, not disconnected).
-const joined = await page.evaluate(() => document.body.innerText.includes("PISTOL"));
-if (!joined) {
-  console.error("world did not join (no HUD); aborting shot");
+// Wait for the world join to complete (gateway may still be settling).
+try {
+  await page.waitForFunction(
+    () => window.__game && window.__game.localEntityId !== 0,
+    { timeout: 30000 },
+  );
+} catch {
+  console.error("world did not join; aborting shot");
   await browser.close();
   process.exit(2);
 }
+await new Promise((r) => setTimeout(r, 6000));
 
 // Optionally walk (WASD) to reach a road before framing the shot.
 if (walkKeys.length > 0) {

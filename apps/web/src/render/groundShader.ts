@@ -306,6 +306,38 @@ if (gKind == 0) {
   gRgh = mix(gRgh, gRgh * 0.55 + 0.02, damp);
 }
 
+// Curb faces and gutters: grime streaks, painted sections, contact shadows.
+float dCurbG = max(-vRoadD, 0.0);
+if ((gKind == 1 || gKind == 2) && gVert > 0.12) {
+  float alongC = gW.x > gW.z ? wp.z : wp.x;
+  // Vertical grime streaks running down the face; heavier near the base
+  // where street water and dirt splash back.
+  float streak = 0.5 + 0.5 * gNoise(vec2(alongC * 5.0, 2.3));
+  float baseG = 1.0 - smoothstep(0.02, 0.14, wp.y);
+  float faceGrime = gVert * (0.3 * streak + 0.35 * baseG);
+  gAlb *= 1.0 - clamp(faceGrime, 0.0, 0.7);
+  gRgh = min(gRgh + 0.15 * gVert, 1.0);
+  // Chipped painted curb sections (fire lanes, loading zones), hashed per
+  // 16 m stretch of street; paint flakes off with fine noise.
+  float sect = gHash12(vec2(floor(alongC / 16.0), 8.5));
+  if (sect < 0.2 && vRoadD < 2.5) {
+    vec3 paint = sect < 0.13 ? vec3(0.40, 0.07, 0.05) : vec3(0.55, 0.42, 0.08);
+    float chip = smoothstep(0.48, 0.7, gNoise(vec2(alongC * 7.0, wp.y * 40.0)));
+    float pMask = gVert * (1.0 - chip) * smoothstep(0.015, 0.05, wp.y);
+    gAlb = mix(gAlb, paint, 0.8 * pMask);
+    gRgh = mix(gRgh, 0.55, pMask);
+  }
+}
+if (gKind == 0) {
+  // Gutter: dark debris band hugging the curb line, dirtiest at the seam.
+  float gut = 1.0 - smoothstep(0.1, 1.3, dCurbG);
+  gut *= 0.7 + 0.3 * gFbm(wp.xz * 0.5 + 23.0);
+  gAlb = mix(gAlb, gAlb * vec3(0.5, 0.48, 0.45), gut);
+  // Contact-shadow band where asphalt meets the curb face (cheap AO).
+  float contact = 1.0 - smoothstep(0.05, 0.45, dCurbG);
+  gAlb *= 1.0 - 0.3 * contact;
+}
+
 // Puddles: pooled in gutters and low spots; mirror-smooth, slightly dark.
 float gPud = 0.0;
 {

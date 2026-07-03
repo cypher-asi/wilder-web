@@ -33,6 +33,16 @@ await page.evaluate(() => {
     maxHealth: 50,
     shield: 110,
     maxShield: 110,
+    inventory: {
+      slots: [
+        { kind: "Ammo9mm", count: 46 },
+        { kind: "Smg", count: 1 },
+        { kind: "Knife", count: 1 },
+        null,
+      ],
+      equipped_weapon: "Pistol",
+      equipped_armor: null,
+    },
   });
 });
 await new Promise((r) => setTimeout(r, 1500));

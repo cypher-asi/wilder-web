@@ -406,7 +406,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   }
 
   useFrame((_, dt) => {
-    if (!mixer.current) return;
+    if (!mixer.current || !model) return;
     mixer.current.update(dt);
 
     const isLocal = entity.id === game.localEntityId;

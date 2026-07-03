@@ -99,7 +99,7 @@ export function Lighting() {
       <SunLight
         ref={sunRef}
         distance={90}
-        intensity={5}
+        intensity={3}
         castShadow
         shadow-mapSize={[4096, 4096]}
         shadow-camera-left={-70}
@@ -110,16 +110,15 @@ export function Lighting() {
         shadow-bias={-0.0002}
         shadow-normalBias={0.5}
       />
-      {/* Physical sky irradiance (dusk blue overhead) as a light probe.
-          Slightly under 1 so the warm sun stays the dominant modeling light. */}
-      <SkyLight intensity={0.9} />
+      {/* Physical sky irradiance (dusk blue overhead) as a light probe. */}
+      <SkyLight intensity={1.0} />
       {/* Cool counter-fill opposite the sun so shadowed faces stay readable.
           Placed far out with the default (origin) target so its direction is
           effectively constant anywhere on the map. Intensities are in the
           physical luminance scale (see EXPOSURE below). */}
       <directionalLight color="#93a9e6" intensity={0.12} position={[3400, 2200, -2600]} />
       {/* faint warm ambient floor so nothing crushes to black */}
-      <ambientLight color="#ffd9b0" intensity={0.06} />
+      <ambientLight color="#ffd9b0" intensity={0.08} />
     </>
   );
 }
@@ -134,7 +133,8 @@ export function Lighting() {
  */
 export function SkyBackdrop() {
   // groundAlbedo tints the below-horizon ellipsoid (visible past the city
-  // edge) so it reads as sunlit hazy ground instead of a black void.
+  // edge and past the Ocean plane's far clip) so it reads as distant hazy
+  // sea, handing off from the animated ocean plane at the far plane.
   //
   // sun={false} disables the physical solar disk. Its radiance
   // (transmittance * GetSolarRadiance()) is astronomically large, and because
@@ -146,7 +146,7 @@ export function SkyBackdrop() {
   return <Sky groundAlbedo={GROUND_ALBEDO} sun={false} />;
 }
 
-const GROUND_ALBEDO = new THREE.Color(0.45, 0.36, 0.27);
+const GROUND_ALBEDO = new THREE.Color(0.1, 0.16, 0.18);
 
 // ---------------------------------------------------------------------------
 // Post-processing
@@ -176,14 +176,18 @@ export function Effects() {
         stbnTexture="/clouds/stbn.bin"
       />
       <AerialPerspective stbnTexture="/clouds/stbn.bin" />
-      <Bloom intensity={0.7} luminanceThreshold={0.8} luminanceSmoothing={0.3} mipmapBlur />
+      {/* Threshold sits in scene-linear HDR (pre tone map), so it must be
+          well above tone-mapped white or the whole sun-facing sky blooms
+          into a screen-filling glare. Only genuinely hot sources (neon,
+          emissive props, specular sun glints) should pass. */}
+      <Bloom intensity={0.3} luminanceThreshold={2.2} luminanceSmoothing={0.5} mipmapBlur />
       {/* The composer disables the renderer's built-in tone mapping, so map
           the physical-luminance HDR buffer to display here (AgX, exposure
           from gl.toneMappingExposure). */}
       <ToneMapping mode={ToneMappingMode.AGX} />
       {/* light golden-hour grade: richer color, gentle contrast */}
       <HueSaturation saturation={0.18} />
-      <BrightnessContrast brightness={-0.015} contrast={0.15} />
+      <BrightnessContrast brightness={0} contrast={0.15} />
       <SMAA />
       <Vignette eskil={false} offset={0.15} darkness={0.5} />
     </EffectComposer>
@@ -201,8 +205,8 @@ export function Effects() {
  * colors (fog, env gradient) are divided by this so they land at their
  * authored brightness.
  */
-const EXPOSURE = 6.3;
-const DISPLAY_TO_SCENE = 1 / EXPOSURE;
+const EXPOSURE = 5.0;
+export const DISPLAY_TO_SCENE = 1 / EXPOSURE;
 
 // Gradient dusk env: approximates the physical sky for IBL. Kept procedural
 // (rather than capturing the real SkyMaterial into a cubemap) because PMREM

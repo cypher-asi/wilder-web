@@ -221,7 +221,9 @@ if (gKind == 0) {
   // Per-slab hue drift: pours cure warm (tan) or cool (blue-gray).
   vec2 slabId = floor(wp.xz / pitch);
   gAlb *= mix(vec3(1.05, 0.99, 0.91), vec3(0.91, 0.96, 1.05), gHash12(slabId + 47.1));
-  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 3.5, 0.9) * 0.6 + 0.18, 0.3, 0.9);
+  // High roughness floor: dry concrete must not pick up a grazing-angle
+  // sky sheen (it washes the whole walk out to cream facing the low sun).
+  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 3.5, 0.9) * 0.6 + 0.32, 0.55, 0.97);
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 7.7) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 3.5, 0.9) * 2.0 - 1.0;
   gNStr = 0.35;
@@ -237,7 +239,7 @@ if (gKind == 0) {
   // at a fine repeat so the curb reads as its own element, a touch lighter
   // than the dark sidewalk, with per-segment shifts and joints every 1.8 m.
   gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.56 * vec3(0.95, 0.95, 0.97);
-  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.18, 0.3, 0.9);
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.3, 0.5, 0.95);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.4;
   float along = gKind == 6 ? wp.z : wp.x;
@@ -259,7 +261,7 @@ if (gKind == 0) {
   // Gutter pan (kind 9 runs along Z, 10 along X): a lower curb apron poured
   // at street grade; concrete like the curb but heavily stained by runoff.
   gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * 0.5 * vec3(0.94, 0.93, 0.9);
-  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.2, 0.35, 0.95);
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.3, 0.5, 0.95);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.35;
   float alongP = gKind == 9 ? wp.z : wp.x;
@@ -288,7 +290,7 @@ if (gKind == 0) {
   gAlb = gTriRGB(uConcreteMap, wps, gW, 4.2, 0.9) * 0.46 * vec3(0.94, 0.96, 1.0);
   // Same downward tone bias as sidewalks: kill the white outlier slabs.
   gAlb *= 0.6 + 0.55 * (tone - 0.72);
-  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 4.2, 0.9) * 0.6 + 0.16, 0.3, 0.9);
+  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 4.2, 0.9) * 0.6 + 0.3, 0.55, 0.97);
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 9.1) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 4.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.3;
@@ -299,7 +301,7 @@ if (gKind == 0) {
   gNrm2 += jTiltP * 2.0;
 } else if (gKind == 3) {
   gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.42;
-  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.12, 0.2, 0.8);
+  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.28, 0.5, 0.95);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.0, 0.9) * 2.0 - 1.0;
   gNStr = 0.4;
 } else if (gKind == 4) {
@@ -469,7 +471,7 @@ float gPud = 0.0;
 {
   float pn = gFbm(wp.xz * 0.16 + 55.0);
   if (gKind == 0) gPud = smoothstep(0.56, 0.68, pn + gNearC * 0.06);
-  else if (gKind == 1 || gKind == 2) gPud = 0.6 * smoothstep(0.64, 0.74, pn);
+  else if (gKind == 1 || gKind == 2) gPud = 0.45 * smoothstep(0.66, 0.76, pn);
   gPud *= gUp;
   gAlb *= 1.0 - 0.35 * gPud;
   gRgh = mix(gRgh, 0.045, gPud);

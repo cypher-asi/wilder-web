@@ -18,6 +18,7 @@ import { Water } from "three/examples/jsm/objects/Water.js";
 import { CITY_WATER, cityTileAt } from "../game/citymap";
 import { TILE_SIZE } from "../net/protocol";
 import { perf } from "../perf/perf";
+import { QualityTier, useQuality } from "../perf/quality";
 import { game, useGame } from "../state/game";
 import { DISPLAY_TO_SCENE, envSkyMaterial, SUN_DIR } from "./Atmosphere";
 import { CAMERA_FAR } from "./CameraRig";
@@ -45,10 +46,25 @@ const RIM_END = 0.92 * CAM_FAR;
 const NEAR_ENTER_M = 64;
 /** ...and only leave it once no water is within this range (hysteresis). */
 const NEAR_EXIT_M = 112;
-/** Frames between full-scene reflection re-renders in the near tier. */
-const NEAR_INTERVAL = 2;
 /** Frames between near/far tier re-evaluations. */
 const CHECK_INTERVAL = 20;
+
+/**
+ * Frames between reflection re-renders, by adaptive quality tier (skipped
+ * frames reuse the previous reflection texture). The near mirror re-renders
+ * the actual scene so it dominates the ocean's cost; the far mirror only
+ * draws the proxy sky sphere but still pays target-switch overhead.
+ */
+const NEAR_MIRROR_INTERVAL: Record<QualityTier, number> = {
+  high: 2,
+  medium: 3,
+  low: 5,
+};
+const FAR_MIRROR_INTERVAL: Record<QualityTier, number> = {
+  high: 2,
+  medium: 4,
+  low: 6,
+};
 
 const waterNormals = new THREE.TextureLoader().load("/water/waternormals.jpg", (t) => {
   t.wrapS = THREE.RepeatWrapping;
@@ -143,6 +159,15 @@ export function Ocean() {
   // ground, so skip its draw (and its reflection pass) entirely.
   const inRange = useRef(true);
 
+  // Reflection re-render cadence, retuned when the adaptive tier changes.
+  const nearInterval = useRef(NEAR_MIRROR_INTERVAL.high);
+  const farInterval = useRef(FAR_MIRROR_INTERVAL.high);
+  const tier = useQuality((s) => s.tier);
+  useEffect(() => {
+    nearInterval.current = NEAR_MIRROR_INTERVAL[tier];
+    farInterval.current = FAR_MIRROR_INTERVAL[tier];
+  }, [tier]);
+
   const { waters, geometry, proxySky } = useMemo(() => {
     // Segmented so the vertex-shader rim curve has vertices to bend
     // (~15 m spacing through the RIM_START..RIM_END band).
@@ -155,7 +180,11 @@ export function Ocean() {
     const proxy = new THREE.Scene();
     proxy.add(sky);
 
-    const make = (resolution: number, interval: number, mirrorScene?: THREE.Scene) => {
+    const make = (
+      resolution: number,
+      interval: { current: number },
+      mirrorScene?: THREE.Scene,
+    ) => {
       const water = makeWater(geo, resolution);
       // onBeforeRender fires once per scene pass (color + the AO depth
       // pre-pass), so gate the mirror render to once per animation frame,
@@ -164,7 +193,7 @@ export function Ocean() {
       const render = water.onBeforeRender;
       let lastRendered = -1;
       water.onBeforeRender = (renderer, scene, cam, geom, mat, group) => {
-        if (frame.current % interval !== 0) return;
+        if (frame.current % interval.current !== 0) return;
         if (frame.current === lastRendered) return;
         lastRendered = frame.current;
         render(renderer, mirrorScene ?? scene, cam, geom, mat, group);
@@ -172,7 +201,7 @@ export function Ocean() {
       return water;
     };
     return {
-      waters: { near: make(512, NEAR_INTERVAL), far: make(256, 1, proxy) },
+      waters: { near: make(512, nearInterval), far: make(256, farInterval, proxy) },
       geometry: geo,
       proxySky: sky,
     };

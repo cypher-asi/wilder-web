@@ -696,7 +696,12 @@ impl World {
     fn player_attack(&mut self, entity: EntityId, seq: u32, tx: f32, tz: f32) {
         let Some(player) = self.players.get_mut(&entity) else { return };
         player.last_input_seq = player.last_input_seq.max(seq);
-        if player.attack_cooldown > 0.0 || player.character.health <= 0.0 {
+        // One-tick tolerance: the client paces shots at exactly the weapon
+        // cooldown while the server decrements it in whole ticks, so without
+        // slack roughly half of a held-trigger's shots would arrive a few ms
+        // "early" and be silently dropped. The remainder is carried over
+        // below so the long-run fire rate still matches the weapon exactly.
+        if player.attack_cooldown > TICK_DT || player.character.health <= 0.0 {
             return;
         }
         let weapon = player.inventory.equipped_weapon;
@@ -713,7 +718,9 @@ impl World {
             player.dirty = true;
         }
 
-        player.attack_cooldown = stats.cooldown;
+        // Carry any residual cooldown so the tolerance can't raise the
+        // effective fire rate above the weapon's.
+        player.attack_cooldown = stats.cooldown + player.attack_cooldown.max(0.0);
         player.attacked_this_tick = true;
         let damage_mult = if player.overcharge_time > 0.0 { OVERCHARGE_MULT } else { 1.0 };
         let attack_damage = stats.damage * damage_mult;
@@ -732,20 +739,38 @@ impl World {
         let mut hit: Option<(EntityId, f32)> = None;
         let mut end = origin + dir * stats.range;
         if stats.ranged {
-            // Hitscan: march the ray; buildings block. Targets are checked
-            // before the wall test so enemies hugging a wall are still hittable.
-            let mut t = 0.6;
-            'ray: while t < stats.range {
-                let p = origin + dir * t;
-                for npc in self.npcs.values() {
-                    if npc.alive() && (npc.position - p).length() < 0.9 {
-                        hit = Some((npc.entity, attack_damage));
-                        end = npc.position;
-                        break 'ray;
-                    }
+            // Hitscan: analytic ray-vs-target test (nearest NPC within a
+            // cylinder around the ray), so hits don't depend on sampling
+            // luck against moving targets.
+            const HIT_RADIUS: f32 = 0.9;
+            let mut best_t = f32::INFINITY;
+            for npc in self.npcs.values() {
+                if !npc.alive() {
+                    continue;
                 }
+                let to = npc.position - origin;
+                let along = to.dot(dir);
+                if along < 0.3 || along > stats.range + HIT_RADIUS {
+                    continue;
+                }
+                let perp = (to - dir * along).length();
+                if perp < HIT_RADIUS && along < best_t {
+                    best_t = along;
+                    hit = Some((npc.entity, attack_damage));
+                    end = npc.position;
+                }
+            }
+            // Walls block the shot, but with slack near the target so
+            // enemies hugging a wall are still hittable.
+            let limit = if best_t.is_finite() { best_t } else { stats.range };
+            let mut t = 0.6;
+            while t < limit {
+                let p = origin + dir * t;
                 if !self.chunks.walkable(p.x, p.z) {
-                    end = p; // wall
+                    if t < best_t - HIT_RADIUS {
+                        hit = None;
+                        end = p; // wall before the target
+                    }
                     break;
                 }
                 t += 0.5;

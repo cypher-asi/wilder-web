@@ -130,7 +130,13 @@ pub enum S2C {
     ExtractStart { seconds: f32 },
     ExtractCancel,
     ExtractResult { success: bool, banked: Vec<ItemStack> },
-    GatherResult { gained: Option<ItemStack> },
+    /// Everything a pickup/gather actually added to the backpack. `denied` is
+    /// set when nothing fit (drives the "Backpack full" toast + deny sound).
+    GatherResult {
+        gained: Vec<ItemStack>,
+        #[serde(default)]
+        denied: bool,
+    },
     CraftResult { ok: bool, error: Option<String>, produced: Option<ItemStack> },
     ProductionState { building: EntityId, jobs: Vec<ProductionJob> },
     MarketState { listings: Vec<MarketListing>, wallet: u32 },

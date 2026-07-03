@@ -1,7 +1,7 @@
 // WebSocket game connection: handshake, message dispatch, input sending.
 
 import * as THREE from "three";
-import { playSfx } from "../assets/audio";
+import { playCoin, playDeny, playSfx } from "../assets/audio";
 import { setTerritory } from "../game/territory";
 import {
   armorShield,
@@ -11,6 +11,7 @@ import {
   spawnEntity,
   useGame,
 } from "../state/game";
+import { itemLabel } from "../ui/ItemIcon";
 import { C2S, decode, encode, S2C } from "./protocol";
 
 /** World position of an entity's gun muzzle, if a mount is registered. */
@@ -126,6 +127,25 @@ export class GameConnection {
         break;
       }
       case "EntityDespawn": {
+        const entity = game.entities.get(msg.d.id);
+        // A loot crate vanishing right next to us was almost certainly picked
+        // up: play the little coin-pop VFX where it stood.
+        if (entity?.kind === "LootContainer") {
+          const dist = Math.hypot(
+            entity.x - game.predicted.x,
+            entity.z - game.predicted.z,
+          );
+          if (dist < 6) {
+            game.fx.push({
+              type: "lootPop",
+              x: entity.x,
+              y: entity.y,
+              z: entity.z,
+              item: entity.item,
+              at: performance.now(),
+            });
+          }
+        }
         game.entities.delete(msg.d.id);
         bumpEntityRoster();
         break;
@@ -329,22 +349,21 @@ export class GameConnection {
         break;
       }
       case "GatherResult": {
-        if (msg.d.gained) {
-          const g = msg.d.gained;
-          if (g.kind === "Ammo9mm") {
-            // Ammo auto-pickup: louder cue + big center-left banner.
-            void playSfx("sfx_pickup", 0.6);
-            ui.showPickup(`+${g.count} 9MM AMMO`);
-          } else {
-            void playSfx("sfx_pickup", 0.45);
-          }
+        if (msg.d.denied) {
+          playDeny();
+          ui.pushPickup({ kind: null, text: "Backpack full", alert: true });
+        }
+        if (msg.d.gained.length > 0) {
+          // One coin chime per pickup, however many stacks came out of it.
+          playCoin();
+        }
+        for (const g of msg.d.gained) {
+          ui.pushPickup({ kind: g.kind, text: `+${g.count} ${itemLabel(g.kind)}` });
           ui.pushChat({
             from: "system",
-            text: `+${g.count} ${g.kind}`,
+            text: `+${g.count} ${itemLabel(g.kind)}`,
             system: true,
           });
-        } else {
-          void playSfx("sfx_pickup", 0.45);
         }
         break;
       }

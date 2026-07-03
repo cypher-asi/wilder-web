@@ -12,6 +12,7 @@ import { RED_HEX } from "./colors";
 import { GameMenu } from "./GameMenu";
 import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
 import { InventoryScreen } from "./InventoryScreen";
+import { ItemIcon } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 
@@ -53,7 +54,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           </div>
           <ExtractionBar />
           <ExtractHint />
-          <PickupToast />
+          <PickupFeed />
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
@@ -1252,37 +1253,35 @@ function ExtractHint() {
   );
 }
 
-/** Large transient pickup banner on the center-left (e.g. ammo grabbed). */
-function PickupToast() {
-  const toast = useGame((s) => s.pickupToast);
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    if (!toast) return;
-    setVisible(true);
-    const timer = setTimeout(() => setVisible(false), 1600);
-    return () => clearTimeout(timer);
-  }, [toast?.id]);
-  if (!toast) return null;
+/** Left-side pickup feed: stacked "+N Item" lines with the item glyph, plus
+ * red "Backpack full" denials. Entries slide in and self-expire. */
+function PickupFeed() {
+  const feed = useGame((s) => s.pickupFeed);
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: "50%",
-        left: 48,
-        transform: `translateY(-50%) scale(${visible ? 1 : 0.85})`,
-        opacity: visible ? 1 : 0,
-        transition: "opacity 0.25s ease, transform 0.25s ease",
-        fontSize: 34,
-        fontWeight: 800,
-        letterSpacing: "0.08em",
-        color: "#ffcc33",
-        textShadow:
-          "0 0 18px rgba(255,180,20,0.85), 0 2px 5px rgba(0,0,0,0.6)",
-        pointerEvents: "none",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {toast.text}
+    <div className="pickup-feed">
+      {feed.map((entry) => (
+        <PickupFeedLine key={entry.id} entry={entry} />
+      ))}
+    </div>
+  );
+}
+
+function PickupFeedLine({
+  entry,
+}: {
+  entry: import("../state/game").PickupFeedEntry;
+}) {
+  useEffect(() => {
+    const timer = setTimeout(
+      () => useGame.getState().expirePickup(entry.id),
+      2600,
+    );
+    return () => clearTimeout(timer);
+  }, [entry.id]);
+  return (
+    <div className={`pickup-line${entry.alert ? " alert" : ""}`}>
+      {entry.kind && <ItemIcon kind={entry.kind} size={22} />}
+      <span>{entry.text}</span>
     </div>
   );
 }

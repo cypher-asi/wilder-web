@@ -108,6 +108,15 @@ export type CombatFxEvent =
       dirX: number;
       dirZ: number;
       at: number;
+    }
+  | {
+      type: "lootPop";
+      x: number;
+      y: number;
+      z: number;
+      /** Icon that pops out of the collected crate (null: sparkle only). */
+      item: import("../net/protocol").ItemKind | null;
+      at: number;
     };
 
 /** Weapon mount registered per character entity (muzzle FX + recoil kick). */
@@ -252,6 +261,18 @@ export interface ChatLine {
   system?: boolean;
 }
 
+/** One line in the left-side pickup feed ("+3 Iron", "Backpack full"). */
+export interface PickupFeedEntry {
+  id: number;
+  /** Item glyph to show; null for text-only notices (e.g. denial). */
+  kind: import("../net/protocol").ItemKind | null;
+  text: string;
+  /** Alert styling + deny semantics (red, no glyph pop). */
+  alert?: boolean;
+}
+
+let nextPickupId = 1;
+
 /** Per-ability hotbar state (ms timestamps from performance.now()). */
 export interface AbilityUiState {
   /** When the ability comes off cooldown. */
@@ -376,12 +397,13 @@ interface UiState {
   visualStyle: VisualStyleId;
   /** Main-music on/off (persisted to localStorage). */
   musicOn: boolean;
-  /** Transient large pickup notice shown center-left (id bumps per event). */
-  pickupToast: { text: string; id: number } | null;
+  /** Left-side pickup feed entries (newest last); expired by the HUD. */
+  pickupFeed: PickupFeedEntry[];
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
-  showPickup: (text: string) => void;
+  pushPickup: (entry: Omit<PickupFeedEntry, "id">) => void;
+  expirePickup: (id: number) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
@@ -456,13 +478,17 @@ export const useGame: import("zustand").UseBoundStore<
   menuOpen: false,
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
-  pickupToast: null,
+  pickupFeed: [],
 
   set: (partial) => set(partial),
   pushChat: (line) =>
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
-  showPickup: (text) =>
-    set((s) => ({ pickupToast: { text, id: (s.pickupToast?.id ?? 0) + 1 } })),
+  pushPickup: (entry) =>
+    set((s) => ({
+      pickupFeed: [...s.pickupFeed.slice(-5), { ...entry, id: nextPickupId++ }],
+    })),
+  expirePickup: (id) =>
+    set((s) => ({ pickupFeed: s.pickupFeed.filter((e) => e.id !== id) })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
   toggleEconomy: () => set((s) => ({ economyOpen: !s.economyOpen })),

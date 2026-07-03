@@ -1335,14 +1335,15 @@ function ShopFront({ entity }: { entity: GameEntity }) {
   // Everything below is positioned relative to the entity (the group's
   // origin), which stands on the sidewalk tile fronting the building.
   // Fascia geometry constants mirror building.ts buildStorefront: fascia
-  // band centered at y 3.95, proud 0.34 of the wall plane.
+  // band centered at y 3.95; random shop boards reach ~0.53 proud of the
+  // wall, so this board mounts clear of them at ~0.7.
   const wallDz = host ? host.wallZ - entity.z : TILE_SIZE / 2;
   const signY = 3.95;
   // Sign plane sized from the texture aspect, clamped to the hosting face.
   const faceW = host ? host.x1 - host.x0 : 6;
-  let signH = 0.66;
+  let signH = 0.85;
   let signW = signH * (sign?.aspect ?? 4);
-  const maxW = Math.min(5.2, faceW - 0.8);
+  const maxW = Math.min(5.6, faceW - 0.8);
   if (signW > maxW) {
     signW = maxW;
     signH = signW / (sign?.aspect ?? 4);
@@ -1358,19 +1359,21 @@ function ShopFront({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      {/* Sign board on the hosting building's fascia: dark backing + text. */}
-      <group position={[0, signY, wallDz - 0.46]}>
-        <mesh position={[0, 0, 0.06]} castShadow>
-          <boxGeometry args={[signW + 0.24, signH + 0.22, 0.12]} />
+      {/* Sign board on the hosting building's fascia: dark backing + text,
+          mounted proud of the fascia so it always beats the building's own
+          random sign boards for the wall. */}
+      <group position={[0, signY, wallDz - 0.7]}>
+        <mesh position={[0, 0, 0.09]} castShadow>
+          <boxGeometry args={[signW + 0.24, signH + 0.22, 0.14]} />
           <meshStandardMaterial color="#1c1e22" roughness={0.5} metalness={0.75} />
         </mesh>
         {sign && (
-          <mesh rotation={[0, Math.PI, 0]} position={[0, 0, -0.005]} material={sign.mat}>
+          <mesh rotation={[0, Math.PI, 0]} position={[0, 0, 0]} material={sign.mat}>
             <planeGeometry args={[signW, signH]} />
           </mesh>
         )}
         {/* Thin accent strip under the sign board. */}
-        <mesh rotation={[0, Math.PI, 0]} position={[0, -(signH / 2) - 0.17, 0]}>
+        <mesh rotation={[0, Math.PI, 0]} position={[0, -(signH / 2) - 0.16, 0.02]}>
           <planeGeometry args={[signW + 0.24, 0.05]} />
           <meshBasicMaterial color={accent} toneMapped={false} />
         </mesh>

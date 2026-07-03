@@ -401,7 +401,7 @@ export type S2C =
   | Tagged<"ExtractStart", { seconds: number }>
   | TaggedUnit<"ExtractCancel">
   | Tagged<"ExtractResult", { success: boolean; banked: ItemStack[] }>
-  | Tagged<"GatherResult", { gained: ItemStack | null }>
+  | Tagged<"GatherResult", { gained: ItemStack[]; denied: boolean }>
   | Tagged<
       "CraftResult",
       { ok: boolean; error: string | null; produced: ItemStack | null }

@@ -1400,12 +1400,8 @@ impl World {
             }
             let mut leftovers = Vec::new();
             let mut taken: Vec<ItemStack> = Vec::new();
-            let mut ammo_gained = 0u32;
             for stack in container.items.drain(..) {
                 let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
-                if stack.kind == ItemKind::Ammo9mm {
-                    ammo_gained += stack.count - rem;
-                }
                 if stack.count > rem {
                     taken.push(ItemStack { kind: stack.kind, count: stack.count - rem });
                 }
@@ -1413,16 +1409,15 @@ impl World {
                     leftovers.push(ItemStack { kind: stack.kind, count: rem });
                 }
             }
+            // Nothing fit at all: the pickup was denied outright.
+            let denied = taken.is_empty() && !leftovers.is_empty();
             container.items = leftovers;
             let owner = container.owner.clone();
             let in_supply = container.in_supply;
             player.dirty = true;
             let picker = player_party(player);
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-            // Surface ammo pickups (chat + SFX) so the caches feel rewarding.
-            let gained = (ammo_gained > 0)
-                .then_some(ItemStack { kind: ItemKind::Ammo9mm, count: ammo_gained });
-            let _ = player.tx.send(S2C::GatherResult { gained });
+            let _ = player.tx.send(S2C::GatherResult { gained: taken.clone(), denied });
             if self.loot.get(&target).is_some_and(|c| c.items.is_empty()) {
                 self.loot.remove(&target);
             }
@@ -1465,6 +1460,10 @@ impl World {
                     0,
                 );
             }
+            let mut gained_stacks = Vec::new();
+            if gained > 0 {
+                gained_stacks.push(ItemStack { kind, count: gained });
+            }
             // Rare blueprint fragments feed Laboratory research (Phase 3).
             if self.rng.random_bool(FRAGMENT_CHANCE)
                 && inv::add_items(&mut player.inventory.slots, ItemKind::BlueprintFragment, 1) == 0
@@ -1476,11 +1475,11 @@ impl World {
                     TxAmount::Item { kind: ItemKind::BlueprintFragment, count: 1 },
                     0,
                 );
+                gained_stacks.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
             }
             player.dirty = true;
-            let _ = player.tx.send(S2C::GatherResult {
-                gained: (gained > 0).then_some(ItemStack { kind, count: gained }),
-            });
+            let denied = gained_stacks.is_empty() && count > 0;
+            let _ = player.tx.send(S2C::GatherResult { gained: gained_stacks, denied });
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             return;
         }
@@ -2894,14 +2893,10 @@ impl World {
             else {
                 continue;
             };
-            let mut ammo_gained = 0u32;
             let mut leftovers = Vec::new();
             let mut taken: Vec<ItemStack> = Vec::new();
             for stack in container.items.drain(..) {
                 let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
-                if stack.kind == ItemKind::Ammo9mm {
-                    ammo_gained += stack.count - rem;
-                }
                 if stack.count > rem {
                     taken.push(ItemStack { kind: stack.kind, count: stack.count - rem });
                 }
@@ -2914,12 +2909,12 @@ impl World {
             let owner = container.owner.clone();
             let in_supply = container.in_supply;
             let picker = player_party(player);
-            if ammo_gained > 0 {
+            // Auto-pickup never sends `denied`: a full backpack next to a
+            // cache would spam the toast every tick.
+            if !taken.is_empty() {
                 player.dirty = true;
                 let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-                let _ = player.tx.send(S2C::GatherResult {
-                    gained: Some(ItemStack { kind: ItemKind::Ammo9mm, count: ammo_gained }),
-                });
+                let _ = player.tx.send(S2C::GatherResult { gained: taken.clone(), denied: false });
             }
             if empty {
                 self.loot.remove(&cid);

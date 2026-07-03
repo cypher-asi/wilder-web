@@ -12,6 +12,7 @@ import { CombatFxEvent, game } from "../state/game";
 import { RED_HEX } from "../ui/colors";
 import { cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
+import { itemSpriteMaterial } from "./itemSprite";
 
 /** Projectile travel speed (m/s); the bolt's lifetime scales with distance. */
 const PROJECTILE_SPEED = 40;
@@ -25,6 +26,7 @@ const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   flash: 90,
   impact: 380,
   shell: 700,
+  lootPop: 650,
 };
 
 interface ActiveFx {
@@ -304,6 +306,8 @@ export function CombatFx() {
           <ImpactBurst key={id} ev={ev} />
         ) : ev.type === "shell" ? (
           <ShellCasing key={id} ev={ev} />
+        ) : ev.type === "lootPop" ? (
+          <LootPopFx key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -626,6 +630,76 @@ function DeathPulse({ ev }: { ev: Extract<CombatFxEvent, { type: "death" }> }) {
             </svg>
           </div>
         </Html>
+      </group>
+    </group>
+  );
+}
+
+const LOOT_SPARK_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#ffffff",
+  transparent: true,
+  opacity: 0.8,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+
+/**
+ * Collected loot crate: the item's white icon pops up out of the crate spot
+ * and fades (Mario coin-block feel), with a few white sparks flying out.
+ */
+function LootPopFx({ ev }: { ev: Extract<CombatFxEvent, { type: "lootPop" }> }) {
+  const icon = useRef<THREE.Sprite>(null);
+  const sparks = useRef<THREE.Group>(null);
+  const iconMat = useMemo(
+    () => (ev.item ? itemSpriteMaterial(ev.item).clone() : null),
+    [ev.item],
+  );
+  useEffect(() => () => iconMat?.dispose(), [iconMat]);
+  const sparkMat = useClonedMaterial(LOOT_SPARK_MAT_BASE);
+  const dirs = useMemo(
+    () =>
+      Array.from({ length: 6 }, (_, i) => {
+        const a = (i / 6) * Math.PI * 2 + Math.random() * 0.6;
+        return { x: Math.cos(a) * 0.8, y: 1.2 + Math.random() * 0.8, z: Math.sin(a) * 0.8 };
+      }),
+    [],
+  );
+
+  useFrame(() => {
+    const t = (performance.now() - ev.at) / LIFETIME_MS.lootPop;
+    if (t >= 1) {
+      if (icon.current) icon.current.visible = false;
+      if (sparks.current) sparks.current.visible = false;
+      return;
+    }
+    const ease = 1 - (1 - t) * (1 - t);
+    if (icon.current && iconMat) {
+      // Coin arc: quick hop up, brief hang, fade out on the way.
+      icon.current.position.y = ev.y + 0.7 + ease * 1.0;
+      const pop = t < 0.2 ? 0.3 + (t / 0.2) * 0.3 : 0.6;
+      icon.current.scale.set(pop, pop, 1);
+      iconMat.opacity = t < 0.5 ? 0.95 : 0.95 * (1 - (t - 0.5) / 0.5);
+    }
+    if (sparks.current) {
+      let i = 0;
+      for (const child of sparks.current.children) {
+        const d = dirs[i++];
+        child.position.set(ev.x + d.x * ease, ev.y + 0.5 + d.y * ease - ease * ease * 0.8, ev.z + d.z * ease);
+        child.scale.setScalar(0.05 * (1 - t * 0.6));
+      }
+      sparkMat.opacity = 0.8 * (1 - t);
+    }
+  });
+
+  return (
+    <group>
+      {iconMat && (
+        <sprite ref={icon} position={[ev.x, ev.y + 0.7, ev.z]} material={iconMat} />
+      )}
+      <group ref={sparks}>
+        {dirs.map((_, i) => (
+          <mesh key={i} geometry={IMPACT_PART_GEO} material={sparkMat} dispose={null} />
+        ))}
       </group>
     </group>
   );

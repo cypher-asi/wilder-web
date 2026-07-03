@@ -22,6 +22,71 @@ export async function playSfx(id: string, volume = 0.5) {
   }
 }
 
+// --- Synthesized UI blips (coin / deny) ------------------------------------
+// Tiny square-wave cues built on Web Audio so no asset files are needed and
+// the coin can be a proper two-note NES-style chime.
+
+let blipCtx: AudioContext | null = null;
+
+function getBlipCtx(): AudioContext | null {
+  try {
+    blipCtx ??= new AudioContext();
+    if (blipCtx.state !== "running") void blipCtx.resume();
+    return blipCtx;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classic coin chime for pickups: square wave hopping B5 -> E6, with a fast
+ * exponential decay. Deliberately reads as Super Mario Bros. nostalgia.
+ */
+export function playCoin(volume = 0.22) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(987.77, t0); // B5
+  osc.frequency.setValueAtTime(1318.51, t0 + 0.085); // E6
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.setValueAtTime(volume, t0 + 0.085);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.55);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.6);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
+/** Low double-buzz for refused actions (backpack full). */
+export function playDeny(volume = 0.18) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(150, t0);
+  osc.frequency.setValueAtTime(110, t0 + 0.11);
+  const gain = ctx.createGain();
+  // Two pulses with a short gap between them.
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.setValueAtTime(0.0001, t0 + 0.08);
+  gain.gain.setValueAtTime(volume, t0 + 0.11);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.26);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.3);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
 // --- Main music -----------------------------------------------------------
 
 let music: Howl | null = null;

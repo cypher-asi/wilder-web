@@ -54,6 +54,24 @@
     "license": "CC0 Kenney"
   },
   {
+    "id": "sfx_grunt1",
+    "path": "audio/grunt1.ogg",
+    "type": "audio",
+    "license": "CC0 qubodup (OpenGameArt)"
+  },
+  {
+    "id": "sfx_grunt2",
+    "path": "audio/grunt2.ogg",
+    "type": "audio",
+    "license": "CC0 qubodup (OpenGameArt)"
+  },
+  {
+    "id": "sfx_grunt3",
+    "path": "audio/grunt3.ogg",
+    "type": "audio",
+    "license": "CC0 qubodup (OpenGameArt)"
+  },
+  {
     "id": "music_theme",
     "path": "audio/music_theme.mp3",
     "type": "audio",

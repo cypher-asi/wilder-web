@@ -381,6 +381,17 @@ body {
   box-shadow: 0 0 12px rgba(79, 195, 255, 0.6);
 }
 
+/* Tiny uppercase micro-label in front of each bar (CORE/AUX style). */
+.vital-label {
+  font-family: var(--font-display);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  min-width: 16px;
+  text-align: right;
+}
+
 /* Big numeric readout beside each bar. */
 .vital-big {
   font-family: var(--font-display);
@@ -902,6 +913,33 @@ body {
   height: 52px;
   color: var(--accent-bright);
   filter: drop-shadow(0 0 6px rgba(79, 195, 255, 0.45));
+}
+
+/* AMMO micro-tag with a hot chevron block, like the reference's ammo chip. */
+.weapon-dock-ammo-tag {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-display);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.ammo-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 11px;
+  background: var(--alert);
+  color: #0a0508;
+  font-size: 10px;
+  font-weight: 800;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 3px 100%, 0 calc(100% - 3px));
+  letter-spacing: 0;
 }
 
 .weapon-dock-ammo {

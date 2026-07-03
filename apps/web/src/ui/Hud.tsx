@@ -85,6 +85,7 @@ function VitalsPanel() {
         <span className="vitals-name">{characterName}</span>
       </div>
       <div className="vitals-row">
+        <span className="vital-label">HP</span>
         <div className="vital-bar health">
           <div
             className="vital-fill health"
@@ -97,6 +98,7 @@ function VitalsPanel() {
         </span>
       </div>
       <div className="vitals-row">
+        <span className="vital-label">SH</span>
         <div className={`vital-bar shield${maxShield === 0 ? " depleted" : ""}`}>
           <div
             className="vital-fill shield"
@@ -339,13 +341,15 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
           <WeaponIcon kind={weapon} />
         </div>
         <div className="weapon-dock-info">
-          {ranged ? (
+          <div className="weapon-dock-ammo-tag">
+            <span className="ammo-chevron">»</span>
+            {ranged ? "AMMO" : "MELEE"}
+          </div>
+          {ranged && (
             <div className={`weapon-dock-ammo${ammo === 0 ? " empty" : ""}`}>
               {String(Math.min(ammo, 999)).padStart(3, "0")}
               <span className="weapon-dock-ammo-label">9MM</span>
             </div>
-          ) : (
-            <div className="weapon-dock-ammo-label">MELEE</div>
           )}
         </div>
         <div className="weapon-dock-swaps">

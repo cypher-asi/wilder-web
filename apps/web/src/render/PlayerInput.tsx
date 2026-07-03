@@ -94,8 +94,6 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   const pendingShotAt = useRef(-Infinity);
   /** Throttle for the out-of-ammo click/warning. */
   const lastDryFireAt = useRef(0);
-  /** Throttle for auto-equip requests / melee hints on fire. */
-  const lastEquipNudgeAt = useRef(0);
   const raycaster = useRef(new THREE.Raycaster());
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
 
@@ -186,7 +184,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
       const now = performance.now();
-      if (!game.gun.drawn) {
+      // Draw is a ranged-only concept: melee/fists punch immediately with no
+      // draw delay and no invisible-gun aim pose.
+      if (hasRangedWeapon() && !game.gun.drawn) {
         // First click draws the weapon; shooting starts on the next click
         // (or by holding once the draw finishes).
         game.gun.drawn = true;
@@ -426,29 +426,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     // released, so quick taps never fall between cooldown windows.
     const buffered = now - pendingShotAt.current < SHOT_BUFFER_MS;
     if ((!firing.current && !buffered) || !game.aim.active) return;
-    if (!game.gun.drawn || now < game.gun.readyAt) return;
-    if (game.roll) return; // no shooting mid-roll
+    // Draw/ready gate is ranged-only; melee and bare fists punch immediately.
+    if (hasRangedWeapon() && (!game.gun.drawn || now < game.gun.readyAt)) return;
+    if (game.roll) return; // no attacking mid-roll
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
-    // Firing bare-handed / with a melee weapon while carrying a gun in the
-    // backpack is almost never intended: auto-equip the best carried gun
-    // (server validates) and let the shot go out next frame once the
-    // InventoryUpdate confirms. Without this, clicks fall through to a
-    // 1.5 m fist swing that silently whiffs at range.
-    if (!hasRangedWeapon()) {
-      const inv = useGame.getState().inventory;
-      const gunSlot =
-        inv?.slots.findIndex((s) => s != null && RANGED_WEAPONS.has(s.kind)) ?? -1;
-      if (gunSlot >= 0) {
-        if (now - lastEquipNudgeAt.current > 800) {
-          lastEquipNudgeAt.current = now;
-          connection.send({
-            t: "InventoryAction",
-            d: { t: "Equip", d: { slot: gunSlot } },
-          });
-        }
-        return; // hold the buffered click; fires once the equip lands
-      }
-    }
     // Dry trigger: don't send a doomed Attack or play phantom shot FX that
     // would look like hits silently not registering. Surface it loudly so
     // the player knows why nothing is firing.

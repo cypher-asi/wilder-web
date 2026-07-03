@@ -91,7 +91,14 @@ function upperBodyClip(clip: THREE.AnimationClip): THREE.AnimationClip {
 }
 
 /** Clips available on the upper-body layer. */
-const UPPER_CLIPS = ["Pistol_Shoot", "Hit_Chest"];
+const UPPER_CLIPS = ["Pistol_Shoot", "Hit_Chest", "Punch_Cross", "Punch_Jab"];
+
+/** Ranged weapons; anything else (melee or nothing) attacks with a punch. */
+const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
+/** Punch clips alternated on successive melee/fist attacks for variety. */
+const PUNCH_CLIPS = ["Punch_Cross", "Punch_Jab"];
+/** Playback rate for the upper-body punch overlay. */
+const PUNCH_ANIM_SCALE = 1.2;
 
 /** How long the gun mesh bucks after a shot, ms. */
 const GUN_KICK_MS = 110;
@@ -496,6 +503,8 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const seenHit = useRef(0);
   /** ms timestamp of the last shot, for the gun mesh recoil kick. */
   const gunKickAt = useRef(0);
+  /** Alternates Punch_Cross/Punch_Jab on successive melee attacks. */
+  const punchIndex = useRef(0);
 
   useEffect(() => {
     if (!model || model.animations.length === 0) return;
@@ -614,12 +623,24 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     if (shotMark > seenShot.current) {
       seenShot.current = shotMark;
       if (!isNpc && !dying) {
-        // Scale the clip so the full recoil pose completes within the fire
-        // interval even at high rates of fire.
-        const clipDur =
-          upperActions.current["Pistol_Shoot"]?.getClip().duration ?? 0.4;
-        playUpper("Pistol_Shoot", clipDur / SHOOT_ANIM_TIME);
-        gunKickAt.current = now;
+        // Ranged weapons play the pistol recoil; melee and bare fists throw a
+        // punch. Remote players only trigger here via the ranged-only
+        // MuzzleFlash event, so their attacks are always the shoot pose.
+        const weapon = isLocal
+          ? useGame.getState().inventory?.equipped_weapon
+          : "Pistol";
+        if (weapon != null && RANGED_WEAPONS.has(weapon)) {
+          // Scale the clip so the full recoil pose completes within the fire
+          // interval even at high rates of fire.
+          const clipDur =
+            upperActions.current["Pistol_Shoot"]?.getClip().duration ?? 0.4;
+          playUpper("Pistol_Shoot", clipDur / SHOOT_ANIM_TIME);
+          gunKickAt.current = now;
+        } else {
+          const punch = PUNCH_CLIPS[punchIndex.current % PUNCH_CLIPS.length];
+          punchIndex.current++;
+          playUpper(punch, PUNCH_ANIM_SCALE);
+        }
       }
     }
     // Hit flinch layer + red damage flash.

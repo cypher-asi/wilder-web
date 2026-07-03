@@ -1,10 +1,39 @@
-import { useEffect, useMemo } from "react";
-import { startAmbience, stopAmbience } from "../assets/audio";
+import { useEffect, useMemo, useState } from "react";
+import { setMusicEnabled, startAmbience, stopAmbience, stopMusic } from "../assets/audio";
+import { CHARACTER_MODEL, PISTOL_MODEL, preloadModels } from "../assets/catalog";
 import { GameConnection } from "../net/connection";
 import { GameCanvas } from "../render/GameCanvas";
-import { game } from "../state/game";
+import { game, useGame } from "../state/game";
 import { useSession } from "../state/session";
 import { Hud } from "./Hud";
+
+/** Never hold the veil longer than this, even if loading stalls. */
+const VEIL_MAX_MS = 2000;
+
+/**
+ * Dark full-screen veil over the first world load: matches the page
+ * background and fades out once the join completed and the first chunk batch
+ * revealed, hiding the empty sky/ocean frame and the initial build burst.
+ */
+function JoinVeil() {
+  const ready = useGame((s) => s.joined && s.worldReady);
+  const [timedOut, setTimedOut] = useState(false);
+  const [gone, setGone] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setTimedOut(true), VEIL_MAX_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (gone) return null;
+  const hidden = ready || timedOut;
+  return (
+    <div
+      className={`join-veil${hidden ? " join-veil-out" : ""}`}
+      onTransitionEnd={() => setGone(true)}
+    />
+  );
+}
 
 export function Game() {
   const token = useSession((s) => s.token);
@@ -16,13 +45,22 @@ export function Game() {
   }, [token, character]);
 
   useEffect(() => {
+    // Usually already warm from CharacterSelect; the cache dedupes.
+    preloadModels([CHARACTER_MODEL, PISTOL_MODEL]);
+  }, []);
+
+  useEffect(() => {
     if (!connection) return;
     connection.connect();
     startAmbience();
+    // Honour the saved music preference for this session (join was a user
+    // gesture, so autoplay is unblocked here).
+    setMusicEnabled(useGame.getState().musicOn);
     return () => {
       connection.close();
       game.reset();
       stopAmbience();
+      stopMusic();
     };
   }, [connection]);
 
@@ -40,6 +78,7 @@ export function Game() {
     <>
       <GameCanvas connection={connection} />
       <Hud connection={connection} />
+      <JoinVeil />
     </>
   );
 }

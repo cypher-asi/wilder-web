@@ -54,6 +54,12 @@
     "license": "CC0 Kenney"
   },
   {
+    "id": "music_theme",
+    "path": "audio/music_theme.mp3",
+    "type": "audio",
+    "license": "CC0 Tsorthan Grove (OpenGameArt)"
+  },
+  {
     "id": "lab_sm_barrier01",
     "path": "models/imported/sm_barrier01.glb",
     "type": "model",

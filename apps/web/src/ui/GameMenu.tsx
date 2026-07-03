@@ -10,6 +10,8 @@ export function GameMenu() {
   const menuOpen = useGame((s) => s.menuOpen);
   const set = useGame((s) => s.set);
   const closeOverlays = useGame((s) => s.closeOverlays);
+  const musicOn = useGame((s) => s.musicOn);
+  const setMusicOn = useGame((s) => s.setMusicOn);
   const exitToCharacters = useSession((s) => s.exitToCharacters);
   const logout = useSession((s) => s.logout);
 
@@ -22,6 +24,9 @@ export function GameMenu() {
         <div className="menu-hint">ESC TO RESUME</div>
         <button className="btn btn-primary" onClick={() => set({ menuOpen: false })}>
           Resume
+        </button>
+        <button className="btn btn-ghost" onClick={() => setMusicOn(!musicOn)}>
+          Music: {musicOn ? "ON" : "OFF"}
         </button>
         <button
           className="btn btn-ghost"

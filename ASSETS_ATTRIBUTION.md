@@ -37,6 +37,7 @@ and `roughness.jpg` from the 1K-JPG download of the listed material.
 |---|---|---|
 | `assets/audio/footsteps.ogg`, `pickup.ogg`, `ui_click.ogg` | [Kenney Starter Kit 3D Platformer](https://github.com/KenneyNL/Starter-Kit-3D-Platformer) by Kenney | CC0 |
 | `assets/audio/shoot.ogg`, `hit.ogg`, `death.ogg` | [Kenney Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS) by Kenney | CC0 |
+| `assets/audio/music_theme.mp3` (main music, "Corrupt Data Stream", dark ambient / cyberpunk) | [Corrupt Data Stream](https://opengameart.org/content/corrupt-data-stream) by Tsorthan Grove | CC0 |
 
 Rain/city ambience is synthesized at runtime with Web Audio (no asset file).
 

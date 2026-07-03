@@ -22,6 +22,39 @@ export async function playSfx(id: string, volume = 0.5) {
   }
 }
 
+// --- Main music -----------------------------------------------------------
+
+let music: Howl | null = null;
+// Gate so a toggle taken before the (async) load, or before the first user
+// gesture, is honoured once the Howl exists / audio is unblocked.
+let musicEnabled = false;
+
+async function ensureMusic(): Promise<Howl | null> {
+  if (music) return music;
+  const url = await getAudioUrl("music_theme");
+  if (!url) return null;
+  music = new Howl({ src: [url], loop: true, volume: 0.3 });
+  return music;
+}
+
+/** Start (or resume) the looping main-music bed, if it is enabled. */
+async function startMusic() {
+  const howl = await ensureMusic();
+  if (howl && musicEnabled && !howl.playing()) howl.play();
+}
+
+/** Stop the main-music bed without forgetting the enabled preference. */
+export function stopMusic() {
+  music?.stop();
+}
+
+/** Live on/off from the settings toggle; starts/stops immediately. */
+export function setMusicEnabled(on: boolean) {
+  musicEnabled = on;
+  if (on) void startMusic();
+  else stopMusic();
+}
+
 // --- Footsteps loop -------------------------------------------------------
 
 let footsteps: Howl | null = null;

@@ -6,6 +6,7 @@
 //  - `useGame` (zustand): UI-reactive state (inventory, chat, connection).
 
 import { create } from "zustand";
+import { setMusicEnabled } from "../assets/audio";
 import { ChunkStore } from "../game/collision";
 import { VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import {
@@ -158,6 +159,7 @@ export const game = {
   reset() {
     this.chunks.clear();
     this.entities.clear();
+    bumpEntityRoster();
     this.localEntityId = 0;
     this.input.moving = false;
     this.input.run = false;
@@ -211,7 +213,32 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
     vz: 0,
   };
   game.entities.set(data.id, entity);
+  bumpEntityRoster();
   return entity;
+}
+
+// ---------------------------------------------------------------------------
+// Entity roster signal: `game.entities` is intentionally non-reactive, but the
+// Entities renderer needs to mount/unmount views the moment spawns/despawns
+// arrive (a polling interval adds up to its period in visible latency).
+// Minimal external-store contract for useSyncExternalStore.
+// ---------------------------------------------------------------------------
+
+let entityRosterVersion = 0;
+const entityRosterListeners = new Set<() => void>();
+
+export function bumpEntityRoster(): void {
+  entityRosterVersion++;
+  for (const listener of entityRosterListeners) listener();
+}
+
+export function subscribeEntityRoster(listener: () => void): () => void {
+  entityRosterListeners.add(listener);
+  return () => entityRosterListeners.delete(listener);
+}
+
+export function getEntityRosterVersion(): number {
+  return entityRosterVersion;
 }
 
 export interface ChatLine {
@@ -280,6 +307,8 @@ export const initialAbilities = (): Record<AbilityKind, AbilityUiState> => ({
 interface UiState {
   connected: boolean;
   joined: boolean;
+  /** First chunk reveal flush happened; the world has visible ground. */
+  worldReady: boolean;
   characterName: string;
   health: number;
   maxHealth: number;
@@ -336,6 +365,8 @@ interface UiState {
   menuOpen: boolean;
   /** Active visual style preset (persisted to localStorage). */
   visualStyle: VisualStyleId;
+  /** Main-music on/off (persisted to localStorage). */
+  musicOn: boolean;
   /** Transient large pickup notice shown center-left (id bumps per event). */
   pickupToast: { text: string; id: number } | null;
 
@@ -348,16 +379,28 @@ interface UiState {
   /** Close every overlay/panel (used when leaving the game screen). */
   closeOverlays: () => void;
   setVisualStyle: (style: VisualStyleId) => void;
+  setMusicOn: (on: boolean) => void;
 }
 
-const STYLE_STORAGE_KEY = "wilder.visualStyle";
+// v2: tron became the default; the key bump intentionally resets everyone's
+// saved style once so the new default takes effect (picker still persists).
+const STYLE_STORAGE_KEY = "wilder.visualStyle.v2";
 
 function loadVisualStyle(): VisualStyleId {
   if (typeof localStorage !== "undefined") {
     const saved = localStorage.getItem(STYLE_STORAGE_KEY) as VisualStyleId | null;
     if (saved && VISUAL_STYLE_IDS.includes(saved)) return saved;
   }
-  return "golden";
+  return "tron";
+}
+
+const MUSIC_STORAGE_KEY = "wilder.musicOn";
+
+function loadMusicOn(): boolean {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem(MUSIC_STORAGE_KEY) !== "false";
+  }
+  return true;
 }
 
 export const useGame: import("zustand").UseBoundStore<
@@ -365,6 +408,7 @@ export const useGame: import("zustand").UseBoundStore<
 > = create<UiState>((set) => ({
   connected: false,
   joined: false,
+  worldReady: false,
   characterName: "",
   health: 100,
   maxHealth: 100,
@@ -399,6 +443,7 @@ export const useGame: import("zustand").UseBoundStore<
   mapOpen: false,
   menuOpen: false,
   visualStyle: loadVisualStyle(),
+  musicOn: loadMusicOn(),
   pickupToast: null,
 
   set: (partial) => set(partial),
@@ -424,6 +469,13 @@ export const useGame: import("zustand").UseBoundStore<
       localStorage.setItem(STYLE_STORAGE_KEY, style);
     }
     set({ visualStyle: style });
+  },
+  setMusicOn: (on) => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(MUSIC_STORAGE_KEY, String(on));
+    }
+    setMusicEnabled(on);
+    set({ musicOn: on });
   },
 }));
 

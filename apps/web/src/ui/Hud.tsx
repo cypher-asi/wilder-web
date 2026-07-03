@@ -45,7 +45,10 @@ export function Hud({ connection }: { connection: GameConnection }) {
             <PositionReadout />
           </div>
           <div className="comms-panel">
-            <StylePicker />
+            <div className="comms-controls">
+              <StylePicker />
+              <MusicToggle />
+            </div>
             <ChatWindow connection={connection} />
           </div>
           <ExtractionBar />
@@ -187,6 +190,21 @@ function StylePicker() {
         </option>
       ))}
     </select>
+  );
+}
+
+/** Persistent HUD button toggling the main music on/off. */
+function MusicToggle() {
+  const musicOn = useGame((s) => s.musicOn);
+  const setMusicOn = useGame((s) => s.setMusicOn);
+  return (
+    <button
+      className={`music-toggle${musicOn ? " on" : ""}`}
+      onClick={() => setMusicOn(!musicOn)}
+      title={musicOn ? "Music on — click to mute" : "Music off — click to play"}
+    >
+      ♪
+    </button>
   );
 }
 

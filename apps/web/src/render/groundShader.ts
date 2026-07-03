@@ -207,31 +207,39 @@ float gNStr = 0.0;
 vec3 gEmissive = vec3(0.0);
 float gPud = 0.0;
 if (uTron > 0.5) {
-  // TRON: stark blue-black slab, all light from emissive lines. This path
-  // does zero texture fetches and skips every grunge/wear field below.
-  gAlb = TRON_BASE * (gKind == 0 ? 0.55 : 1.0);
+  // TRON: blue-black slab lifted just enough that the sun/hemi rig shades
+  // it (lit faces vs shadow read as teal gradients like the reference).
+  // This path does zero texture fetches and skips every grunge field below.
+  gAlb = TRON_BASE * (gKind == 0 ? 1.6 : 3.0);
   gRgh = gKind == 0 ? 0.3 : 0.45;
-  if (gKind > 4 && gKind < 6) { gAlb = TRON_BASE * 0.4; gRgh = 0.08; }
-  // Grid fades with camera distance so far chunks stay clean (no shimmer).
-  float tCamD = distance(wp.xz, cameraPosition.xz);
-  float tFade = 1.0 - smoothstep(60.0, 170.0, tCamD);
-  if (tFade > 0.001) {
-    // Minor line every 4 m, brighter major line every 16 m, AA via fwidth.
-    vec2 tD4 = (0.5 - abs(fract(wp.xz / 4.0) - 0.5)) * 4.0;
-    float tMinor = min(tD4.x, tD4.y);
-    vec2 tD16 = (0.5 - abs(fract(wp.xz / 16.0) - 0.5)) * 16.0;
-    float tMajor = min(tD16.x, tD16.y);
-    float tAA = fwidth(tMinor);
-    float tLine = (1.0 - smoothstep(0.025, 0.05 + tAA, tMinor)) * 0.5
-                + (1.0 - smoothstep(0.045, 0.08 + tAA, tMajor)) * 0.9;
-    // Dim inside road surfaces so streets read as dark channels between
-    // glowing blocks; kill the grid on vertical curb faces.
-    tLine *= (gKind == 0 ? 0.3 : 1.0) * gW.y * tFade;
-    gEmissive += TRON_BLUE * tLine;
+  if (gKind > 4 && gKind < 6) { gAlb = TRON_BASE * 1.2; gRgh = 0.08; }
+  // Grid lines on street surfaces only (sidewalks/plazas stay clean dark
+  // slabs); fades with camera distance so far chunks don't shimmer.
+  if (gKind == 0) {
+    float tCamD = distance(wp.xz, cameraPosition.xz);
+    float tFade = 1.0 - smoothstep(60.0, 170.0, tCamD);
+    if (tFade > 0.001) {
+      // Minor line every 4 m, brighter major line every 16 m, AA via fwidth.
+      vec2 tD4 = (0.5 - abs(fract(wp.xz / 4.0) - 0.5)) * 4.0;
+      float tMinor = min(tD4.x, tD4.y);
+      vec2 tD16 = (0.5 - abs(fract(wp.xz / 16.0) - 0.5)) * 16.0;
+      float tMajor = min(tD16.x, tD16.y);
+      float tAA = fwidth(tMinor);
+      // Thin cores (~a few cm): the AA term carries the width at distance so
+      // up close the lines read as crisp hairlines.
+      float tLine = (1.0 - smoothstep(0.008, 0.02 + tAA, tMinor)) * 0.5
+                  + (1.0 - smoothstep(0.015, 0.035 + tAA, tMajor)) * 0.9;
+      // Narrow, dim halo hugging each line: a faint light bleed onto the
+      // roadbed (kept subtle so the grid reads as crisp lines, not glow).
+      float tHalo = (1.0 - smoothstep(0.0, 0.9, tMajor)) * 0.06
+                  + (1.0 - smoothstep(0.0, 0.3, tMinor)) * 0.03;
+      gEmissive += TRON_BLUE * (tLine * 1.4 + tHalo) * (gW.y * tFade);
+    }
   }
-  // Curb circuit: a hot line tracing every road edge across the city.
-  float tEdge = 1.0 - smoothstep(0.1, 0.3, abs(vRoadD));
-  gEmissive += mix(TRON_BLUE, TRON_WHITE, 0.3) * (tEdge * 2.0);
+  // Curb circuit: a hot hairline tracing every road edge, with its own bleed.
+  float tEdge = 1.0 - smoothstep(0.03, 0.1 + fwidth(vRoadD), abs(vRoadD));
+  float tEdgeHalo = (1.0 - smoothstep(0.0, 1.5, abs(vRoadD))) * 0.3;
+  gEmissive += mix(TRON_BLUE, TRON_WHITE, 0.3) * (tEdge * 2.8 + tEdgeHalo);
 } else if (gKind == 0) {
   // Base kept dark so roads sit low in value and glowing signage carries the
   // frame; the per-batch drift below provides the mid-grey variation.

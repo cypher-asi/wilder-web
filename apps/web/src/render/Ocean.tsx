@@ -192,8 +192,8 @@ export function Ocean() {
     for (const w of [waters.near, waters.far]) {
       const u = w.material.uniforms;
       if (tron) {
-        (u.waterColor.value as THREE.Color).set("#03101f");
-        (u.sunColor.value as THREE.Color).set("#2fb8ff").multiplyScalar(0.35);
+        (u.waterColor.value as THREE.Color).set("#031317");
+        (u.sunColor.value as THREE.Color).set("#4fd0e0").multiplyScalar(0.35);
       } else {
         (u.waterColor.value as THREE.Color).set("#0d2733").multiplyScalar(DISPLAY_TO_SCENE);
         (u.sunColor.value as THREE.Color).set("#ffd9b0").multiplyScalar(DISPLAY_TO_SCENE);

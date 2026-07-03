@@ -30,8 +30,8 @@ const darkMetal = new THREE.MeshStandardMaterial({ color: "#22252b", roughness: 
 tronifyMaterial(poleMat);
 tronifyMaterial(darkMetal);
 
-/** Blue-only sign palette for the tron style (dim steel-blue = "dead"). */
-const TRON_NEON_COLORS = ["#2fb8ff", "#59ccff", "#9fe6ff", "#dff6ff", "#1a86d9"];
+/** Teal-only sign palette for the tron style (dim steel-teal = "dead"). */
+const TRON_NEON_COLORS = ["#4fd0e0", "#72deea", "#a9eef5", "#d6fbff", "#2a9cb0"];
 
 /**
  * Flickering neon sign plane: mostly steady, with per-seed random dropouts
@@ -148,10 +148,10 @@ const poolGeo = new THREE.CircleGeometry(2.4, 24).rotateX(-Math.PI / 2);
 
 /** Light pools under this chunk's streetlights (they render instanced). */
 export function LightPools({ chunk }: { chunk: ChunkData }) {
-  // Warm sodium pools by default; cold blue in tron (shared material, so
+  // Warm sodium pools by default; cold teal in tron (shared material, so
   // every mounted chunk agrees — the set is idempotent).
   const tron = useGame((s) => isTronStyle(s.visualStyle));
-  poolMat.color.set(tron ? "#2fb8ff" : "#ffbe78");
+  poolMat.color.set(tron ? "#4fd0e0" : "#ffbe78");
   const pools = useMemo(
     () =>
       chunk.props

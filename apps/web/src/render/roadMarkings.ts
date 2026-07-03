@@ -407,13 +407,10 @@ float mFbm(vec2 p) {
 vec2 mwp = vMWPos.xz;
 vec3 mEmissive = vec3(0.0);
 if (uTron > 0.5) {
-  // TRON: lane paint becomes clean emissive light lines — yellow (center)
-  // markings burn white, white markings glow blue. No wear, no textures.
-  // (vColor carries white-vs-yellow; it multiplies in later, hence the
-  // read here instead of diffuseColor.)
-  float mYellow = step(0.3, vColor.r - vColor.b);
-  mEmissive = mix(TRON_BLUE * 1.3, TRON_WHITE * 1.5, mYellow);
-  diffuseColor.rgb = vec3(0.0);
+  // TRON: no painted lane lines at all — the grid world has no
+  // thermoplastic. Discard keeps the overlay geometry shared with the
+  // other styles without a rebuild on style switch.
+  discard;
 } else {
 // Wear zones: medium-scale patches where the paint has mostly ground off,
 // plus fine chipping everywhere. Chipped fragments discard to show asphalt.

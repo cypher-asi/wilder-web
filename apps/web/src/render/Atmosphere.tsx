@@ -522,8 +522,8 @@ export const envSkyMaterial = new THREE.ShaderMaterial({
       vec3 dir = normalize(vDir);
       float h = dir.y;
       if (uTron > 0.5) {
-        // Tron reflection sky: black zenith, deep blue horizon band.
-        vec3 tSky = mix(vec3(0.05, 0.22, 0.42), vec3(0.001, 0.003, 0.008),
+        // Tron reflection sky: black zenith, deep teal horizon band.
+        vec3 tSky = mix(vec3(0.04, 0.24, 0.28), vec3(0.001, 0.004, 0.005),
           smoothstep(-0.02, 0.35, h));
         gl_FragColor = vec4(tSky, 1.0);
         return;

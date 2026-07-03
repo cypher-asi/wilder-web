@@ -311,46 +311,46 @@ export const STYLES: Record<VisualStyleId, VisualStyle> = {
     physicalSky: false,
     tron: true,
     exposure: 1.1,
-    fogColor: "#020a16",
+    fogColor: "#031014",
     fogDensity: 0.0026,
     envIntensity: 0.4,
     toon: 0,
     ground: { detail: 0, puddle: 0, wet: 0, sat: 0, tint: [1, 1, 1] },
     facade: { litBoost: 3.0, glowGain: 1.5, warmth: 0, tint: [1, 1, 1] },
     sky: {
-      zenith: "#000307",
-      mid: "#020c1c",
-      horizon: "#0a3a68",
+      zenith: "#000406",
+      mid: "#031418",
+      horizon: "#0a4652",
       sunDir: dir(-0.5, 0.06, 0.3),
-      sunColor: "#39c8ff",
+      sunColor: "#4fd0e0",
       sunHalo: 0.22,
       sunDisc: 0,
       moonDir: dir(0.45, 0.6, -0.4),
-      moonColor: "#bfe8ff",
+      moonColor: "#c9f3f8",
       moonAmt: 0,
       stars: 0.3,
       cloudCover: 0,
-      cloudLit: "#0a2a4a",
-      cloudShade: "#02060e",
+      cloudLit: "#0a3640",
+      cloudShade: "#020a0d",
       cloudSharp: 0.3,
-      envGround: "#020810",
+      envGround: "#020e11",
     },
     lights: {
-      // Dim cool overhead key: shadows read as soft occlusion. The emissive
-      // line work is the real light source of the frame.
-      sunDir: dir(0.2, 0.85, -0.3),
-      sunColor: "#4aa8ff",
-      sunIntensity: 0.55,
-      hemiSky: "#0c2444",
-      hemiGround: "#020610",
-      hemiIntensity: 0.9,
-      ambient: "#0d2a50",
-      ambientIntensity: 0.3,
+      // Angled teal key strong enough to cast readable shadows on the
+      // lifted slab albedo; the emissive lines still carry the frame.
+      sunDir: dir(0.35, 0.75, -0.45),
+      sunColor: "#63c2d4",
+      sunIntensity: 1.3,
+      hemiSky: "#0d353f",
+      hemiGround: "#020c0e",
+      hemiIntensity: 1.3,
+      ambient: "#0e3e48",
+      ambientIntensity: 0.4,
     },
     post: {
-      // Low bloom threshold: every emissive line crosses it and halos.
-      bloom: 1.35,
-      bloomThreshold: 0.32,
+      // Low threshold + hot intensity: every emissive line halos wide.
+      bloom: 2.1,
+      bloomThreshold: 0.24,
       saturation: 0.12,
       brightness: 0.0,
       contrast: 0.12,
@@ -367,6 +367,8 @@ export const styleUniforms = {
   uStyleToon: { value: 0 },
   uStyleExposure: { value: STYLES.golden.exposure },
   uTron: { value: 0 },
+  /** Shared clock driving the tron code-rain scroll (set by tickFacades). */
+  uTronTime: { value: 0 },
   uGDetail: { value: 1 },
   uGPuddle: { value: 0 },
   uGWet: { value: 1 },
@@ -384,11 +386,13 @@ export const styleUniforms = {
 // ---------------------------------------------------------------------------
 
 /** Near-black blue slab color every tron surface collapses to. */
-export const TRON_BASE = new THREE.Color("#02060e");
-/** Primary neon line blue (display-referred; >1 values bloom). */
-export const TRON_BLUE = new THREE.Color("#2fb8ff");
+export const TRON_BASE = new THREE.Color("#020a0d");
+/** Primary neon line color (display-referred; >1 values bloom). Sampled
+ * from the reference wireframe-tunnel plate: teal-cyan line body #42a4b6
+ * with #87e9f8 hot cores. */
+export const TRON_BLUE = new THREE.Color("#4fd0e0");
 /** White-hot core for the brightest accents. */
-export const TRON_WHITE = new THREE.Color("#dff6ff");
+export const TRON_WHITE = new THREE.Color("#d6fbff");
 
 /** True when the given style id renders the tron look. */
 export function isTronStyle(id: VisualStyleId): boolean {
@@ -404,6 +408,52 @@ const vec3 TRON_WHITE = vec3(${TRON_WHITE.r.toFixed(5)}, ${TRON_WHITE.g.toFixed(
 `;
 
 /**
+ * Tron code-rain glyph field, shared by the procedural facade shader and the
+ * GLB building-module materials: hash-only math (no texture fetches), glyph
+ * columns scrolling down at per-column speeds, paragraph gating so faces
+ * read as pages of code, and an fwidth LOD that collapses to a dim wash
+ * before the lattice can shimmer. Expects `tU` (wall-tangent coordinate),
+ * `tVw` (scrolled row coordinate) and `tFc` (face id) in scope; emits
+ * `tCodeGlow`.
+ */
+export const TRON_CODE_GLSL = /* glsl */ `
+float tCol = floor(tU / 0.22);
+float tRow = floor(tVw);
+float tBlk = floor(tU / 2.0);
+float tOn = step(0.3, thash(vec2(tBlk * 3.1 + tFc, floor(tVw / 14.0))));
+tOn *= step(fract(tU / 2.0), 0.15 + 0.85 * thash(vec2(tBlk + tFc, tRow * 0.37)));
+float tGl = step(0.42, thash(vec2(tCol * 1.31 + tFc, tRow)));
+vec2 tFr = vec2(fract(tU / 0.22), fract(tVw));
+float tCellIn = step(0.14, tFr.x) * step(tFr.x, 0.86) * step(0.22, tFr.y) * step(tFr.y, 0.86);
+float tLod = 1.0 - smoothstep(0.35, 1.0, fwidth(tU) / 0.22);
+float tCode = mix(0.2 * tOn, tOn * tGl * tCellIn, tLod);
+float tBr = 0.6 + 0.9 * thash(vec2(tCol, tRow) + tFc);
+vec3 tCodeGlow = mix(TRON_BLUE, TRON_WHITE,
+  step(0.94, thash(vec2(tCol * 2.17 + tFc, tRow * 0.91)))) * (tCode * tBr);
+`;
+
+/** Seedless hash used by the shared tron code field. */
+export const TRON_HASH_GLSL = /* glsl */ `
+float thash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+`;
+
+export interface TronifyOptions {
+  /**
+   * Building-module GLBs: wall faces additionally run the scrolling code
+   * field so imported towers match the procedural facade look.
+   */
+  codeRain?: boolean;
+  /**
+   * Emissive multiplier for the code field (default 1). The distant city
+   * proxy uses a low gain so background massing reads as faint code ghosts
+   * behind the bright streamed towers.
+   */
+  codeRainGain?: number;
+}
+
+/**
  * Wire a stock three.js material (Standard/Lambert/Basic — anything built on
  * the common shader chunks) into tron mode: albedo collapses to the flat
  * blue-black slab (no texture or vertex color reads through; only lighting
@@ -414,9 +464,15 @@ const vec3 TRON_WHITE = vec3(${TRON_WHITE.r.toFixed(5)}, ${TRON_WHITE.g.toFixed(
  * `cacheKey` must be unique per distinct pre-existing onBeforeCompile so
  * materials with different custom shader code never share a program.
  */
-export function tronifyMaterial(mat: THREE.Material, cacheKey = "tron-std"): void {
+export function tronifyMaterial(
+  mat: THREE.Material,
+  cacheKey = "tron-std",
+  opts: TronifyOptions = {},
+): void {
   if (mat.userData.tronified) return;
   mat.userData.tronified = true;
+  const codeRain = opts.codeRain === true;
+  const codeGain = opts.codeRainGain ?? 1;
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
     prev?.call(mat, shader, renderer);
@@ -426,7 +482,7 @@ export function tronifyMaterial(mat: THREE.Material, cacheKey = "tron-std"): voi
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
-if (uTron > 0.5) diffuseColor.rgb = TRON_BASE;`,
+if (uTron > 0.5) diffuseColor.rgb = TRON_BASE * 2.4;`,
       )
       .replace(
         "#include <emissivemap_fragment>",
@@ -436,8 +492,49 @@ if (uTron > 0.5) {
   totalEmissiveRadiance = mix(TRON_BLUE, TRON_WHITE, clamp(tEl - 1.0, 0.0, 1.0)) * tEl;
 }`,
       );
+    if (!codeRain) return;
+    shader.uniforms.uTronTime = styleUniforms.uTronTime;
+    // Instancing-aware world position varying (kit modules render through
+    // InstancedMesh, so instanceMatrix must fold in). The wall normal is
+    // derived per-fragment from position derivatives instead of a varying:
+    // the city-proxy geometry ships no normal attribute at all.
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTronW;")
+      .replace(
+        "#include <worldpos_vertex>",
+        /* glsl */ `#include <worldpos_vertex>
+{
+  vec4 tW = vec4(transformed, 1.0);
+  #ifdef USE_INSTANCING
+    tW = instanceMatrix * tW;
+  #endif
+  vTronW = (modelMatrix * tW).xyz;
+}`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        /* glsl */ `#include <common>
+varying vec3 vTronW;
+uniform float uTronTime;
+${TRON_HASH_GLSL}`,
+      )
+      .replace(
+        "if (uTron > 0.5) {\n  float tEl",
+        /* glsl */ `if (uTron > 0.5) {
+  vec3 tWn = normalize(cross(dFdx(vTronW), dFdy(vTronW)));
+  if (abs(tWn.y) < 0.5 && vTronW.y > 0.3) {
+    float tU = (abs(tWn.x) > abs(tWn.z)) ? vTronW.z : vTronW.x;
+    float tFc = (abs(tWn.x) > abs(tWn.z)) ? (2.0 + step(0.0, tWn.x)) : (7.0 + step(0.0, tWn.z));
+    float tSpd = 1.5 + 3.5 * thash(vec2(floor(tU / 0.22), tFc));
+    float tVw = -vTronW.y / 0.16 - uTronTime * tSpd;
+    ${TRON_CODE_GLSL}
+    totalEmissiveRadiance += (tCodeGlow * 1.5 + TRON_BLUE * 0.04) * ${codeGain.toFixed(3)};
+  }
+  float tEl`,
+      );
   };
-  mat.customProgramCacheKey = () => cacheKey;
+  mat.customProgramCacheKey = () => cacheKey + (codeRain ? `-code${codeGain}` : "");
 }
 
 /** GLSL declarations for the toon/style uniforms shared by both shaders. */

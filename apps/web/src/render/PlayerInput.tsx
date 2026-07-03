@@ -647,22 +647,42 @@ function AimRing() {
     group.current.rotation.set(-Math.PI / 2, 0, -game.aim.yaw);
   });
 
+  // toneMapped={false} keeps the teal above the bloom threshold so the ring
+  // reads as a soft glowing circuit rather than flat painted UI.
   return (
     <group ref={group} visible={false}>
       {/* base ring */}
       <mesh>
-        <ringGeometry args={[0.55, 0.64, 40]} />
-        <meshBasicMaterial color="#ff3040" transparent opacity={0.65} depthWrite={false} />
+        <ringGeometry args={[0.57, 0.615, 40]} />
+        <meshBasicMaterial
+          color="#4fd0e0"
+          transparent
+          opacity={0.4}
+          depthWrite={false}
+          toneMapped={false}
+        />
       </mesh>
       {/* direction arc (centered on local +X = aim direction) */}
       <mesh>
-        <ringGeometry args={[0.68, 0.84, 16, 1, -0.45, 0.9]} />
-        <meshBasicMaterial color="#ff3040" transparent opacity={0.95} depthWrite={false} />
+        <ringGeometry args={[0.68, 0.76, 16, 1, -0.45, 0.9]} />
+        <meshBasicMaterial
+          color="#8fe6f2"
+          transparent
+          opacity={0.7}
+          depthWrite={false}
+          toneMapped={false}
+        />
       </mesh>
       {/* aim line extending toward the cursor */}
       <mesh position={[2.05, 0, 0]}>
-        <planeGeometry args={[2.2, 0.05]} />
-        <meshBasicMaterial color="#ff3040" transparent opacity={0.3} depthWrite={false} />
+        <planeGeometry args={[2.2, 0.035]} />
+        <meshBasicMaterial
+          color="#4fd0e0"
+          transparent
+          opacity={0.18}
+          depthWrite={false}
+          toneMapped={false}
+        />
       </mesh>
     </group>
   );

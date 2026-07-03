@@ -269,8 +269,8 @@ function applyMannequinPalette(
     const m = f.mat;
     if (f.joints) {
       if (tron) {
-        m.color.set(0x04060c);
-        m.emissive.set(hostile ? 0xff4028 : 0x2fb8ff);
+        m.color.set(0x04080c);
+        m.emissive.set(hostile ? 0xff4028 : 0x4fd0e0);
         m.emissiveIntensity = hostile ? 2.6 : 3.2;
         m.roughness = 0.3;
         m.metalness = 0.6;
@@ -282,10 +282,10 @@ function applyMannequinPalette(
         m.metalness = 0.5;
       }
     } else if (tron) {
-      // Tron shell: black silhouette with a faint blue self-glow so the
+      // Tron shell: black silhouette with a faint teal self-glow so the
       // body reads against the black city.
-      m.color.set(0x04070e);
-      m.emissive.set(0x0d3a66);
+      m.color.set(0x040a0e);
+      m.emissive.set(0x0d4552);
       m.emissiveIntensity = 0.35;
       m.roughness = 0.4;
       m.metalness = 0.75;
@@ -688,13 +688,13 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
   const tron = useGame((s) => isTronStyle(s.visualStyle));
-  const tint = tron ? new THREE.Color("#2fb8ff") : new THREE.Color(entity.tint);
+  const tint = tron ? new THREE.Color("#4fd0e0") : new THREE.Color(entity.tint);
   const isNpc = entity.kind === "Npc";
-  const bodyColor = tron ? "#04070e" : isNpc ? "#4a3038" : "#2b3550";
+  const bodyColor = tron ? "#040a0e" : isNpc ? "#4a3038" : "#2b3550";
   const visor = tron
     ? isNpc
       ? "#ff4028"
-      : "#2fb8ff"
+      : "#4fd0e0"
     : isNpc
       ? "#ff4444"
       : "#40e8ff";

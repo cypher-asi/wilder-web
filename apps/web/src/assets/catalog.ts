@@ -46,10 +46,15 @@ const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
 const modelCache = new Map<string, Promise<LoadedModel | null>>();
 
+/** Building-shell assets whose walls run the tron code rain (towers read as
+ * glowing data-cubes); props, vehicles and characters stay plain slabs. */
+const CODE_RAIN_IDS = /skyscraper|cb01|floor_|groundfloor|storefront|slum|structure|cyberpunk/;
+
 async function loadModel(id: string): Promise<LoadedModel | null> {
   await loadManifest();
   const entry = manifest?.get(id);
   if (!entry) return null;
+  const codeRain = CODE_RAIN_IDS.test(id);
   try {
     const gltf = await loader.loadAsync(`/assets/${entry.path}`);
     gltf.scene.traverse((obj) => {
@@ -67,7 +72,7 @@ async function loadModel(id: string): Promise<LoadedModel | null> {
           // Tron mode collapses every authored asset material to the black
           // slab (idempotent across shared materials; material clones drop
           // onBeforeCompile, so restyled characters are unaffected).
-          tronifyMaterial(m);
+          tronifyMaterial(m, "tron-std", { codeRain });
         }
       }
     });

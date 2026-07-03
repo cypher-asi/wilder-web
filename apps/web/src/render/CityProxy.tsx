@@ -35,7 +35,7 @@ import {
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game } from "../state/game";
 import { proxyCovers, revealedChunks, REVEAL_FADE_MS } from "./chunkBuilder";
-import { tronifyMaterial } from "./styles";
+import { styleUniforms, TRON_BLUE, tronifyMaterial } from "./styles";
 
 /** Proxy cell size in meters (8x8 chunks): the frustum-culling granularity. */
 const CELL = 256;
@@ -51,9 +51,11 @@ const SLICE_TRIS = 100_000;
 const FOG_CUTOFF = Math.sqrt(-Math.log(0.02)); // exp(-(d*dist)^2) < 2%
 
 interface ProxyCell {
-  mesh: THREE.Mesh;
+  mesh: THREE.Object3D;
   center: THREE.Vector3;
   radius: number;
+  /** Only rendered in the tron style (glowing building edge lines). */
+  tronOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,12 +152,12 @@ const TILE_RECENTER = 128;
 // sampler): averages of what the full ground shader converges to, so the
 // handoff at the streamed ring reads as a continuation, not a material swap.
 const TILE_COLORS: [number, number, number][] = [];
-TILE_COLORS[CITY_ROAD] = [40, 40, 44];
-TILE_COLORS[CITY_ROAD_LINE] = [104, 102, 96];
-TILE_COLORS[CITY_SIDEWALK] = [112, 109, 102];
-TILE_COLORS[CITY_PLAZA] = [98, 97, 95];
-TILE_COLORS[CITY_BUILDING] = [66, 62, 58];
-TILE_COLORS[CITY_PARK] = [58, 72, 48];
+TILE_COLORS[CITY_ROAD] = [90, 87, 86];
+TILE_COLORS[CITY_ROAD_LINE] = [168, 161, 150];
+TILE_COLORS[CITY_SIDEWALK] = [174, 168, 158];
+TILE_COLORS[CITY_PLAZA] = [150, 147, 142];
+TILE_COLORS[CITY_BUILDING] = [116, 108, 100];
+TILE_COLORS[CITY_PARK] = [86, 106, 72];
 TILE_COLORS[CITY_WATER] = [30, 44, 54];
 
 const tilePal32 = new Uint32Array(8);
@@ -176,7 +178,7 @@ tileTexture.colorSpace = THREE.SRGBColorSpace;
 tileTexture.generateMipmaps = true;
 tileTexture.minFilter = THREE.LinearMipmapLinearFilter;
 tileTexture.magFilter = THREE.LinearFilter;
-tileTexture.anisotropy = 4;
+tileTexture.anisotropy = 8;
 
 const tileUniforms = {
   uTiles: { value: tileTexture },
@@ -250,31 +252,99 @@ const CUTOUT_FRAG = /* glsl */ `
 }
 `;
 
-// Buildings: darker base with a height gradient (street level reads as
-// shadowed massing, tops catch the light) plus faint 3 m floor bands that
-// fade out with distance -- distant boxes read as buildings, not white slabs.
+// Buildings: per-building tone variation, a height gradient (street level
+// reads as shadowed massing, tops catch the light), and a window grid on the
+// facades with a sparse scatter of warm lit interiors -- distant boxes read
+// as buildings, not flat slabs.
 const BUILDING_TINT_FRAG = /* glsl */ `
 {
-  float pxGrade = mix(0.32, 1.0, vRelH * vRelH);
-  float pxBand = step(0.5, fract(vPxWorld.y / 3.0));
+  // Flat face normal from derivatives (same math flatShading uses later).
+  vec3 pxN = normalize(cross(dFdx(vPxWorld), dFdy(vPxWorld)));
+  float pxWall = 1.0 - smoothstep(0.45, 0.75, abs(pxN.y));
   float pxDist = distance(vPxWorld, cameraPosition);
-  pxGrade *= 1.0 - 0.12 * pxBand * clamp(1.0 - pxDist / 450.0, 0.0, 1.0);
-  diffuseColor.rgb *= pxGrade;
+  float pxDetail = clamp(1.0 - (pxDist - 500.0) / 300.0, 0.0, 1.0);
+
+  // Per-building-ish tone: a quantized world hash (36 m cells, about one
+  // footprint) shifts neighboring towers between warm and cool concrete.
+  vec2 pxBid = floor((vPxWorld.xz + 7.0) / 36.0);
+  float pxH = fract(sin(dot(pxBid, vec2(127.1, 311.7))) * 43758.5453);
+  float pxH2 = fract(pxH * 7.31 + 0.17);
+  diffuseColor.rgb *=
+    mix(vec3(1.07, 1.0, 0.9), vec3(0.88, 0.94, 1.06), pxH) * (0.78 + 0.42 * pxH2);
+
+  // Height grade: shadowed street level up to lit tops.
+  diffuseColor.rgb *= mix(0.35, 1.0, vRelH * vRelH);
+
+  // Window grid on facades (roofs masked off): dark glass cells with a few
+  // warm lit interiors, faded out with distance before it can shimmer.
+  vec2 pxWuv = vec2((vPxWorld.x + vPxWorld.z) * 0.36, vPxWorld.y * 0.32);
+  vec2 pxWf = fract(pxWuv);
+  float pxWin = step(pxWf.x, 0.6) * step(0.28, pxWf.y) * step(pxWf.y, 0.8);
+  float pxWinAmt = pxWin * pxWall * pxDetail;
+  diffuseColor.rgb *= 1.0 - 0.5 * pxWinAmt;
+  float pxLit =
+    step(0.92, fract(sin(dot(floor(pxWuv) + pxBid, vec2(53.7, 97.3))) * 24634.63));
+  pxWinGlow = vec3(1.0, 0.72, 0.42) * (0.4 * pxLit * pxWinAmt) * (1.0 - uTron);
 }
 `;
 
 // Ground: inside the tile window, replace the flat land color with the baked
 // per-tile street palette so roads continue far beyond the streamed chunks.
+// The grazing-angle boost stands in for the view-dependent sheen the real
+// ground shader has: without it the proxy reads far darker than the streamed
+// road at street-level view angles and the handoff shows as a dark band.
 // uTron guard: tron mode's flat black base (injected ahead of this block by
 // tronifyMaterial) must win over the palette.
 const GROUND_TILES_FRAG = /* glsl */ `
-{
+if (uTron < 0.5) {
   vec2 tuv = (vPxWorld.xz - uTilesOrigin) / ${TILE_SPAN.toFixed(1)};
-  if (uTron < 0.5 && tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x < 1.0 && tuv.y < 1.0) {
+  if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x < 1.0 && tuv.y < 1.0) {
     diffuseColor.rgb = texture2D(uTiles, tuv).rgb;
   }
+  vec3 pxV = normalize(cameraPosition - vPxWorld);
+  float pxGrz = pow(1.0 - clamp(pxV.y, 0.0, 1.0), 4.0);
+  diffuseColor.rgb *= 1.0 + 1.1 * pxGrz;
 }
 `;
+
+// Tron building outlines: hard edges of the proxy massing drawn as emissive
+// blue lines, so the distant skyline reads as dark slabs rimmed with glowing
+// borders. Unlit line color bright enough to trip the tron bloom pass; scene
+// fog still grades the lines out toward the horizon. Same occupancy cutout
+// as the massing. Depth testing stays fully on — hidden edges must not show
+// through walls (the slabs are opaque, not wireframe). Lines lie exactly on
+// the faces they outline, so each vertex is pulled a fixed 0.4 m toward the
+// camera in view space: enough to always win the depth test against its own
+// wall, far below any building-to-building spacing, and (unlike a
+// slope-scaled polygon offset or an NDC bias) it does not blow up with
+// distance and drag occluded lines through the buildings in front of them.
+function makeEdgeMaterial(): THREE.LineBasicMaterial {
+  const mat = new THREE.LineBasicMaterial({
+    color: TRON_BLUE.clone().multiplyScalar(1.4),
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uOcc = occUniforms.uOcc;
+    shader.uniforms.uOccOrigin = occUniforms.uOccOrigin;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vPxWorld;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vPxWorld = (modelMatrix * vec4(position, 1.0)).xyz;`,
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+        mvPosition.xyz -= normalize(mvPosition.xyz) * 0.4;
+        gl_Position = projectionMatrix * mvPosition;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>\n${CUTOUT_FRAG_DECLS}`)
+      .replace("#include <color_fragment>", `#include <color_fragment>\n${CUTOUT_FRAG}`);
+  };
+  mat.customProgramCacheKey = () => "tron-proxy-edges";
+  return mat;
+}
 
 function makeProxyMaterial(color: string, relH: boolean): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ color, flatShading: true });
@@ -301,7 +371,11 @@ function makeProxyMaterial(color: string, relH: boolean): THREE.MeshLambertMater
         "#include <common>",
         `#include <common>
         ${CUTOUT_FRAG_DECLS}
-        ${relH ? "varying float vRelH;" : "uniform sampler2D uTiles; uniform vec2 uTilesOrigin;"}`,
+        ${
+          relH
+            ? "varying float vRelH; vec3 pxWinGlow = vec3(0.0);"
+            : "uniform sampler2D uTiles; uniform vec2 uTilesOrigin;"
+        }`,
       )
       .replace(
         "#include <color_fragment>",
@@ -309,11 +383,22 @@ function makeProxyMaterial(color: string, relH: boolean): THREE.MeshLambertMater
         ${CUTOUT_FRAG}
         ${relH ? BUILDING_TINT_FRAG : GROUND_TILES_FRAG}`,
       );
+    if (relH) {
+      // Lit windows: computed in color_fragment, applied on the emissive
+      // path (after tron's remap, hence the uTron gate where it's built).
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        totalEmissiveRadiance += pxWinGlow;`,
+      );
+    }
   };
   // Distant massing joins the black slab world in tron mode. Distinct cache
   // keys: the two proxy programs differ (aRelH tint) beyond their params.
   // Tron's flat base lands before the relH multiply, so the far skyline
-  // keeps its height-graded value variation.
+  // keeps its height-graded value variation. No code field on the proxy:
+  // background buildings are solid dark slabs (same black as the ground
+  // plane) whose only light is the glowing edge outlines.
   tronifyMaterial(mat, relH ? "tron-proxy-bldg" : "tron-proxy-gnd");
   return mat;
 }
@@ -536,12 +621,46 @@ async function buildGroundCells(material: THREE.Material): Promise<ProxyCell[]> 
   return cells;
 }
 
+/**
+ * Glowing edge outlines for every building cell, built lazily the first time
+ * the tron style is active (other styles never pay the extraction cost).
+ * Shares the massing cells' bounds so the same range cull applies, and the
+ * cells are appended to the live assets so the frame loop picks them up.
+ */
+async function buildEdgeCells(cells: ProxyCell[]): Promise<ProxyCell[]> {
+  const material = makeEdgeMaterial();
+  const out: ProxyCell[] = [];
+  let sinceYield = 0;
+  // Snapshot: the caller appends the result to the same array.
+  for (const cell of [...cells]) {
+    const geo = (cell.mesh as THREE.Mesh).geometry;
+    // Building cells only (ground cells carry no aRelH attribute).
+    if (!geo.getAttribute("aRelH")) continue;
+    // 10 deg threshold: keeps every hard blockout edge, drops the coplanar
+    // triangulation seams across flat roofs and walls.
+    const edges = new THREE.EdgesGeometry(geo, 10);
+    edges.boundingBox = geo.boundingBox;
+    edges.boundingSphere = geo.boundingSphere;
+    const lines = new THREE.LineSegments(edges, material);
+    lines.raycast = () => {};
+    lines.visible = false;
+    out.push({ mesh: lines, center: cell.center, radius: cell.radius, tronOnly: true });
+    sinceYield += (geo.index?.count ?? 0) / 3;
+    if (sinceYield > SLICE_TRIS) {
+      sinceYield = 0;
+      await idle();
+    }
+  }
+  return out;
+}
+
 interface ProxyAssets {
   group: THREE.Group;
   cells: ProxyCell[];
 }
 
 let assetsPromise: Promise<ProxyAssets> | null = null;
+let edgesStarted = false;
 
 function loadProxyAssets(): Promise<ProxyAssets> {
   assetsPromise ??= (async () => {
@@ -603,13 +722,26 @@ export function CityProxy() {
     tickTileWindow();
     if (!assets) return;
 
+    const tronOn = styleUniforms.uTron.value > 0.5;
+    // First frame in tron mode: kick off the one-time edge-line build in the
+    // background; the outlines pop in cell by cell as they finish.
+    if (tronOn && !edgesStarted) {
+      edgesStarted = true;
+      void buildEdgeCells(assets.cells).then((edgeCells) => {
+        for (const cell of edgeCells) assets.group.add(cell.mesh);
+        assets.cells.push(...edgeCells);
+      });
+    }
+
     // Range cull: past the distance where fog eats everything (or the far
     // plane) a cell cannot contribute pixels, so skip its draw entirely.
     const density =
       scene.fog instanceof THREE.FogExp2 ? scene.fog.density : 0.0035;
     const cutoff = Math.min(camera.far, FOG_CUTOFF / Math.max(density, 1e-5));
     for (const cell of assets.cells) {
-      cell.mesh.visible = cell.center.distanceTo(camera.position) - cell.radius < cutoff;
+      cell.mesh.visible =
+        (!cell.tronOnly || tronOn) &&
+        cell.center.distanceTo(camera.position) - cell.radius < cutoff;
     }
   });
 

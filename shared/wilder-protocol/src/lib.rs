@@ -52,6 +52,8 @@ pub enum C2S {
     /// NPC vendor actions (Armory, Bodega, Bank...). Requires being in reach
     /// of the vendor building.
     Vendor { vendor: EntityId, action: VendorAction },
+    /// Subscribe/unsubscribe to live economy ledger updates (K dashboard).
+    EconomySub { on: bool },
     Chat { text: String },
     Pong { nonce: u32 },
 }
@@ -60,8 +62,13 @@ pub enum C2S {
 #[serde(tag = "t", content = "d")]
 pub enum InventoryAction {
     MoveSlot { from: u16, to: u16 },
-    Equip { slot: u16 },
-    Unequip { weapon: bool },
+    /// Equip from a backpack slot. `weapon_slot` picks Weapon 1 (0) or
+    /// Weapon 2 (1) for weapons; ignored for armor. Defaults to Weapon 1.
+    Equip { slot: u16, #[serde(default)] weapon_slot: Option<u8> },
+    /// Unequip a weapon (per `weapon_slot`, default Weapon 1) or armor.
+    Unequip { weapon: bool, #[serde(default)] weapon_slot: Option<u8> },
+    /// Switch the weapon in hand between Weapon 1 (0) and Weapon 2 (1).
+    SelectWeapon { weapon_slot: u8 },
     Drop { slot: u16 },
     /// Move items between inventory and stash (only near stash access).
     Deposit { slot: u16 },
@@ -139,6 +146,11 @@ pub enum S2C {
     /// Territory control overlay: every region not under neutral control.
     TerritoryState { cells: Vec<TerritoryCell> },
     BlueprintsUpdate { known: Vec<String> },
+    /// Full economy snapshot on dashboard subscribe: aggregate stats plus the
+    /// recent transaction feed (oldest first).
+    EconomyState { stats: EconomyStats, recent: Vec<EconTx> },
+    /// Per-tick batch of new ledger transactions for subscribers.
+    EconomyTxs { txs: Vec<EconTx>, stats: EconomyStats },
     Chat { from: String, text: String },
     Ping { nonce: u32 },
     Error { message: String },

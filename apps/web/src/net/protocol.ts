@@ -89,7 +89,12 @@ export interface ItemStack {
 
 export interface Inventory {
   slots: (ItemStack | null)[];
+  /** Weapon 1 equip slot. */
   equipped_weapon: ItemKind | null;
+  /** Weapon 2 equip slot. */
+  equipped_weapon2: ItemKind | null;
+  /** Which weapon slot is in hand: 0 = Weapon 1, 1 = Weapon 2. */
+  active_weapon: number;
   equipped_armor: ItemKind | null;
 }
 
@@ -187,8 +192,9 @@ type TaggedUnit<T extends string> = { t: T };
 
 export type InventoryActionMsg =
   | Tagged<"MoveSlot", { from: number; to: number }>
-  | Tagged<"Equip", { slot: number }>
-  | Tagged<"Unequip", { weapon: boolean }>
+  | Tagged<"Equip", { slot: number; weapon_slot?: number | null }>
+  | Tagged<"Unequip", { weapon: boolean; weapon_slot?: number | null }>
+  | Tagged<"SelectWeapon", { weapon_slot: number }>
   | Tagged<"Drop", { slot: number }>
   | Tagged<"Deposit", { slot: number }>
   | Tagged<"Withdraw", { stash_slot: number }>;

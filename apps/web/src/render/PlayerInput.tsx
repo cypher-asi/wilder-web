@@ -1,6 +1,8 @@
 // Input: WASD (camera-relative) with client prediction at the server tick
-// rate, twin-stick mouse aim (character faces the cursor), and hold-LMB to
-// fire at the aim point. Movement is WASD only (no click-to-move).
+// rate, and hold-LMB to fire at the aim point. Movement is WASD only (no
+// click-to-move). Aiming is mouse-look while the canvas holds pointer lock
+// (character faces camera forward, shots raycast from the center crosshair);
+// the legacy twin-stick cursor aim remains as the unlocked fallback.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -18,8 +20,8 @@ import { playSfx } from "../assets/audio";
 import { GameConnection } from "../net/connection";
 import { AbilityKind } from "../net/protocol";
 import { perf } from "../perf/perf";
-import { game, GameEntity, useGame, weaponHotbar } from "../state/game";
-import { cameraKick, cameraState } from "./CameraRig";
+import { activeWeaponKind, game, GameEntity, useGame } from "../state/game";
+import { cameraKick, cameraState, OTS_START_DISTANCE } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
 
 const TICK_DT = 1 / 20;
@@ -61,18 +63,18 @@ const SHOT_BUFFER_MS = 350;
 
 const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
 
-export function equippedCooldown(): number {
-  const weapon = useGame.getState().inventory?.equipped_weapon;
+function equippedCooldown(): number {
+  const weapon = activeWeaponKind(useGame.getState().inventory);
   return (weapon && WEAPON_COOLDOWN[weapon]) || FIST_COOLDOWN;
 }
 
 function equippedRange(): number {
-  const weapon = useGame.getState().inventory?.equipped_weapon;
+  const weapon = activeWeaponKind(useGame.getState().inventory);
   return (weapon && WEAPON_RANGE[weapon]) || FIST_RANGE;
 }
 
 function hasRangedWeapon(): boolean {
-  const weapon = useGame.getState().inventory?.equipped_weapon;
+  const weapon = activeWeaponKind(useGame.getState().inventory);
   return weapon != null && RANGED_WEAPONS.has(weapon);
 }
 
@@ -90,9 +92,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   const accumulator = useRef(0);
   const pointer = useRef({ x: 0, y: 0, inside: false });
   const firing = useRef(false);
-  // Sprint is a toggle (tap Shift), not a hold: holding Shift while
-  // right-clicking to move triggers Brave/Firefox's forced context menu,
-  // which the page cannot suppress.
+  // Sprint is hold-to-run: running only while Shift is held down.
   const running = useRef(false);
   const lastShotAt = useRef(0);
   /** Timestamp of the latest unconsumed click, for the shot buffer. */
@@ -144,7 +144,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         return;
       }
       keys.current[event.code] = true;
-      if (event.code === "KeyI" || event.code === "Tab") {
+      if (event.code === "KeyI" || event.code === "Tab" || event.code === "KeyB") {
         event.preventDefault();
         useGame.getState().toggleInventory();
       }
@@ -152,8 +152,8 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         event.preventDefault();
         useGame.getState().toggleMap();
       }
-      if ((event.code === "ShiftLeft" || event.code === "ShiftRight") && !event.repeat) {
-        running.current = !running.current;
+      if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+        running.current = true;
       }
       if (event.code === "Enter") {
         // Prevent the same key stroke from submitting the just-focused input.
@@ -164,7 +164,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         event.preventDefault();
         startRoll();
       }
-      if ((event.code === "ControlLeft" || event.code === "KeyC") && !event.repeat) {
+      // Ctrl is hold-to-crouch (crouch while held); C stays a toggle.
+      if ((event.code === "ControlLeft" || event.code === "ControlRight") && !event.repeat) {
+        event.preventDefault();
+        setCrouch(true);
+      }
+      if (event.code === "KeyC" && !event.repeat) {
         event.preventDefault();
         toggleCrouch();
       }
@@ -175,11 +180,17 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (digit && !event.repeat) {
         const n = Number(digit[1]);
         if (n === 0) holsterToFists();
-        else switchWeapon(n - 1);
+        else if (n === 1 || n === 2) selectWeapon(n - 1);
       }
     };
     const up = (event: KeyboardEvent) => {
       keys.current[event.code] = false;
+      if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+        running.current = false;
+      }
+      if (event.code === "ControlLeft" || event.code === "ControlRight") {
+        setCrouch(false);
+      }
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -198,6 +209,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      // The unlocked canvas click only (re)acquires pointer lock (CameraRig);
+      // it must not double as a trigger pull.
+      if (!cameraState.locked) return;
       const now = performance.now();
       // Draw is a ranged-only concept: melee/fists punch immediately with no
       // draw delay and no invisible-gun aim pose.
@@ -214,7 +228,13 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const onPointerUp = (event: PointerEvent) => {
       if (event.button === 0) firing.current = false;
     };
-    const onBlur = () => (firing.current = false);
+    const onBlur = () => {
+      firing.current = false;
+      // Held keys never get their keyup once focus leaves; release run/crouch
+      // so the player doesn't stay stuck sprinting or crouched.
+      running.current = false;
+      setCrouch(false);
+    };
 
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -274,10 +294,15 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     connection.send({ t: "Roll", d: { seq, dx, dz } });
   }
 
+  function setCrouch(on: boolean) {
+    if (game.localEntityId === 0 || game.crouching === on) return;
+    if (on && game.roll) return; // can't crouch mid-roll
+    game.crouching = on;
+    connection.send({ t: "SetCrouch", d: { on } });
+  }
+
   function toggleCrouch() {
-    if (game.roll || game.localEntityId === 0) return;
-    game.crouching = !game.crouching;
-    connection.send({ t: "SetCrouch", d: { on: game.crouching } });
+    setCrouch(!game.crouching);
   }
 
   /** Q/E/R: fire an ability if it's off cooldown (server re-validates). */
@@ -289,12 +314,28 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     connection.send({ t: "UseAbility", d: { seq, ability } });
   }
 
-  /** Keys 1-4: use the matching consumable hotbar slot. */
-  function useConsumable(index: number) {
+  /** Keys 1/2: switch the weapon in hand to Weapon 1 / Weapon 2. */
+  function selectWeapon(weaponSlot: number) {
     if (game.localEntityId === 0) return;
-    const entry = consumableHotbar(useGame.getState().inventory)[index];
-    if (!entry) return;
-    connection.send({ t: "UseItem", d: { slot: entry.slot } });
+    const inv = useGame.getState().inventory;
+    if (!inv || inv.active_weapon === weaponSlot) return;
+    game.gun.drawn = false;
+    connection.send({
+      t: "InventoryAction",
+      d: { t: "SelectWeapon", d: { weapon_slot: weaponSlot } },
+    });
+  }
+
+  /** Key 0: holster the active weapon and fight bare-fisted (melee). */
+  function holsterToFists() {
+    if (game.localEntityId === 0) return;
+    const inv = useGame.getState().inventory;
+    if (!inv || !activeWeaponKind(inv)) return;
+    game.gun.drawn = false;
+    connection.send({
+      t: "InventoryAction",
+      d: { t: "Unequip", d: { weapon: true, weapon_slot: inv.active_weapon } },
+    });
   }
 
   useFrame((_, rawDt) => {
@@ -391,8 +432,40 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     return best ? { x: best.x, z: best.z } : { x: game.aim.x, z: game.aim.z };
   }
 
-  /** Project the cursor onto the ground plane at the player's elevation. */
+  /**
+   * Mouse-look (pointer locked): aim straight along camera forward, with the
+   * aim point taken from the center-crosshair ray. Unlocked fallback: project
+   * the cursor onto the ground plane at the player's elevation (twin-stick).
+   */
   function updateAim() {
+    if (cameraState.locked) {
+      // RMB free-look: hold the current facing while the camera swings.
+      if (cameraState.dragging) return;
+      const px = game.rendered.x;
+      const pz = game.rendered.z;
+      // cameraState.yaw points from player toward the camera; forward is the
+      // opposite direction.
+      game.aim.yaw = cameraState.yaw + Math.PI;
+      // Screen center is the aim reference for everything (crosshair,
+      // reticle, fire target).
+      game.pointer.ndcX = 0;
+      game.pointer.ndcY = 0;
+      game.pointer.inside = true;
+      groundPlane.current.constant = -groundHeightAt(px, pz);
+      aimNdcScratch.set(0, 0);
+      raycaster.current.setFromCamera(aimNdcScratch, camera);
+      const centerHit = aimHitScratch;
+      if (raycaster.current.ray.intersectPlane(groundPlane.current, centerHit)) {
+        game.aim.x = centerHit.x;
+        game.aim.z = centerHit.z;
+      } else {
+        // Looking above the horizon: aim far along forward on the ground.
+        game.aim.x = px + Math.cos(game.aim.yaw) * 50;
+        game.aim.z = pz + Math.sin(game.aim.yaw) * 50;
+      }
+      game.aim.active = true;
+      return;
+    }
     if (!pointer.current.inside) {
       game.aim.active = false;
       return;
@@ -509,7 +582,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         dirZ: Math.cos(yaw),
         at: now,
       });
-      const weapon = useGame.getState().inventory?.equipped_weapon;
+      const weapon = activeWeaponKind(useGame.getState().inventory);
       cameraKick(weapon === "Smg" ? 0.1 : 0.22, yaw);
     }
   }
@@ -546,7 +619,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (!dir) return;
     const [dx, dz] = dir;
 
-    const run = running.current; // walk by default; tap Shift toggles sprint
+    const run = running.current; // walk by default; hold Shift to run
     const speed = game.crouching ? CROUCH_SPEED : run ? RUN_SPEED : WALK_SPEED;
 
     // Facing follows the aim (twin-stick); fall back to move direction.
@@ -589,7 +662,12 @@ function AimRing() {
 
   useFrame(() => {
     if (!group.current) return;
-    const visible = game.localEntityId !== 0 && game.aim.active;
+    // Hidden in the over-the-shoulder zoom band: a ground ring under your own
+    // feet is just noise when the camera sits at the shoulder.
+    const visible =
+      game.localEntityId !== 0 &&
+      game.aim.active &&
+      cameraState.distance > OTS_START_DISTANCE;
     group.current.visible = visible;
     if (!visible) return;
     const px = game.rendered.x;

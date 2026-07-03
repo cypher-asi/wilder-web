@@ -2,7 +2,7 @@
 // registry and generate default prefab configurations from their authored
 // dimensions, so standard building structures exist before any hand-tuning.
 
-import { DEFAULT_KIT_TOWER_CONFIG, KitTowerPanel } from "../render/building";
+import { KitTowerPanel } from "../render/building";
 import { BuildingInstance } from "../net/protocol";
 import { BuildingPrefab, LabAsset, Registry } from "./labApi";
 
@@ -137,15 +137,6 @@ export function moduleToPanel(m: StageModule): KitTowerPanel {
   };
 }
 
-/** Footprint/stories archetypes for the skyscraper-kit starting points. */
-const DEFAULT_SHAPES = [
-  { name: "Tower 6x6 · 12 stories", tilesX: 6, tilesZ: 6, stories: 12, style: 0x1a2b3c4d },
-  { name: "Tower 6x6 · 8 stories", tilesX: 6, tilesZ: 6, stories: 8, style: 0x51f0aa17 },
-  { name: "Slab 12x6 · 10 stories", tilesX: 12, tilesZ: 6, stories: 10, style: 0x77e1b2c3 },
-  { name: "Mid-rise 8x6 · 6 stories", tilesX: 8, tilesZ: 6, stories: 6, style: 0x0badcafe },
-  { name: "Wide 18x8 · 9 stories", tilesX: 18, tilesZ: 8, stories: 9, style: 0x2fee6001 },
-];
-
 const PREFAB_DEFAULTS = {
   archetype: 3,
   kitBase: {
@@ -250,52 +241,11 @@ function floorKitPrefabs(modules: StageModule[]): BuildingPrefab[] {
 }
 
 /**
- * Standard building structures derived from the kit information: skyscraper
- * towers from the largest interchangeable wall-tile class (matching grid
- * pitch and row height, plus nesting flat fillers), and the simpler CB01 /
+ * Standard building structures derived from the kit information: the CB01 and
  * floor-kit walk-ups from their curated family pools.
  */
 export function makeDefaultPrefabs(modules: StageModule[]): BuildingPrefab[] {
-  const classes = groupModuleClasses(modules.filter((m) => m.family === "skyscraper"));
-  const primary = classes[0] ?? [];
-  const fillers = classes
-    .slice(1)
-    .filter(
-      (c) =>
-        primary.length > 0 &&
-        c[0].width < primary[0].width &&
-        primary[0].width % c[0].width === 0,
-    )
-    .flat();
-  // Ground-band storefront tiles and L-corner modules are curated (they
-  // read wrong as plain wall tiles); keep them out of the upper pool.
-  const groundIds = new Set(
-    [
-      ...(DEFAULT_KIT_TOWER_CONFIG.groundPanels ?? []),
-      ...(DEFAULT_KIT_TOWER_CONFIG.cornerPanels ?? []),
-    ].map((g) => g.assetId),
-  );
-  const pool = [...primary, ...fillers].filter((m) => !groundIds.has(m.manifestId));
-  const panels =
-    pool.length > 0 ? pool.map(moduleToPanel) : DEFAULT_KIT_TOWER_CONFIG.panels;
-  const moduleWidth =
-    primary.length > 0 ? primary[0].width : DEFAULT_KIT_TOWER_CONFIG.moduleWidth;
-  const towers = DEFAULT_SHAPES.map((s) => ({
-    id: `default_${s.name.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`,
-    name: s.name,
-    tilesX: s.tilesX,
-    tilesZ: s.tilesZ,
-    stories: s.stories,
-    archetype: 3,
-    style: s.style,
-    kit: {
-      ...DEFAULT_KIT_TOWER_CONFIG,
-      panels: [...panels],
-      moduleWidth,
-      forceKitTower: true,
-    },
-  }));
-  return [...cb01Prefabs(modules), ...floorKitPrefabs(modules), ...towers];
+  return [...cb01Prefabs(modules), ...floorKitPrefabs(modules)];
 }
 
 /**

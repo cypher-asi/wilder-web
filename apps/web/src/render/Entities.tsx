@@ -18,7 +18,7 @@ import { POI_STYLES } from "../game/poi";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState, EntityKind } from "../net/protocol";
 import { perf } from "../perf/perf";
-import { game, GameEntity, GunMount, useGame } from "../state/game";
+import { activeWeaponKind, game, GameEntity, GunMount, useGame } from "../state/game";
 import { RED_HEX, RED_NUM } from "../ui/colors";
 import { groundHeightAt } from "./Ground";
 import { isTronStyle } from "./styles";
@@ -365,8 +365,6 @@ const entityGlowTexture = (() => {
   return new THREE.CanvasTexture(c);
 })();
 const entityGlowGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
-/** Shared beacon beam cone for ammo caches (one geometry for all crates). */
-const ammoBeamGeo = new THREE.CylinderGeometry(0.18, 0.42, 6, 12, 1, true);
 /** Keep the glow disc out of interact/aim raycasts (it sits in clickable groups). */
 const noRaycast = () => null;
 
@@ -712,7 +710,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         // punch. Remote players only trigger here via the ranged-only
         // MuzzleFlash event, so their attacks are always the shoot pose.
         const weapon = isLocal
-          ? useGame.getState().inventory?.equipped_weapon
+          ? activeWeaponKind(useGame.getState().inventory)
           : "Pistol";
         if (weapon != null && RANGED_WEAPONS.has(weapon)) {
           // Scale the clip so the full recoil pose completes within the fire
@@ -882,7 +880,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       // Hide the pistol mesh when the local player has no gun equipped, so
       // the visuals can't suggest shooting is possible bare-handed.
       if (isLocal) {
-        const weapon = useGame.getState().inventory?.equipped_weapon;
+        const weapon = activeWeaponKind(useGame.getState().inventory);
         mount.holder.visible = weapon === "Pistol" || weapon === "Smg";
       }
       const yaw = isLocal && game.aim.active ? game.aim.yaw : entity.yaw;
@@ -1015,19 +1013,12 @@ const ammoCapMat = new THREE.MeshStandardMaterial({
   emissive: "#ffb100",
   emissiveIntensity: 2,
 });
-const ammoBeamMat = new THREE.MeshBasicMaterial({
-  color: "#ffcc33",
-  transparent: true,
-  opacity: 0.35,
-  side: THREE.DoubleSide,
-  depthWrite: false,
-});
 let cratePulseFrame = -1;
 
 function LootCrate({ entity }: { entity: GameEntity }) {
-  // Ammo caches (variant 1) get a bright beacon so ammo is easy to spot.
+  // Ammo caches (variant 1) get a brighter cap + ground glow so ammo is easy
+  // to spot without a tall beacon beam cluttering the scene.
   const isAmmo = entity.variant === 1;
-  const beam = useRef<THREE.Mesh>(null);
   useFrame(({ clock }) => {
     // Shared materials only need one update per frame, not one per crate.
     if (cratePulseFrame !== clock.elapsedTime) {
@@ -1035,9 +1026,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       const pulse = 1.5 + Math.sin(clock.elapsedTime * 4) * 0.8;
       crateCapMat.emissiveIntensity = pulse;
       ammoCapMat.emissiveIntensity = pulse + 1.5;
-      ammoBeamMat.opacity = 0.35 + Math.sin(clock.elapsedTime * 3) * 0.12;
     }
-    if (beam.current) beam.current.rotation.y = clock.elapsedTime * 0.6;
   });
   return (
     <group
@@ -1062,32 +1051,13 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       {/* No real pointLight here: with ~150 ammo caches replicated, per-crate
           lights multiply every material's shading cost (each forward-rendered
           fragment loops over all scene lights) and force shader recompiles.
-          The additive beam + ground glow carry the beacon look instead. */}
-      {isAmmo && (
-        <>
-          <mesh
-            ref={beam}
-            position={[0, 3, 0]}
-            raycast={noRaycast}
-            geometry={ammoBeamGeo}
-            material={ammoBeamMat}
-          />
-          <GroundGlow color="#ffcc33" radius={2.2} opacity={0.5} />
-        </>
-      )}
+          A flat ground glow marks the cache instead of a tall beacon beam. */}
+      {isAmmo && <GroundGlow color="#ffcc33" radius={2.2} opacity={0.5} />}
     </group>
   );
 }
 
 function ExtractionBeacon({ entity }: { entity: GameEntity }) {
-  const beam = useRef<THREE.Mesh>(null);
-  useFrame(({ clock }) => {
-    if (beam.current) {
-      (beam.current.material as THREE.MeshBasicMaterial).opacity =
-        0.25 + Math.sin(clock.elapsedTime * 2.5) * 0.1;
-      beam.current.rotation.y = clock.elapsedTime * 0.4;
-    }
-  });
   return (
     <group
       onClick={(e) => {
@@ -1097,20 +1067,13 @@ function ExtractionBeacon({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
+      {/* Ground pad only — the tall vertical light beam was removed. The pad
+          plus ground glow marks the extraction point without a sky-high cone. */}
       <mesh position={[0, 0.15, 0]}>
         <cylinderGeometry args={[1.1, 1.3, 0.3, 24]} />
         <meshStandardMaterial color="#0f2a24" emissive="#1affc4" emissiveIntensity={0.7} />
       </mesh>
-      <mesh ref={beam} position={[0, 8, 0]}>
-        <cylinderGeometry args={[0.55, 0.9, 16, 12, 1, true]} />
-        <meshBasicMaterial
-          color="#1affc4"
-          transparent
-          opacity={0.3}
-          side={THREE.DoubleSide}
-          depthWrite={false}
-        />
-      </mesh>
+      <GroundGlow color="#1affc4" radius={2.4} opacity={0.4} />
     </group>
   );
 }

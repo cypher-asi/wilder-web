@@ -87,14 +87,21 @@ pub fn move_slot(inv_slots: &mut [Option<ItemStack>], from: usize, to: usize) {
     }
 }
 
-/// Equip a weapon/armor from a slot; returns false if the item is not equippable.
-pub fn equip(inv: &mut Inventory, slot: usize) -> bool {
+/// Equip a weapon/armor from a slot; returns false if the item is not
+/// equippable. `weapon_slot` picks Weapon 1 (0) or Weapon 2 (1); ignored for
+/// armor.
+pub fn equip(inv: &mut Inventory, slot: usize, weapon_slot: u8) -> bool {
     let Some(stack) = inv.slots.get(slot).copied().flatten() else {
         return false;
     };
     if stack.kind.is_weapon() {
-        let prev = inv.equipped_weapon.take();
-        inv.equipped_weapon = Some(stack.kind);
+        let field = if weapon_slot == 1 {
+            &mut inv.equipped_weapon2
+        } else {
+            &mut inv.equipped_weapon
+        };
+        let prev = field.take();
+        *field = Some(stack.kind);
         inv.slots[slot] = prev.map(|kind| ItemStack { kind, count: 1 });
         true
     } else if stack.kind.is_armor() {
@@ -107,20 +114,30 @@ pub fn equip(inv: &mut Inventory, slot: usize) -> bool {
     }
 }
 
-pub fn unequip(inv: &mut Inventory, weapon: bool) -> bool {
-    let item = if weapon {
-        inv.equipped_weapon.take()
+/// Unequip a weapon (per `weapon_slot`) or armor back into the backpack.
+pub fn unequip(inv: &mut Inventory, weapon: bool, weapon_slot: u8) -> bool {
+    let field: &mut Option<ItemKind> = if weapon {
+        if weapon_slot == 1 {
+            &mut inv.equipped_weapon2
+        } else {
+            &mut inv.equipped_weapon
+        }
     } else {
-        inv.equipped_armor.take()
+        &mut inv.equipped_armor
     };
-    let Some(kind) = item else { return false };
+    let Some(kind) = field.take() else { return false };
     if add_items(&mut inv.slots, kind, 1) > 0 {
         // No space: put it back.
-        if weapon {
-            inv.equipped_weapon = Some(kind);
+        let field: &mut Option<ItemKind> = if weapon {
+            if weapon_slot == 1 {
+                &mut inv.equipped_weapon2
+            } else {
+                &mut inv.equipped_weapon
+            }
         } else {
-            inv.equipped_armor = Some(kind);
-        }
+            &mut inv.equipped_armor
+        };
+        *field = Some(kind);
         return false;
     }
     true
@@ -155,11 +172,30 @@ mod tests {
         let mut inv = Inventory::new();
         inv.slots[0] = Some(ItemStack { kind: ItemKind::Pipe, count: 1 });
         inv.slots[1] = Some(ItemStack { kind: ItemKind::Pistol, count: 1 });
-        assert!(equip(&mut inv, 0));
+        assert!(equip(&mut inv, 0, 0));
         assert_eq!(inv.equipped_weapon, Some(ItemKind::Pipe));
         assert!(inv.slots[0].is_none());
-        assert!(equip(&mut inv, 1));
+        assert!(equip(&mut inv, 1, 0));
         assert_eq!(inv.equipped_weapon, Some(ItemKind::Pistol));
         assert_eq!(inv.slots[1].unwrap().kind, ItemKind::Pipe);
+    }
+
+    #[test]
+    fn weapon_slots_are_independent() {
+        let mut inv = Inventory::new();
+        inv.slots[0] = Some(ItemStack { kind: ItemKind::Pistol, count: 1 });
+        inv.slots[1] = Some(ItemStack { kind: ItemKind::Smg, count: 1 });
+        assert!(equip(&mut inv, 0, 0));
+        assert!(equip(&mut inv, 1, 1));
+        assert_eq!(inv.equipped_weapon, Some(ItemKind::Pistol));
+        assert_eq!(inv.equipped_weapon2, Some(ItemKind::Smg));
+        assert_eq!(inv.active_weapon_kind(), Some(ItemKind::Pistol));
+        inv.active_weapon = 1;
+        assert_eq!(inv.active_weapon_kind(), Some(ItemKind::Smg));
+        // Unequip weapon 2 returns it to the backpack; weapon 1 untouched.
+        assert!(unequip(&mut inv, true, 1));
+        assert_eq!(inv.equipped_weapon2, None);
+        assert_eq!(inv.equipped_weapon, Some(ItemKind::Pistol));
+        assert_eq!(count_items(&inv.slots, ItemKind::Smg), 1);
     }
 }

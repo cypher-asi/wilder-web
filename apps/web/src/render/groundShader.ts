@@ -260,9 +260,9 @@ if (uTron > 0.5) {
       // neon look, but narrow so the brightness comes from bloom, not girth.
       float tHalo = (1.0 - smoothstep(0.0, 0.45, tMajor)) * 0.06
                   + (1.0 - smoothstep(0.0, 0.16, tMinor)) * 0.03;
-      // Tight spotlight around the character: blue lines are full within ~10 m
-      // and fade to black by ~30 m. Enemy-held (red) lines ignore the fade.
-      float tNearPlayer = 1.0 - smoothstep(10.0, 30.0, distance(wp.xz, uPlayerPos));
+      // Tight spotlight around the character: blue lines are full within ~4 m
+      // and fade to black by ~12 m. Enemy-held (red) lines ignore the fade.
+      float tNearPlayer = 1.0 - smoothstep(4.0, 12.0, distance(wp.xz, uPlayerPos));
       float tGridFade = mix(tNearPlayer, 1.0, tEnemy);
       gEmissive += tGrid * (tLine * 1.4 + tHalo) * (gW.y * tFade * tGridFade);
     }

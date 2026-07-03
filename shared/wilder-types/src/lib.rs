@@ -8,6 +8,9 @@ pub use glam::Vec3;
 pub type AccountId = Uuid;
 pub type CharacterId = Uuid;
 pub type EntityId = u64;
+/// Persistent identity of a non-player economic actor (NPCs, vendor
+/// buildings, the market). Minted fresh whenever an agent spawns.
+pub type AgentId = Uuid;
 
 /// World-space chunk coordinate. Chunks are CHUNK_SIZE x CHUNK_SIZE meters on the XZ plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -219,18 +222,43 @@ pub struct ItemStack {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inventory {
     pub slots: Vec<Option<ItemStack>>,
+    /// Weapon 1 equip slot.
     pub equipped_weapon: Option<ItemKind>,
+    /// Weapon 2 equip slot.
+    #[serde(default)]
+    pub equipped_weapon2: Option<ItemKind>,
+    /// Which weapon slot is in hand: 0 = Weapon 1, 1 = Weapon 2.
+    #[serde(default)]
+    pub active_weapon: u8,
     pub equipped_armor: Option<ItemKind>,
 }
 
 impl Inventory {
-    pub const DEFAULT_SLOTS: usize = 24;
+    pub const DEFAULT_SLOTS: usize = 36;
 
     pub fn new() -> Self {
         Self {
             slots: vec![None; Self::DEFAULT_SLOTS],
             equipped_weapon: None,
+            equipped_weapon2: None,
+            active_weapon: 0,
             equipped_armor: None,
+        }
+    }
+
+    /// The weapon currently in hand (per `active_weapon`).
+    pub fn active_weapon_kind(&self) -> Option<ItemKind> {
+        if self.active_weapon == 1 {
+            self.equipped_weapon2
+        } else {
+            self.equipped_weapon
+        }
+    }
+
+    /// Grow persisted inventories from older, smaller slot layouts.
+    pub fn ensure_slot_count(&mut self) {
+        if self.slots.len() < Self::DEFAULT_SLOTS {
+            self.slots.resize(Self::DEFAULT_SLOTS, None);
         }
     }
 }
@@ -408,4 +436,123 @@ impl ChunkData {
     pub fn tile(&self, tx: usize, tz: usize) -> TileKind {
         self.tiles[tz * TILES_PER_CHUNK + tx]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Economy ledger
+//
+// Every economic mutation is a typed transaction between two parties. Value
+// only moves between entities (players and agents); issuance and destruction
+// are explicit legs against the `Mint` / `Burn` system endpoints so total
+// supply stays auditable: circulating = minted - burned, per item and for
+// WILD.
+// ---------------------------------------------------------------------------
+
+/// One side of an economy transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d")]
+pub enum TxParty {
+    /// A player character (persistent id + display name).
+    Player { id: CharacterId, name: String },
+    /// A non-player actor: NPCs get a fresh identity per spawn; vendor
+    /// buildings and the market keep a stable identity per session.
+    Agent { id: AgentId, name: String },
+    /// Issuance source: gather nodes, NPC spawn inventories, wallet grants,
+    /// vendor stock, crafting output.
+    Mint,
+    /// Destruction sink: death losses, loot expiry, consumed items, spent
+    /// ammo, crafting inputs, items sold to vendors.
+    Burn,
+}
+
+/// What a transaction is denominated in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d")]
+pub enum TxAmount {
+    Item { kind: ItemKind, count: u32 },
+    Wild { amount: u32 },
+    Blueprint { recipe: String },
+}
+
+/// Why the transaction happened (a label; supply effects are derived from
+/// the `Mint`/`Burn` parties, not from the kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TxKind {
+    /// Direct issuance: gathers, spawn inventories, grants, refunds.
+    Mint,
+    /// Direct destruction: death losses, loot expiry, consumables, ammo.
+    Burn,
+    /// Loot container pickup (from the previous owner to the picker).
+    LootPickup,
+    /// Item dropped on the ground (ownership retained until pickup/expiry).
+    Drop,
+    VendorBuy,
+    VendorSell,
+    /// Bank: carried Cash burned, wallet WILD minted (minus the fee).
+    BankConvert,
+    /// Market escrow: items move from the seller to the market agent.
+    MarketList,
+    MarketBuy,
+    MarketCancel,
+    /// Crafting/production inputs consumed.
+    CraftConsume,
+    /// Crafting/production output created.
+    CraftProduce,
+    /// Commerce cut routed to a territory holder.
+    Fee,
+    /// Extraction: backpack banked into the stash (self transfer).
+    Extract,
+}
+
+/// A single ledger entry. `hash` and `block` are mock values for now (derived
+/// from the tx sequence / server tick) until the ledger gets a real chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EconTx {
+    pub seq: u64,
+    pub hash: String,
+    pub block: u64,
+    /// Unix milliseconds when the tx was recorded.
+    pub at_ms: u64,
+    pub kind: TxKind,
+    pub from: TxParty,
+    pub to: TxParty,
+    pub amount: TxAmount,
+    /// WILD fee attached to this tx (informational; fee flows get their own
+    /// `Fee` legs).
+    pub fee: u32,
+}
+
+/// Live supply counters for one item kind.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ItemSupply {
+    pub kind: ItemKind,
+    pub minted: u64,
+    pub burned: u64,
+}
+
+/// Aggregate economy snapshot pushed to dashboard subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EconomyStats {
+    /// Current mock block height.
+    pub block: u64,
+    /// Total transactions ever recorded.
+    pub tx_count: u64,
+    pub wild_minted: u64,
+    pub wild_burned: u64,
+    /// minted - burned (includes WILD held by vendor agents).
+    pub wild_circulating: i64,
+    /// Net WILD sitting on agent balances (vendors/market). Negative means
+    /// agents have paid out more than they took in (net faucet).
+    pub wild_agent_held: i64,
+    /// Per-item supply counters (only kinds that have seen activity).
+    pub items: Vec<ItemSupply>,
+    pub blueprints_learned: u64,
+    pub players_online: u32,
+    pub agents_alive: u32,
+    /// Player deaths (each burns the victim's backpack).
+    pub deaths: u64,
+    /// Agents killed by players.
+    pub npc_kills: u64,
+    /// Market trades completed.
+    pub trades: u64,
 }

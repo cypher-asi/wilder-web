@@ -14,6 +14,7 @@ import {
   EntityKind,
   EntitySpawnData,
   Inventory,
+  ItemKind,
   ItemStack,
   MarketListing,
   PoiInfo,
@@ -252,46 +253,15 @@ export function consumableHotbar(
   return out;
 }
 
-/**
- * Canonical weapon order for the number-key hotbar (keys 1..N). A weapon type
- * always keeps the same relative slot regardless of what you have equipped, so
- * the bind is stable as gear swaps in and out of the backpack.
- */
-export const WEAPON_ORDER: import("../net/protocol").ItemKind[] = [
-  "Pistol",
-  "Smg",
-  "Pipe",
-  "Knife",
-];
-
-export interface WeaponHotbarEntry {
-  kind: ItemKind;
-  /** Slot to equip from, or null when this weapon is already equipped. */
-  slot: number | null;
-  equipped: boolean;
+/** The weapon currently in hand (per `active_weapon`), or null for fists. */
+export function activeWeaponKind(inv: Inventory | null): ItemKind | null {
+  if (!inv) return null;
+  return inv.active_weapon === 1 ? inv.equipped_weapon2 : inv.equipped_weapon;
 }
 
-/**
- * Weapons the player owns (equipped + carried), in canonical order, mapped to
- * the number keys. Equipped weapons live outside the slot grid, so we fold the
- * equipped weapon back in to keep numbering stable across swaps.
- */
-export function weaponHotbar(inv: Inventory | null): WeaponHotbarEntry[] {
-  if (!inv) return [];
-  const bySlot = new Map<ItemKind, number>();
-  inv.slots.forEach((stack, slot) => {
-    if (stack && WEAPON_ORDER.includes(stack.kind) && !bySlot.has(stack.kind)) {
-      bySlot.set(stack.kind, slot);
-    }
-  });
-  const equipped = inv.equipped_weapon;
-  return WEAPON_ORDER.filter(
-    (kind) => bySlot.has(kind) || kind === equipped,
-  ).map((kind) => ({
-    kind,
-    slot: kind === equipped ? null : (bySlot.get(kind) ?? null),
-    equipped: kind === equipped,
-  }));
+/** Both weapon equip slots in order (Weapon 1, Weapon 2). */
+export function equippedWeapons(inv: Inventory | null): (ItemKind | null)[] {
+  return [inv?.equipped_weapon ?? null, inv?.equipped_weapon2 ?? null];
 }
 
 /** Client mirror of wilder-combat::armor_shield (shield capacity per armor). */

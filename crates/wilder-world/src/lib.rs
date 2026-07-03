@@ -47,10 +47,11 @@ const EXTRACT_SECONDS: f32 = 5.0;
 const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
 const LOOT_TTL_SECONDS: f32 = 120.0;
-/// Static ammo caches scattered through every chunk so ammo is plentiful and
-/// easy to find; count per chunk and rounds per cache.
+/// Static ammo caches scattered through every chunk. Kept off the roads
+/// (pedestrian tiles only, see `ammo_cache_spots`) and dialed back so ammo is
+/// findable but not everywhere; count per chunk and rounds per cache.
 const AMMO_CACHE_COUNT: usize = 3;
-const AMMO_CACHE_ROUNDS: u32 = 24;
+const AMMO_CACHE_ROUNDS: u32 = 12;
 /// Ammo caches are grabbed automatically when a player walks within this
 /// distance (metres) - no click required.
 const AMMO_PICKUP_RADIUS: f32 = 2.0;
@@ -110,6 +111,29 @@ fn region_is_protected(r: (i32, i32)) -> bool {
     let cz0 = rz * REGION_CHUNKS;
     let cz1 = cz0 + REGION_CHUNKS - 1;
     cx0 <= SAFE_RADIUS && cx1 >= -SAFE_RADIUS && cz0 <= SAFE_RADIUS && cz1 >= -SAFE_RADIUS
+}
+
+/// Every runner spawns armed: if neither weapon slot holds anything, equip
+/// the first weapon carried in the backpack, or grant a Pistol outright when
+/// they own no weapon at all. Also snaps `active_weapon` onto a filled slot
+/// so joining never puts an armed player on empty fists.
+fn ensure_starting_weapon(inventory: &mut Inventory) {
+    if inventory.equipped_weapon.is_none() && inventory.equipped_weapon2.is_none() {
+        let carried = inventory
+            .slots
+            .iter()
+            .position(|s| s.is_some_and(|stack| stack.kind.is_weapon()));
+        match carried {
+            Some(slot) => {
+                inv::equip(inventory, slot, 0);
+            }
+            None => inventory.equipped_weapon = Some(ItemKind::Pistol),
+        }
+        inventory.active_weapon = 0;
+    } else if inventory.active_weapon_kind().is_none() {
+        // A weapon is equipped but the hand points at the empty slot.
+        inventory.active_weapon = if inventory.equipped_weapon.is_some() { 0 } else { 1 };
+    }
 }
 
 /// Reduce a yield count by the territory tax when `enemy` is true.
@@ -208,6 +232,12 @@ const DISTRICT: &[((i32, i32), EntityKind, &str)] = &[
 const OUTPOSTS: &[((i32, i32), EntityKind, &str)] = &[
     ((3, 0), EntityKind::Bodega, "Bodega Outpost"),
     ((0, 3), EntityKind::Bank, "Bank Outpost"),
+    // Storage depots: every terminal opens the same persistent stash, so
+    // loot deposited at any location can be withdrawn at all the others.
+    ((3, 0), EntityKind::Building, "Storage Depot East"),
+    ((0, 3), EntityKind::Building, "Storage Depot South"),
+    ((-3, 0), EntityKind::Building, "Storage Depot West"),
+    ((0, -3), EntityKind::Building, "Storage Depot North"),
 ];
 
 /// Walkable spots for service buildings in a chunk: prefer sidewalk/plaza
@@ -261,14 +291,18 @@ fn station_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3
         .collect()
 }
 
-/// Deterministic, spread-out walkable tiles in a chunk for scattering ammo
-/// caches. Returns world-space positions; may be shorter than `count` if the
-/// chunk has few walkable tiles.
+/// Deterministic, spread-out pedestrian tiles in a chunk for scattering ammo
+/// caches. Only off-road walkable tiles (sidewalks / plazas / alley-like
+/// pedestrian ground) are eligible so caches sit off the streets. Returns
+/// world-space positions; may be shorter than `count` (or empty) if the chunk
+/// has few pedestrian tiles.
 fn ammo_cache_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3> {
     let mut walkables: Vec<(usize, usize)> = Vec::new();
     for tz in 1..TILES_PER_CHUNK {
         for tx in 1..TILES_PER_CHUNK {
-            if chunk.tile(tx, tz).walkable() {
+            // Sidewalks/plazas only: keep ammo off Road/RoadLine (and off
+            // Building/Water, which aren't walkable anyway).
+            if matches!(chunk.tile(tx, tz), TileKind::Sidewalk | TileKind::Plaza) {
                 walkables.push((tx, tz));
             }
         }
@@ -602,7 +636,9 @@ impl World {
         {
             return Err("character already in world".into());
         }
-        let inventory = self.store.inventory(character_id).unwrap_or_default();
+        let mut inventory = self.store.inventory(character_id).unwrap_or_default();
+        inventory.ensure_slot_count();
+        ensure_starting_weapon(&mut inventory);
         let stash = self.store.stash(character_id).unwrap_or_else(|_| Stash::new());
 
         // Blueprints: defaults are always known.
@@ -884,7 +920,7 @@ impl World {
         if player.attack_cooldown > TICK_DT || player.character.health <= 0.0 {
             return;
         }
-        let weapon = player.inventory.equipped_weapon;
+        let weapon = player.inventory.active_weapon_kind();
         let stats = weapon.and_then(weapon_stats).unwrap_or(FIST);
 
         // Ranged weapons consume ammo.
@@ -1993,11 +2029,14 @@ impl World {
             InventoryAction::MoveSlot { from, to } => {
                 inv::move_slot(&mut player.inventory.slots, from as usize, to as usize);
             }
-            InventoryAction::Equip { slot } => {
-                inv::equip(&mut player.inventory, slot as usize);
+            InventoryAction::Equip { slot, weapon_slot } => {
+                inv::equip(&mut player.inventory, slot as usize, weapon_slot.unwrap_or(0));
             }
-            InventoryAction::Unequip { weapon } => {
-                inv::unequip(&mut player.inventory, weapon);
+            InventoryAction::Unequip { weapon, weapon_slot } => {
+                inv::unequip(&mut player.inventory, weapon, weapon_slot.unwrap_or(0));
+            }
+            InventoryAction::SelectWeapon { weapon_slot } => {
+                player.inventory.active_weapon = weapon_slot.min(1);
             }
             InventoryAction::Drop { slot } => {
                 if let Some(s) = player.inventory.slots.get_mut(slot as usize) {
@@ -2878,6 +2917,37 @@ mod tests {
                 assert_eq!(ChunkCoord::from_world(*pos), coord);
             }
         }
+    }
+
+    #[test]
+    fn join_always_arms_the_player() {
+        // No weapon anywhere: grant an equipped pistol.
+        let mut inv = Inventory::new();
+        ensure_starting_weapon(&mut inv);
+        assert_eq!(inv.equipped_weapon, Some(ItemKind::Pistol));
+        assert_eq!(inv.active_weapon, 0);
+
+        // Weapon carried but not equipped: auto-equip it (no free pistol).
+        let mut inv = Inventory::new();
+        inv.slots[3] = Some(ItemStack { kind: ItemKind::Knife, count: 1 });
+        ensure_starting_weapon(&mut inv);
+        assert_eq!(inv.equipped_weapon, Some(ItemKind::Knife));
+        assert!(inv.slots[3].is_none());
+
+        // Only Weapon 2 filled but hand on empty Weapon 1: snap the hand over.
+        let mut inv = Inventory::new();
+        inv.equipped_weapon2 = Some(ItemKind::Smg);
+        ensure_starting_weapon(&mut inv);
+        assert_eq!(inv.equipped_weapon2, Some(ItemKind::Smg));
+        assert_eq!(inv.active_weapon, 1);
+
+        // Already armed: untouched.
+        let mut inv = Inventory::new();
+        inv.equipped_weapon = Some(ItemKind::Pipe);
+        inv.active_weapon = 0;
+        ensure_starting_weapon(&mut inv);
+        assert_eq!(inv.equipped_weapon, Some(ItemKind::Pipe));
+        assert_eq!(inv.equipped_weapon2, None);
     }
 
     #[test]

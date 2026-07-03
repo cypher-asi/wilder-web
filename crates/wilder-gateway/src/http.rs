@@ -135,7 +135,7 @@ fn starter_inventory() -> Inventory {
     let mut inv = Inventory::new();
     inv.slots[0] = Some(ItemStack { kind: ItemKind::Medkit, count: 2 });
     inv.slots[1] = Some(ItemStack { kind: ItemKind::Flashlight, count: 1 });
-    inv.slots[2] = Some(ItemStack { kind: ItemKind::Ammo9mm, count: 90 });
+    inv.slots[2] = Some(ItemStack { kind: ItemKind::Ammo9mm, count: 150 });
     // Every runner starts armed: equipped weapons live outside the slot grid.
     inv.equipped_weapon = Some(ItemKind::Pistol);
     inv

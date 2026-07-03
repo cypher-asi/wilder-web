@@ -439,7 +439,7 @@ body {
    the map's width. */
 .minimap-panel {
   position: absolute;
-  top: 32px;
+  top: 40px;
   right: 24px;
   width: 230px;
   display: flex;
@@ -447,7 +447,10 @@ body {
   align-items: stretch;
   gap: 6px;
   pointer-events: auto;
-  transform: perspective(900px) rotateY(-8deg);
+  /* Mirror of the left vitals cluster so the map sits on the same angled 3D
+     plane: same back/down tilt (rotateX) with rotateY/rotateZ flipped for the
+     right anchor. */
+  transform: perspective(1100px) rotateX(9deg) rotateY(-9deg) rotateZ(-2deg);
   transform-origin: right center;
 }
 
@@ -1007,6 +1010,7 @@ body {
 }
 
 .weapon-swap-slot {
+  position: relative;
   width: 42px;
   height: 34px;
   border: 1px solid var(--steel-border);
@@ -1025,6 +1029,21 @@ body {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-faint);
+}
+
+.weapon-swap-slot.equipped {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.weapon-swap-key {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.7;
 }
 
 .weapon-dock-xp {
@@ -1375,7 +1394,7 @@ body {
 /* Map legend: what every POI badge / marker on the holo map means. */
 .map-legend {
   position: absolute;
-  top: 52px;
+  bottom: 16px;
   right: 20px;
   max-height: calc(100% - 120px);
   overflow-y: auto;
@@ -1422,10 +1441,17 @@ body {
   color: var(--text);
 }
 
+/* Descriptions are hidden until the legend is hovered, keeping the compact
+ * badge + label column by default. */
 .map-legend-desc {
+  display: none;
   color: var(--text-dim);
   font-weight: 500;
   letter-spacing: 0.02em;
+}
+
+.map-legend:hover .map-legend-desc {
+  display: block;
 }
 
 /* Context prompt near a service building ("ARMORY — CLICK TO TRADE"). */
@@ -1601,4 +1627,410 @@ body {
   letter-spacing: 0.08em;
   color: var(--text-dim);
   text-align: right;
+}
+
+/* ---------------------------------------------------------------------------
+   Inventory screen (InventoryScreen.tsx) — reference-art layout (Equipped /
+   Backpack / Stash cards) rendered in the game's holo language: translucent
+   navy glass panels, steel slot borders with notched corners, cyan accent.
+--------------------------------------------------------------------------- */
+
+.invx-screen {
+  --invx-panel: rgba(9, 15, 24, 0.82);
+  --invx-card: rgba(233, 245, 255, 0.03);
+  --invx-card-border: var(--steel-border);
+  --invx-text: var(--text);
+  --invx-dim: var(--text-dim);
+  --invx-accent: var(--accent);
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 32px 18px;
+  background:
+    radial-gradient(ellipse at 30% 15%, rgba(79, 195, 255, 0.05), transparent 55%),
+    rgba(2, 5, 10, 0.55);
+  pointer-events: auto;
+  font-family: var(--font-body);
+  color: var(--invx-text);
+}
+
+.invx-panels {
+  display: flex;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+  justify-content: flex-start;
+}
+
+.invx-panel {
+  position: relative;
+  background: var(--invx-panel);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--holo-layers);
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Cyan top edge line, like the other holo panels. */
+.invx-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent-dim), transparent 65%);
+  pointer-events: none;
+}
+
+.invx-equipped {
+  width: 380px;
+  flex-shrink: 0;
+}
+
+.invx-backpack {
+  width: 340px;
+  flex-shrink: 0;
+}
+
+.invx-stash {
+  width: 360px;
+  flex-shrink: 0;
+}
+
+.invx-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.invx-header h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  text-shadow: var(--hud-glow);
+}
+
+.invx-cap {
+  font-size: 12px;
+  color: var(--invx-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.invx-search {
+  margin-left: auto;
+  width: 110px;
+  background: rgba(9, 15, 24, 0.7);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  color: var(--invx-text);
+  font-family: var(--font-body);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  outline: none;
+}
+
+.invx-search:focus {
+  border-color: var(--accent-dim);
+}
+
+.invx-search::placeholder {
+  color: var(--invx-dim);
+}
+
+.invx-tabs,
+.invx-filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 14px;
+  align-items: center;
+}
+
+.invx-tab {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--invx-dim);
+  cursor: pointer;
+  padding-bottom: 2px;
+  border-bottom: 2px solid transparent;
+}
+
+.invx-tab:hover {
+  color: var(--text);
+}
+
+.invx-tab.active {
+  color: var(--invx-accent);
+  border-bottom-color: var(--invx-accent);
+  text-shadow: 0 0 8px rgba(79, 195, 255, 0.45);
+}
+
+.invx-tab-right {
+  margin-left: auto;
+  cursor: default;
+  opacity: 0.6;
+}
+
+.invx-section {
+  margin-bottom: 16px;
+}
+
+.invx-section-label {
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--invx-dim);
+  margin-bottom: 8px;
+}
+
+.invx-weapon-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* Slot cards */
+.invx-slot {
+  position: relative;
+  background: var(--invx-card);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.invx-slot:hover {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.invx-slot.filled {
+  border-color: var(--accent-dim);
+  background: var(--accent-faint);
+}
+
+.invx-slot.selected {
+  border-color: var(--invx-accent);
+  background: var(--hatch);
+  box-shadow: 0 0 10px rgba(79, 195, 255, 0.3) inset;
+}
+
+.invx-slot.dimmed {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.invx-slot.highlight {
+  border-color: var(--invx-accent);
+  box-shadow: 0 0 8px rgba(79, 195, 255, 0.4);
+}
+
+.invx-slot.locked {
+  cursor: default;
+  color: var(--alert);
+  background: var(--hatch-steel);
+  opacity: 0.65;
+}
+
+.invx-slot.locked:hover {
+  border-color: var(--steel-border);
+}
+
+/* Attachment/gadget placeholders: 190px card + 3x42px locks + gaps = 336px,
+   inside the 344px panel content width (no more locks bleeding off-panel). */
+.invx-sm {
+  width: 42px;
+  height: 42px;
+}
+
+.invx-lg {
+  width: 72px;
+  height: 72px;
+}
+
+.invx-weapon-card {
+  width: 190px;
+  height: 100px;
+  flex-shrink: 0;
+}
+
+.invx-weapon-card.active {
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 12px rgba(79, 195, 255, 0.25) inset, 0 0 8px rgba(79, 195, 255, 0.2);
+}
+
+.invx-equip-card {
+  width: 92px;
+  height: 92px;
+  flex-shrink: 0;
+}
+
+.invx-corner-glyph {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 6, 11, 0.75);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+}
+
+.invx-attach-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 42px);
+  gap: 6px;
+}
+
+.invx-attach-col {
+  grid-template-columns: 42px;
+}
+
+.invx-clothing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 72px);
+  gap: 10px;
+}
+
+.invx-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 64px);
+  gap: 9px;
+  overflow-y: auto;
+  align-content: start;
+  padding-right: 4px;
+  flex: 1;
+  min-height: 0;
+}
+
+.invx-tick {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  width: 3px;
+  height: 12px;
+  border-radius: 1px;
+}
+
+.invx-count {
+  position: absolute;
+  right: 5px;
+  bottom: 3px;
+  font-size: 10px;
+  color: var(--invx-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.invx-lock {
+  opacity: 0.9;
+}
+
+.invx-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--invx-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.invx-pager-arrow {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.invx-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--invx-teal);
+}
+
+.invx-keycap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid rgba(53, 224, 200, 0.5);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.invx-footer-hint {
+  margin-left: 18px;
+  color: var(--invx-dim);
+  font-size: 11px;
+}
+
+/* Drag & drop */
+.invx-slot {
+  touch-action: none;
+}
+
+/* Origin slot dims while its item is being dragged. */
+.invx-slot.drag-source {
+  opacity: 0.35;
+}
+
+/* Hovered valid drop target (slot or equip card): teal highlight. */
+.invx-slot.drop-ok {
+  border-color: var(--invx-teal);
+  box-shadow: 0 0 8px rgba(53, 224, 200, 0.35);
+  background: rgba(53, 224, 200, 0.08);
+}
+
+/* Whole-panel drop target (deposit / withdraw / unequip). */
+.invx-panel.drop-ok {
+  border-color: var(--invx-teal);
+  box-shadow: 0 0 10px rgba(53, 224, 200, 0.25) inset, 0 0 8px rgba(53, 224, 200, 0.2);
+}
+
+/* Floating dragged-item ghost, centered on the cursor. */
+.invx-ghost {
+  position: fixed;
+  z-index: 60;
+  transform: translate(-50%, -50%);
+  opacity: 0.8;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
+}
+
+/* Red circle-with-slash badge shown over the ghost on invalid targets. */
+.invx-ghost-denied {
+  position: absolute;
+  right: -10px;
+  top: -10px;
+}
+
+.item-icon {
+  display: block;
 }

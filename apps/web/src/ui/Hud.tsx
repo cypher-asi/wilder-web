@@ -4,6 +4,7 @@ import { isVendorKind, POI_STYLES } from "../game/poi";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
+import { cameraState } from "../render/CameraRig";
 import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
@@ -77,12 +78,12 @@ const POINTER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
 )}") 3 2, auto`;
 
 /**
- * Aiming crosshair that follows the mouse whenever the gun is drawn. Reads the
- * non-reactive `game.gun.drawn` on a rAF loop and tracks the raw cursor so it
- * sits exactly on the aim point in this top-down twin-stick view. Also owns the
- * page cursor: the OS pointer is hidden while aiming (the crosshair replaces
- * it) and swapped for a custom pointer arrow otherwise, so there's never a
- * default arrow layered under the reticle.
+ * Aiming crosshair. While the canvas holds pointer lock (mouse-look) it sits
+ * fixed at screen center — the only aiming reference, shown whether or not
+ * the gun is drawn. Unlocked (UI open / legacy twin-stick fallback) it tracks
+ * the raw cursor whenever the gun is drawn. Also owns the page cursor: hidden
+ * while the crosshair stands in, a themed pointer arrow otherwise, so there's
+ * never a default arrow layered under the reticle.
  */
 function Crosshair() {
   const el = useRef<HTMLDivElement>(null);
@@ -91,7 +92,6 @@ function Crosshair() {
   useEffect(() => {
     let raf = 0;
     let cursor = "";
-    let minimap: Element | null = null;
     const pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const onMove = (e: PointerEvent) => {
       pos.x = e.clientX;
@@ -101,26 +101,30 @@ function Crosshair() {
     const onLeave = () => (inside.current = false);
     window.addEventListener("pointermove", onMove);
     document.documentElement.addEventListener("pointerleave", onLeave);
-    // The cursor is over the minimap (which has its own pointer cursor) — the
-    // crosshair should get out of the way there.
-    const overMinimap = () => {
-      if (!minimap || !minimap.isConnected) {
-        minimap = document.querySelector(".minimap-ring");
-      }
-      if (!minimap) return false;
-      const r = minimap.getBoundingClientRect();
-      return (
-        pos.x >= r.left && pos.x <= r.right && pos.y >= r.top && pos.y <= r.bottom
-      );
+    // The crosshair should get out of the way over any interactive HUD widget
+    // (minimap, FPS/perf chip, panels, buttons…). The `.hud` root is
+    // pointer-events:none while its interactive children opt back in, so any
+    // element hit-tested inside `.hud` is a real UI target. The crosshair and
+    // reticles are themselves pointer-events:none, so they're skipped here.
+    const overUi = () => {
+      const hit = document.elementFromPoint(pos.x, pos.y);
+      return !!hit && hit.closest(".hud") != null;
     };
     const tick = () => {
       const node = el.current;
       const drawn = game.gun.drawn;
+      const locked = cameraState.locked;
+      const onUi = !locked && overUi();
       if (node) {
-        const show = drawn && inside.current && !overMinimap();
+        // Mouse-look pins the crosshair to screen center — it's the only
+        // aiming reference, shown whether or not the gun is drawn. Unlocked
+        // (UI open / twin-stick fallback) it rides the cursor while aiming.
+        const show = locked || (drawn && inside.current && !onUi);
         node.style.opacity = show ? "1" : "0";
         if (show) {
-          node.style.transform = `translate(${pos.x - 16}px, ${pos.y - 16}px)`;
+          const x = locked ? window.innerWidth / 2 : pos.x;
+          const y = locked ? window.innerHeight / 2 : pos.y;
+          node.style.transform = `translate(${x - 16}px, ${y - 16}px)`;
           // Red only when locked onto a live enemy, white otherwise.
           const t =
             game.hoverTargetId != null
@@ -130,9 +134,12 @@ function Crosshair() {
           node.style.color = onEnemy ? RED_HEX : "#ffffff";
         }
       }
-      // Aiming hides the OS cursor (crosshair stands in); otherwise a themed
-      // pointer replaces the default arrow.
-      const want = drawn ? "none" : POINTER_CURSOR;
+      // Aiming hides the OS cursor (the crosshair stands in for it; pointer
+      // lock hides it natively anyway); otherwise a themed pointer replaces
+      // the default arrow. Over a UI widget the crosshair is suppressed, so
+      // keep the pointer visible there even while aiming so clickable widgets
+      // still have a cursor.
+      const want = locked || (drawn && !onUi) ? "none" : POINTER_CURSOR;
       if (want !== cursor) {
         cursor = want;
         document.body.style.cursor = want;

@@ -1036,14 +1036,14 @@ let cratePulseFrame = -1;
 // than an identical crate. Shared geometry + one material per category (dozens
 // can litter the ground after a firefight).
 const DROP_GEO: Record<ItemCategory, THREE.BufferGeometry> = {
-  weapon: new THREE.BoxGeometry(0.1, 0.1, 0.44),
-  armor: new THREE.BoxGeometry(0.32, 0.09, 0.32),
-  consumable: new THREE.CapsuleGeometry(0.09, 0.16, 4, 10),
-  ammo: new THREE.BoxGeometry(0.24, 0.16, 0.3),
-  resource: new THREE.DodecahedronGeometry(0.2, 0),
-  material: new THREE.BoxGeometry(0.26, 0.22, 0.26),
-  currency: new THREE.CylinderGeometry(0.18, 0.18, 0.04, 16),
-  gadget: new THREE.IcosahedronGeometry(0.19, 0),
+  weapon: new THREE.BoxGeometry(0.07, 0.07, 0.3),
+  armor: new THREE.BoxGeometry(0.21, 0.06, 0.21),
+  consumable: new THREE.CapsuleGeometry(0.06, 0.11, 4, 10),
+  ammo: new THREE.BoxGeometry(0.16, 0.11, 0.2),
+  resource: new THREE.DodecahedronGeometry(0.13, 0),
+  material: new THREE.BoxGeometry(0.17, 0.15, 0.17),
+  currency: new THREE.CylinderGeometry(0.12, 0.12, 0.03, 16),
+  gadget: new THREE.IcosahedronGeometry(0.13, 0),
 };
 const dropMatCache = new Map<ItemCategory, THREE.MeshStandardMaterial>();
 function dropMaterial(cat: ItemCategory): THREE.MeshStandardMaterial {
@@ -1123,10 +1123,14 @@ function LootCrate({ entity }: { entity: GameEntity }) {
           behind the item's category-tinted glyph so its type reads at a glance. */}
       {entity.item && (
         <group ref={icon} position={[0, iconBaseY, 0]}>
-          <sprite material={crateIconHaloMat} scale={[0.8, 0.8, 1]} raycast={noRaycast} />
+          <sprite
+            material={crateIconHaloMat}
+            scale={isAmmo ? [0.8, 0.8, 1] : [0.55, 0.55, 1]}
+            raycast={noRaycast}
+          />
           <sprite
             material={itemSpriteMaterialTinted(entity.item)}
-            scale={isAmmo ? [0.5, 0.5, 1] : [0.42, 0.42, 1]}
+            scale={isAmmo ? [0.5, 0.5, 1] : [0.3, 0.3, 1]}
             raycast={noRaycast}
           />
         </group>
@@ -1138,7 +1142,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       {isAmmo ? (
         <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />
       ) : (
-        <GroundGlow color={glow} radius={0.85} opacity={0.45} />
+        <GroundGlow color={glow} radius={0.55} opacity={0.45} />
       )}
     </group>
   );
@@ -1147,9 +1151,9 @@ function LootCrate({ entity }: { entity: GameEntity }) {
 // Loose currency pickups spilled on death. Three looks keyed by variant:
 // 0 = WILD (gold coin), 1 = Shards (violet crystal), 2 = Energy (green cell).
 // Shared geometries/materials: dozens can be on screen after a firefight.
-const pickupCoinGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.04, 16);
-const pickupShardGeo = new THREE.OctahedronGeometry(0.17, 0);
-const pickupEnergyGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.26, 8);
+const pickupCoinGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.03, 16);
+const pickupShardGeo = new THREE.OctahedronGeometry(0.12, 0);
+const pickupEnergyGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.18, 8);
 const pickupCoinMat = new THREE.MeshStandardMaterial({
   color: "#ffcc33",
   emissive: "#ffb300",
@@ -1206,7 +1210,7 @@ function CurrencyPickupView({ entity }: { entity: GameEntity }) {
           castShadow
         />
       </group>
-      <GroundGlow color={style.glow} radius={0.9} opacity={0.5} />
+      <GroundGlow color={style.glow} radius={0.6} opacity={0.5} />
     </group>
   );
 }

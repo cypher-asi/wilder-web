@@ -170,13 +170,17 @@ fn static_agent_id(seed: u64, entity: EntityId) -> AgentId {
 fn roll_npc_loot(rng: &mut SmallRng, zone: ZoneKind, is_raider: bool) -> Vec<ItemStack> {
     use rand::Rng;
     let mut items: Vec<ItemStack> = Vec::new();
-    // Resources always drop (Phase 2 economy feeds on these), biased by the
-    // zone the NPC lives in.
-    let pulls = if is_raider { 3 } else { 2 };
+    // Resources drop biased by the zone the NPC lives in. Pull count is
+    // randomized (raiders carry a bit more) so pile size varies kill-to-kill.
+    let pulls = if is_raider {
+        rng.random_range(2..=3)
+    } else {
+        rng.random_range(1..=2)
+    };
     for _ in 0..pulls {
         let idx = wilder_economy::zone_resource_index(zone, rng.random());
         let kind = wilder_economy::RESOURCES[idx];
-        items.push(ItemStack { kind, count: rng.random_range(1..4) });
+        items.push(ItemStack { kind, count: rng.random_range(1..=5) });
     }
     // Cash feeds the Bank loop; blast-zone rubble hides more.
     let (lo, hi) = if is_raider {
@@ -1300,9 +1304,9 @@ impl World {
             // energy cell. These are walk-over collectibles (minted faucet).
             use rand::Rng;
             let coins = if is_raider {
-                self.rng.random_range(3..=6)
+                self.rng.random_range(2..=3)
             } else {
-                self.rng.random_range(2..=4)
+                self.rng.random_range(1..=2)
             };
             for _ in 0..coins {
                 let amount = self.rng.random_range(1..=3);
@@ -1312,7 +1316,7 @@ impl World {
                 let shards = self.rng.random_range(1..=2);
                 self.spawn_currency_pickup(drop_pos, Currency::Shards, shards);
             }
-            if self.rng.random_bool(0.2) {
+            if self.rng.random_bool(0.1) {
                 self.spawn_currency_pickup(drop_pos, Currency::Energy, 1);
             }
         }
@@ -1381,9 +1385,9 @@ impl World {
         use rand::Rng;
         for stack in items {
             let jitter = Vec3::new(
-                self.rng.random_range(-1.3..=1.3),
+                self.rng.random_range(-2.4..=2.4),
                 0.0,
-                self.rng.random_range(-1.3..=1.3),
+                self.rng.random_range(-2.4..=2.4),
             );
             let entity = self.alloc_entity();
             self.loot.insert(
@@ -1508,9 +1512,9 @@ impl World {
         }
         let entity = self.alloc_entity();
         let jitter = Vec3::new(
-            self.rng.random_range(-0.9..=0.9),
+            self.rng.random_range(-1.8..=1.8),
             0.0,
-            self.rng.random_range(-0.9..=0.9),
+            self.rng.random_range(-1.8..=1.8),
         );
         self.pickups.insert(
             entity,

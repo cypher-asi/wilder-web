@@ -366,6 +366,106 @@ if (uTron > 0.5) {
     mat.customProgramCacheKey = () => "tron-neon";
     return mat;
   },
+  // Storefront backdrop fills (ground-floor window interiors, sidewalk light
+  // spill, fascia shop-sign faces). Off-tron this is emissive-only and reads
+  // exactly like `neon`. In tron the bright cyan fill collapses to a dark
+  // glossy reflective slab (real scene.environment reflection) with a thin
+  // neon keyline traced around the panel border, so storefronts read as black
+  // glass instead of glowing blue while the sign edge/text stays legible.
+  glowPanel: () => {
+    const mat = new THREE.MeshStandardMaterial({
+      color: "#ffffff",
+      vertexColors: true,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+      roughness: 0.08,
+      metalness: 1.0,
+      envMapIntensity: 1.2,
+    });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTron = styleUniforms.uTron;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nattribute vec2 uv;\nvarying vec2 vGpUv;",
+        )
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGpUv = uv;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          "#include <common>\n" + TRON_DECLS + "\nvarying vec2 vGpUv;",
+        )
+        .replace(
+          "#include <metalnessmap_fragment>",
+          /* glsl */ `#include <metalnessmap_fragment>
+vec3 gpColor = diffuseColor.rgb;
+if (uTron > 0.5) {
+  diffuseColor.rgb = TRON_BASE;
+  roughnessFactor = 0.08;
+  metalnessFactor = 1.0;
+} else {
+  diffuseColor.rgb = vec3(0.0);
+  roughnessFactor = 1.0;
+  metalnessFactor = 0.0;
+}`,
+        )
+        .replace(
+          "#include <emissivemap_fragment>",
+          /* glsl */ `#include <emissivemap_fragment>
+if (uTron > 0.5) {
+  vec2 gpB = min(vGpUv, 1.0 - vGpUv);
+  float gpEdge = 1.0 - smoothstep(0.0, 0.05, min(gpB.x, gpB.y));
+  totalEmissiveRadiance += mix(TRON_BLUE, TRON_WHITE, 0.25) * gpEdge * 1.6;
+} else {
+  totalEmissiveRadiance += gpColor;
+}`,
+        );
+    };
+    mat.customProgramCacheKey = () => "tron-glowpanel";
+    return mat;
+  },
+  // Sideways-projecting blade/hanging shop signs: emissive neon faces off-tron,
+  // fully discarded in tron (the whole sign vanishes) so the wireframe city
+  // isn't cluttered with blue blades hanging over the street.
+  bladeNeon: () => {
+    const mat = new THREE.MeshBasicMaterial({
+      color: "#ffffff",
+      vertexColors: true,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTron = styleUniforms.uTron;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nuniform float uTron;")
+        .replace(
+          "#include <color_fragment>",
+          "if (uTron > 0.5) discard;\n#include <color_fragment>",
+        );
+    };
+    mat.customProgramCacheKey = () => "tron-bladeneon";
+    return mat;
+  },
+  // Metal armature/backing for the blade signs above: reads as dark metal
+  // off-tron, discarded alongside the neon faces in tron.
+  bladeMetal: () => {
+    const mat = new THREE.MeshStandardMaterial({
+      color: "#1c1e22",
+      roughness: 0.5,
+      metalness: 0.75,
+    });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTron = styleUniforms.uTron;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nuniform float uTron;")
+        .replace(
+          "#include <clipping_planes_fragment>",
+          "#include <clipping_planes_fragment>\nif (uTron > 0.5) discard;",
+        );
+    };
+    mat.customProgramCacheKey = () => "tron-blademetal";
+    return mat;
+  },
   // Rolled-asphalt roof cap.
   roof: () =>
     withClonedPbr(
@@ -384,17 +484,30 @@ export function getSharedMaterial(key: string): THREE.Material {
   if (!mat) {
     const factory = SHARED_FACTORIES[key] ?? SHARED_FACTORIES.metalDark;
     mat = factory();
-    // Neon installs its own tron hue remap; everything else collapses to
-    // the flat blue-black slab in tron mode.
-    if (key !== "neon") tronifyMaterial(mat);
+    // Neon and glowPanel install their own tron branch; glass is already a
+    // dark glossy PBR surface that reads as black glass in tron, so it must
+    // not be flattened to the slab. Everything else collapses to the flat
+    // blue-black slab in tron mode.
+    if (
+      key !== "neon" &&
+      key !== "glowPanel" &&
+      key !== "glass" &&
+      key !== "bladeNeon" &&
+      key !== "bladeMetal"
+    ) {
+      tronifyMaterial(mat);
+    }
     sharedCache.set(key, mat);
   }
   return mat;
 }
 
-/** Resolve a building part material key (from building.ts) to a material. */
+/** Resolve a building part material key (from building.ts) to a material.
+ * A "#hide" suffix marks parts hidden in TRON (see building.ts HIDE); it never
+ * changes the material, only whether Buildings.tsx renders the mesh in tron. */
 export function getBuildingMaterial(key: string, b: BuildingInstance): THREE.Material {
-  if (key === "facade") {
+  const base = key.split("#")[0];
+  if (base === "facade") {
     const rng = mulberry(b.style ^ 0x51ed270b);
     const tex = facadeTexture(b.archetype, rng());
     const variant = Math.floor(rng() * 8);
@@ -407,5 +520,5 @@ export function getBuildingMaterial(key: string, b: BuildingInstance): THREE.Mat
     }
     return mat;
   }
-  return getSharedMaterial(key);
+  return getSharedMaterial(base);
 }

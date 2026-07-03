@@ -6,9 +6,11 @@ import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import { useAssetModel } from "../assets/catalog";
 import { BuildingInstance } from "../net/protocol";
+import { useGame } from "../state/game";
 import { getBuildingModel, GROUND_Y, WaterTowerPlacement } from "./building";
 import { getBuildingMaterial, getSharedMaterial } from "./facade";
 import { getImportedBuilding, ImportedBuildingPlacement } from "./importedBuilding";
+import { isTronStyle } from "./styles";
 
 // Material keys whose meshes are emissive/glass overlays, not solid massing.
 const NO_SHADOW = new Set(["neon", "glass"]);
@@ -98,6 +100,10 @@ export function Building({ building }: { building: BuildingInstance }) {
 
 function ProceduralBuilding({ building }: { building: BuildingInstance }) {
   const model = useMemo(() => getBuildingModel(building), [building]);
+  // TRON strips decorative "#hide" parts (fire escapes, window glass/mullions,
+  // HVAC/vent/pipe/antenna/billboard/awning clutter): the tagged meshes are
+  // dropped entirely so neither color nor shadow remains.
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
 
   // Dispose merged geometries when the chunk unloads (materials are shared).
   // The model cache is keyed weakly on the streamed BuildingInstance, which
@@ -110,15 +116,19 @@ function ProceduralBuilding({ building }: { building: BuildingInstance }) {
 
   return (
     <group position={[model.x, GROUND_Y, model.z]}>
-      {model.geoms.map(([key, geom]) => (
-        <mesh
-          key={key}
-          geometry={geom}
-          material={getBuildingMaterial(key, building)}
-          castShadow={!NO_SHADOW.has(key)}
-          receiveShadow={!NO_SHADOW.has(key)}
-        />
-      ))}
+      {model.geoms.map(([key, geom]) => {
+        if (tron && key.endsWith("#hide")) return null;
+        const base = key.split("#")[0];
+        return (
+          <mesh
+            key={key}
+            geometry={geom}
+            material={getBuildingMaterial(key, building)}
+            castShadow={!NO_SHADOW.has(base)}
+            receiveShadow={!NO_SHADOW.has(base)}
+          />
+        );
+      })}
       {model.waterTower && <WaterTower placement={model.waterTower} />}
     </group>
   );

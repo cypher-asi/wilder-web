@@ -48,6 +48,13 @@ export interface BuildingModel {
 const COLOR_MATS = new Set(["neon", "fabric"]);
 const WHITE = new THREE.Color(1, 1, 1);
 
+// Merge-key suffix for decorative parts that vanish in TRON mode (fire
+// escapes, window glass/mullions, HVAC/vent/pipe/antenna/billboard/awning
+// clutter). Off-tron the suffix is stripped (see facade.ts getBuildingMaterial)
+// so these render exactly as their base material; Buildings.tsx skips the
+// tagged meshes entirely when tron is active (removing both color and shadow).
+const HIDE = "#hide";
+
 const NEON = NEON_COLORS.map((c) => new THREE.Color(c));
 const INTERIOR_GLOW = ["#ffd9a0", "#ffe9c9", "#c9f0ff", "#ffd2e1", "#d6ffe3"].map(
   (c) => new THREE.Color(c),
@@ -76,7 +83,7 @@ class Parts {
     this.m.makeRotationFromEuler(this.euler.set(rx, ry, rz));
     this.m.setPosition(x, y, z);
     geom.applyMatrix4(this.m);
-    if (COLOR_MATS.has(mat)) {
+    if (COLOR_MATS.has(mat.split("#")[0])) {
       const c = color ?? WHITE;
       const count = geom.getAttribute("position").count;
       const arr = new Float32Array(count * 3);
@@ -307,29 +314,29 @@ function buildStorefront(
     if (kind === "window") {
       // Bulkhead base wall, glass, mullions, interior glow.
       faceBox(p, f, trimKey, bw + 0.04, 0.5, 0.26, a, 0.25, 0.13);
-      facePlane(p, f, "glass", bw - 0.12, 2.8, a, 1.9, 0.115);
+      facePlane(p, f, "glass" + HIDE, bw - 0.12, 2.8, a, 1.9, 0.115);
       const lit = rng() < 0.62;
       const glow = INTERIOR_GLOW[Math.floor(rng() * INTERIOR_GLOW.length)]
         .clone()
         .multiplyScalar(lit ? 1.0 + rng() * 0.55 : 1);
-      facePlane(p, f, "neon", bw - 0.3, 2.55, a, 1.83, 0.05, lit ? glow : DIM_GLASS);
+      facePlane(p, f, "glowPanel", bw - 0.3, 2.55, a, 1.83, 0.05, lit ? glow : DIM_GLASS);
       if (lit) {
         // Light spill onto the sidewalk in front of the window.
         const spill = glow.clone().multiplyScalar(0.12);
         if (f.axis === "z") {
-          p.plane("neon", bw - 0.2, 1.1, f.center + a, 0.012, f.wall + f.sign * 0.72, -Math.PI / 2, 0, 0, spill);
+          p.plane("glowPanel", bw - 0.2, 1.1, f.center + a, 0.012, f.wall + f.sign * 0.72, -Math.PI / 2, 0, 0, spill);
         } else {
-          p.plane("neon", 1.1, bw - 0.2, f.wall + f.sign * 0.72, 0.012, f.center + a, -Math.PI / 2, 0, 0, spill);
+          p.plane("glowPanel", 1.1, bw - 0.2, f.wall + f.sign * 0.72, 0.012, f.center + a, -Math.PI / 2, 0, 0, spill);
         }
       }
       // Mullion frame: verticals + top/bottom rails.
       const panes = Math.max(2, Math.round(bw / 1.2));
       for (let k = 1; k < panes; k++) {
         const mx = a - (bw - 0.12) / 2 + (k * (bw - 0.12)) / panes;
-        faceBox(p, f, "metalDark", 0.06, 2.8, 0.07, mx, 1.9, 0.13);
+        faceBox(p, f, "metalDark" + HIDE, 0.06, 2.8, 0.07, mx, 1.9, 0.13);
       }
-      faceBox(p, f, "metalDark", bw - 0.06, 0.08, 0.08, a, 0.52, 0.13);
-      faceBox(p, f, "metalDark", bw - 0.06, 0.08, 0.08, a, 3.3, 0.13);
+      faceBox(p, f, "metalDark" + HIDE, bw - 0.06, 0.08, 0.08, a, 0.52, 0.13);
+      faceBox(p, f, "metalDark" + HIDE, bw - 0.06, 0.08, 0.08, a, 3.3, 0.13);
       if (rng() < 0.55) addAwning(p, f, rng, a, bw);
     } else if (kind === "door") {
       // Recessed doorway with side panels, jambs, transom light, step.
@@ -364,7 +371,7 @@ function buildStorefront(
         .clone()
         .multiplyScalar(1.5 + rng() * 0.7);
       faceBox(p, f, "metalDark", sw + 0.1, sh + 0.1, 0.14, a, 3.95, 0.44);
-      facePlane(p, f, "neon", sw, sh, a, 3.95, 0.525, color);
+      facePlane(p, f, "glowPanel", sw, sh, a, 3.95, 0.525, color);
     } else {
       rng();
       rng();
@@ -377,17 +384,17 @@ function addAwning(p: Parts, f: Face, rng: () => number, a: number, bw: number):
   if (rng() < 0.75) {
     // Sloped fabric awning.
     const color = AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)];
-    faceBox(p, f, "fabric", bw * 0.96, 0.05, 0.95, a, 3.38, 0.62, 0.38, color);
+    faceBox(p, f, "fabric" + HIDE, bw * 0.96, 0.05, 0.95, a, 3.38, 0.62, 0.38, color);
     // Valance strip hanging at the outer edge.
-    faceBox(p, f, "fabric", bw * 0.96, 0.18, 0.04, a, 3.12, 1.02, 0, color);
+    faceBox(p, f, "fabric" + HIDE, bw * 0.96, 0.18, 0.04, a, 3.12, 1.02, 0, color);
   } else {
     // Flat metal canopy with an emissive under-strip along its front edge.
     rng();
-    faceBox(p, f, "metal", bw * 0.96, 0.07, 0.9, a, 3.42, 0.58);
+    faceBox(p, f, "metal" + HIDE, bw * 0.96, 0.07, 0.9, a, 3.42, 0.58);
     facePlane(
       p,
       f,
-      "neon",
+      "neon" + HIDE,
       bw * 0.9,
       0.055,
       a,
@@ -434,7 +441,7 @@ function buildServiceFace(
       const y = 5.2 + rng() * Math.max(0.5, height - 6.6);
       const scale = 0.55 + rng() * 0.15;
       kit.push(facePlacement(f, KIT_AC[i % KIT_AC.length], a, y - 0.25, 0.02 + 0.25 * scale, scale));
-      faceBox(p, f, "metalDark", 0.75 * scale + 0.1, 0.05, 0.5, a, y - 0.27, 0.25);
+      faceBox(p, f, "metalDark" + HIDE, 0.75 * scale + 0.1, 0.05, 0.5, a, y - 0.27, 0.25);
     }
   }
 
@@ -442,7 +449,7 @@ function buildServiceFace(
   const pipeCount = 1 + Math.floor(rng() * 2);
   for (let i = 0; i < pipeCount; i++) {
     const a = (rng() < 0.5 ? -1 : 1) * (len / 2 - 0.5 - rng() * 1.2);
-    faceCyl(p, f, "metalDark", 0.045, height - 0.5, a, (height - 0.5) / 2, 0.1);
+    faceCyl(p, f, "metalDark" + HIDE, 0.045, height - 0.5, a, (height - 0.5) / 2, 0.1);
   }
 }
 
@@ -478,9 +485,9 @@ function buildFireEscape(
     tilt = 0,
   ) => {
     if (f.axis === "z") {
-      p.box("metalDark", alongSize, ySize, outSize, f.center + a, y, f.wall + f.sign * out, 0, 0, tilt);
+      p.box("metalDark" + HIDE, alongSize, ySize, outSize, f.center + a, y, f.wall + f.sign * out, 0, 0, tilt);
     } else {
-      p.box("metalDark", outSize, ySize, alongSize, f.wall + f.sign * out, y, f.center + a, -tilt, 0, 0);
+      p.box("metalDark" + HIDE, outSize, ySize, alongSize, f.wall + f.sign * out, y, f.center + a, -tilt, 0, 0);
     }
   };
 
@@ -536,18 +543,9 @@ function buildFireEscape(
 // Roof dressing
 // ---------------------------------------------------------------------------
 
-/** Kit AC units used for rooftop HVAC and wall-mounted units. */
-const KIT_AC = ["lab_sm_ac01", "lab_sm_ac02", "lab_sm_aircon"];
-
-/**
- * Facade signage: 3D neon lettering signs mounted flat on the upper wall
- * (kit dims width/height/thickness; the flat billboard frames in the kit have
- * no screens, so only the lettering pieces are used).
- */
-const KIT_BILLBOARDS = [
-  { assetId: "lab_sm_3dbillboard03", w: 2.9, h: 1.3, t: 0.1, ryOffset: 0 },
-  { assetId: "lab_sm_3dbillboard01", w: 6.3, h: 2.5, t: 0.25, ryOffset: 0 },
-];
+/** Kit AC units used for rooftop HVAC and wall-mounted units. Building-only
+ * (not placed as standalone props), so Chunks.tsx can drop them in TRON. */
+export const KIT_AC = ["lab_sm_ac01", "lab_sm_ac02", "lab_sm_aircon"];
 
 function buildRoof(
   p: Parts,
@@ -615,10 +613,10 @@ function buildRoof(
     const [ax, az] = anchor();
     if (rng() < 0.6) {
       const vh = 0.4 + rng() * 0.5;
-      p.cyl("trim", 0.1 + rng() * 0.07, vh, ax, deckTop + vh / 2, az);
-      p.cyl("metalDark", 0.16, 0.07, ax, deckTop + vh + 0.03, az);
+      p.cyl("trim" + HIDE, 0.1 + rng() * 0.07, vh, ax, deckTop + vh / 2, az);
+      p.cyl("metalDark" + HIDE, 0.16, 0.07, ax, deckTop + vh + 0.03, az);
     } else {
-      p.box("metal", 0.5, 0.35 + rng() * 0.25, 0.4, ax, deckTop + 0.2, az, 0, rng());
+      p.box("metal" + HIDE, 0.5, 0.35 + rng() * 0.25, 0.4, ax, deckTop + 0.2, az, 0, rng());
     }
   }
 
@@ -628,8 +626,8 @@ function buildRoof(
     const alongX = rng() < 0.5;
     const length = (alongX ? hx : hz) * (1.1 + rng() * 0.7);
     const off = (rng() - 0.5) * 1.4 * (alongX ? hz : hx);
-    if (alongX) p.cyl("metalDark", 0.05, length, (rng() - 0.5) * 0.6, deckTop + 0.1, off, 0, 0, Math.PI / 2);
-    else p.cyl("metalDark", 0.05, length, off, deckTop + 0.1, (rng() - 0.5) * 0.6, Math.PI / 2);
+    if (alongX) p.cyl("metalDark" + HIDE, 0.05, length, (rng() - 0.5) * 0.6, deckTop + 0.1, off, 0, 0, Math.PI / 2);
+    else p.cyl("metalDark" + HIDE, 0.05, length, off, deckTop + 0.1, (rng() - 0.5) * 0.6, Math.PI / 2);
   }
 
   // Rooftop billboard facing the -z street (~25%).
@@ -639,10 +637,10 @@ function buildRoof(
     const bz = hz * 0.55;
     const by = deckTop + 1.6 + bh / 2;
     const color = NEON[Math.floor(rng() * NEON.length)].clone().multiplyScalar(1.5 + rng() * 0.6);
-    p.cyl("metalDark", 0.06, by - deckTop, -bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
-    p.cyl("metalDark", 0.06, by - deckTop, bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
-    p.box("metalDark", bwid, bh, 0.1, 0, by, bz, -0.09);
-    p.plane("neon", bwid - 0.12, bh - 0.12, 0, by + 0.006, bz - 0.062, -0.09, Math.PI, 0, color);
+    p.cyl("metalDark" + HIDE, 0.06, by - deckTop, -bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
+    p.cyl("metalDark" + HIDE, 0.06, by - deckTop, bwid * 0.38, deckTop + (by - deckTop) / 2, bz + 0.12);
+    p.box("metalDark" + HIDE, bwid, bh, 0.1, 0, by, bz, -0.09);
+    p.plane("neon" + HIDE, bwid - 0.12, bh - 0.12, 0, by + 0.006, bz - 0.062, -0.09, Math.PI, 0, color);
   } else {
     rng();
     rng();
@@ -657,9 +655,9 @@ function buildRoof(
       const ah = 1.4 + rng() * 2.4;
       const ox = ax + (rng() - 0.5) * 0.9;
       const oz = az + (rng() - 0.5) * 0.9;
-      p.cyl("metalDark", 0.025, ah, ox, deckTop + ah / 2, oz);
+      p.cyl("metalDark" + HIDE, 0.025, ah, ox, deckTop + ah / 2, oz);
       p.box(
-        "neon",
+        "neon" + HIDE,
         0.07,
         0.07,
         0.07,
@@ -1345,7 +1343,7 @@ export function buildBuildingModel(
         if (yc > height - 1.5) continue;
         const a = uc - worldOff;
         kit.push(facePlacement(front, KIT_AC[(k + s) % KIT_AC.length], a, yc, 0.16, 0.5));
-        faceBox(p, front, "metalDark", 0.55, 0.05, 0.42, a, yc - 0.26, 0.2);
+        faceBox(p, front, "metalDark" + HIDE, 0.55, 0.05, 0.42, a, yc - 0.26, 0.2);
         placed++;
       }
     }
@@ -1363,32 +1361,14 @@ export function buildBuildingModel(
       const y = Math.min(3.6 + rng() * 4, yMax) ;
       const color = NEON[Math.floor(rng() * NEON.length)].clone().multiplyScalar(1.8 + rng() * 0.8);
       const zc = -d / 2 - 0.55;
-      p.box("metalDark", 0.1, sh, 0.72, a, y, zc);
-      p.plane("neon", 0.62, sh - 0.14, a - 0.058, y, zc, 0, -Math.PI / 2, 0, color);
-      p.plane("neon", 0.62, sh - 0.14, a + 0.058, y, zc, 0, Math.PI / 2, 0, color);
+      p.box("bladeMetal", 0.1, sh, 0.72, a, y, zc);
+      p.plane("bladeNeon", 0.62, sh - 0.14, a - 0.058, y, zc, 0, -Math.PI / 2, 0, color);
+      p.plane("bladeNeon", 0.62, sh - 0.14, a + 0.058, y, zc, 0, Math.PI / 2, 0, color);
       // Mounting arm back to the wall (upper mass, above the base extrusion).
-      p.cyl("metalDark", 0.03, 0.5, a, y + sh / 2 + 0.1, -d / 2 - 0.28, Math.PI / 2);
+      p.cyl("bladeMetal", 0.03, 0.5, a, y + sh / 2 + 0.1, -d / 2 - 0.28, Math.PI / 2);
       if (y - sh / 2 < 5.0) {
         // Sign hangs beside the storefront base: arm from the base wall too.
-        p.cyl("metalDark", 0.03, 0.4, a, y - sh / 2 + 0.1, -d / 2 - 0.33, Math.PI / 2);
-      }
-    }
-  }
-
-  // --- Kit facade billboard on the upper front face (taller buildings) ------
-  {
-    const rng = mulberry(b.style ^ 0x77aa11d3);
-    if (!kitTower && b.stories >= 3 && rng() < 0.55) {
-      const bb = KIT_BILLBOARDS[Math.floor(rng() * KIT_BILLBOARDS.length)];
-      const scale = Math.min(1.25, Math.max(0.6, (w - 1.6) / bb.w));
-      const bbH = bb.h * scale;
-      const yMax = height - bbH - 0.5;
-      if (yMax > 5.2) {
-        const a = (rng() - 0.5) * Math.max(0, w - bb.w * scale - 1.2);
-        const y = 5.2 + rng() * (yMax - 5.2);
-        const pl = facePlacement(front, bb.assetId, a, y, (bb.t * scale) / 2 + 0.08, scale);
-        pl.ry += bb.ryOffset;
-        kit.push(pl);
+        p.cyl("bladeMetal", 0.03, 0.4, a, y - sh / 2 + 0.1, -d / 2 - 0.33, Math.PI / 2);
       }
     }
   }

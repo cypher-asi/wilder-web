@@ -11,12 +11,13 @@ import { useMemo, useReducer } from "react";
 import { useFrame } from "@react-three/fiber";
 import { CHUNK_SIZE, ChunkData } from "../net/protocol";
 import { perf } from "../perf/perf";
-import { game } from "../state/game";
-import { collectBuildingKit } from "./building";
+import { game, useGame } from "../state/game";
+import { collectBuildingKit, KIT_AC } from "./building";
 import { Building } from "./Buildings";
 import { mountedChunks, processChunkBuilds, revealedChunks } from "./chunkBuilder";
 import { ChunkGround } from "./Ground";
 import { InstancedKit } from "./InstancedKit";
+import { isTronStyle } from "./styles";
 import {
   collectInstancedProps,
   INSTANCED_PROP_FITS,
@@ -68,10 +69,14 @@ export function Chunks() {
   });
 
   const chunks = useMemo(() => mountedChunks(), [mountVersion]);
-  const kitEntries = useMemo(
-    () => [...collectInstancedProps(chunks), ...collectBuildingKit(chunks)],
-    [chunks],
-  );
+  // TRON drops the building AC-unit HVAC clutter (building-only kit assets).
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
+  const kitEntries = useMemo(() => {
+    const all = [...collectInstancedProps(chunks), ...collectBuildingKit(chunks)];
+    if (!tron) return all;
+    const acIds = new Set(KIT_AC);
+    return all.filter((e) => !acIds.has(e.assetId));
+  }, [chunks, tron]);
 
   return (
     <>

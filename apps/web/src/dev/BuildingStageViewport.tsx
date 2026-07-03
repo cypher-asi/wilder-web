@@ -100,8 +100,8 @@ function StagedBuilding({ prefab, model }: { prefab: BuildingPrefab; model: Buil
             key={key}
             geometry={geom}
             material={getBuildingMaterial(key, instance)}
-            castShadow={!NO_SHADOW.has(key)}
-            receiveShadow={!NO_SHADOW.has(key)}
+            castShadow={!NO_SHADOW.has(key.split("#")[0])}
+            receiveShadow={!NO_SHADOW.has(key.split("#")[0])}
           />
         ))}
         {model.waterTower && <StageWaterTower placement={model.waterTower} />}

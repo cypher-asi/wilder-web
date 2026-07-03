@@ -71,6 +71,7 @@ function Crosshair() {
   useEffect(() => {
     let raf = 0;
     let cursor = "";
+    let minimap: Element | null = null;
     const pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const onMove = (e: PointerEvent) => {
       pos.x = e.clientX;
@@ -80,11 +81,23 @@ function Crosshair() {
     const onLeave = () => (inside.current = false);
     window.addEventListener("pointermove", onMove);
     document.documentElement.addEventListener("pointerleave", onLeave);
+    // The cursor is over the minimap (which has its own pointer cursor) — the
+    // crosshair should get out of the way there.
+    const overMinimap = () => {
+      if (!minimap || !minimap.isConnected) {
+        minimap = document.querySelector(".minimap-ring");
+      }
+      if (!minimap) return false;
+      const r = minimap.getBoundingClientRect();
+      return (
+        pos.x >= r.left && pos.x <= r.right && pos.y >= r.top && pos.y <= r.bottom
+      );
+    };
     const tick = () => {
       const node = el.current;
       const drawn = game.gun.drawn;
       if (node) {
-        const show = drawn && inside.current;
+        const show = drawn && inside.current && !overMinimap();
         node.style.opacity = show ? "1" : "0";
         if (show)
           node.style.transform = `translate(${pos.x - 16}px, ${pos.y - 16}px)`;

@@ -3,8 +3,8 @@
 // (yaw), wheel (zoom), and RMB drag (orbit/tilt, which persists).
 // Holding right-click and dragging orbits the view: horizontal drag rotates
 // around the player, vertical drag tilts up/down. Both stay where you leave
-// them on release. (A quick RMB tap without dragging is still click-to-move,
-// handled in PlayerInput.)
+// them on release. While RMB is held, PlayerInput freezes character facing so
+// you can circle the camera and see the character's front.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -28,6 +28,9 @@ export const cameraState = {
   distance: 48,
   minDistance: 5,
   maxDistance: 140,
+  // True while RMB is held to orbit/pan. Consumed by PlayerInput to freeze
+  // character facing so you can circle the camera without the body tracking.
+  dragging: false,
 };
 
 /** Decaying recoil offset applied to the whole view (position + look target). */
@@ -85,6 +88,7 @@ export function CameraRig() {
     const onPointerDown = (event: PointerEvent) => {
       if (event.button === 2) {
         dragging.current = true;
+        cameraState.dragging = true;
         lastPointer.current = { x: event.clientX, y: event.clientY };
       }
     };
@@ -107,9 +111,15 @@ export function CameraRig() {
       );
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (event.button === 2) dragging.current = false;
+      if (event.button === 2) {
+        dragging.current = false;
+        cameraState.dragging = false;
+      }
     };
-    const onBlur = () => (dragging.current = false);
+    const onBlur = () => {
+      dragging.current = false;
+      cameraState.dragging = false;
+    };
 
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("contextmenu", onContext);

@@ -382,6 +382,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       game.aim.active = false;
       return;
     }
+    // While RMB-dragging the camera, hold the current facing: the cursor's
+    // ground projection sweeps as the camera orbits, so recomputing here would
+    // spin the character and prevent you from viewing its front.
+    if (cameraState.dragging) return;
     // Aim relative to the smoothed (on-screen) position so the ring and the
     // aim line stay glued to the character.
     const px = game.rendered.x;

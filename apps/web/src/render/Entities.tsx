@@ -4,7 +4,7 @@
 
 import { Html, Outlines } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { setFootsteps } from "../assets/audio";
 import { CHARACTER_MODEL, PISTOL_MODEL, useAssetModel } from "../assets/catalog";
@@ -351,8 +351,15 @@ function restyleMannequin(
   scene.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
-    // Skinned meshes animate outside their static bounds; skip culling.
-    mesh.frustumCulled = false;
+    // Skinned meshes animate outside their static (bind pose) bounds, so the
+    // default sphere would pop limbs at the screen edge. But disabling
+    // culling entirely kept every off-screen character in the draw list;
+    // instead cull against a generous character-sized sphere that covers
+    // every animation pose. (Geometry is shared across clones; the sphere is
+    // identical for all of them, so overwriting it repeatedly is harmless.)
+    if ((mesh as unknown as THREE.SkinnedMesh).isSkinnedMesh) {
+      mesh.geometry.boundingSphere = CHARACTER_BOUNDS.clone();
+    }
     mesh.material = Array.isArray(mesh.material)
       ? mesh.material.map(restyle)
       : restyle(mesh.material);
@@ -366,12 +373,83 @@ function restyleMannequin(
   return flashables;
 }
 
-/** Warning red for the enemy silhouette border (matches reticle/hpbar). */
-const ENEMY_OUTLINE_COLOR = new THREE.Color(RED_NUM);
+/**
+ * Cheap stand-in for the per-entity point lights that used to sit on
+ * resource nodes, stations, and market terminals: an additive radial ground
+ * disc (same trick as the streetlight pools). A real point light multiplies
+ * shading cost across every forward-pass fragment in range; this is one
+ * blended quad.
+ */
+const entityGlowTexture = (() => {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const grad = ctx.createRadialGradient(32, 32, 2, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255, 255, 255, 0.55)");
+  grad.addColorStop(0.5, "rgba(255, 255, 255, 0.16)");
+  grad.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const entityGlowGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
+/** Keep the glow disc out of interact/aim raycasts (it sits in clickable groups). */
+const noRaycast = () => null;
+
+function GroundGlow({
+  color,
+  radius,
+  opacity = 0.22,
+  y = 0.03,
+}: {
+  color: string;
+  radius: number;
+  opacity?: number;
+  y?: number;
+}) {
+  const material = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color,
+        map: entityGlowTexture,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+    [color, opacity],
+  );
+  useEffect(() => () => material.dispose(), [material]);
+  return (
+    <mesh
+      geometry={entityGlowGeo}
+      material={material}
+      scale={[radius, 1, radius]}
+      position={[0, y, 0]}
+      raycast={noRaycast}
+    />
+  );
+}
+
+/** Generous local-space culling bounds for skinned characters: centered at
+ * chest height with enough radius to cover rolls, deaths, and melee lunges. */
+const CHARACTER_BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 1, 0), 3);
+
+/**
+ * Silhouette border colors. Brightened past their base hue (>1.0 channels,
+ * tone mapping disabled) so the rim reads clearly brighter than the body fill
+ * and blooms into a glow: warning red for hostiles, friendly blue for players.
+ */
+const ENEMY_OUTLINE_COLOR = new THREE.Color(RED_NUM).multiplyScalar(1.7);
+const PLAYER_OUTLINE_COLOR = new THREE.Color(0x3fa0ff).multiplyScalar(1.7);
 /** World-space border half-width, in metres. */
 const ENEMY_OUTLINE_THICKNESS = 0.03;
 
-const ENEMY_OUTLINE_VERT = /* glsl */ `
+const OUTLINE_VERT = /* glsl */ `
   #include <common>
   #include <skinning_pars_vertex>
   uniform float thickness;
@@ -386,7 +464,7 @@ const ENEMY_OUTLINE_VERT = /* glsl */ `
   }
 `;
 
-const ENEMY_OUTLINE_FRAG = /* glsl */ `
+const OUTLINE_FRAG = /* glsl */ `
   uniform vec3 color;
   uniform float opacity;
   void main() {
@@ -394,18 +472,18 @@ const ENEMY_OUTLINE_FRAG = /* glsl */ `
   }
 `;
 
-function makeEnemyOutlineMaterial(): THREE.ShaderMaterial {
+function makeOutlineMaterial(color: THREE.Color): THREE.ShaderMaterial {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     transparent: true,
     depthWrite: false,
     uniforms: {
-      color: { value: ENEMY_OUTLINE_COLOR.clone() },
+      color: { value: color.clone() },
       opacity: { value: 0.9 },
       thickness: { value: ENEMY_OUTLINE_THICKNESS },
     },
-    vertexShader: ENEMY_OUTLINE_VERT,
-    fragmentShader: ENEMY_OUTLINE_FRAG,
+    vertexShader: OUTLINE_VERT,
+    fragmentShader: OUTLINE_FRAG,
   });
   mat.toneMapped = false;
   return mat;
@@ -414,11 +492,14 @@ function makeEnemyOutlineMaterial(): THREE.ShaderMaterial {
 /**
  * Inverted-hull border: for every skinned mesh in the rig, add a slightly
  * inflated back-face clone sharing the same skeleton so it tracks the pose.
- * The expanded back faces peek out around the silhouette as a thin red rim
- * (bloom softens it into a glow). Returns the created materials (for pulsing)
- * and a cleanup that detaches the clones.
+ * The expanded back faces peek out around the silhouette as a thin colored rim
+ * (bloom softens it into a glow) — red for enemies, blue for players. Returns
+ * the created materials (for pulsing) and a cleanup that detaches the clones.
  */
-function attachEnemyOutline(scene: THREE.Group): {
+function attachOutline(
+  scene: THREE.Group,
+  color: THREE.Color,
+): {
   materials: THREE.ShaderMaterial[];
   cleanup: () => void;
 } {
@@ -430,10 +511,10 @@ function attachEnemyOutline(scene: THREE.Group): {
     if (skinned.isSkinnedMesh && skinned.parent) skins.push(skinned);
   });
   for (const skinned of skins) {
-    const mat = makeEnemyOutlineMaterial();
+    const mat = makeOutlineMaterial(color);
     const outline = new THREE.SkinnedMesh(skinned.geometry, mat);
     outline.bind(skinned.skeleton, skinned.bindMatrix);
-    outline.frustumCulled = false;
+    // Shares the body geometry, so it culls against CHARACTER_BOUNDS too.
     // Draw AFTER the body so the expanded back faces are depth-culled inside
     // the silhouette (the body writes depth) and only survive as a clean rim
     // around the edge — otherwise the border bleeds through the transparent
@@ -512,6 +593,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const gunKickAt = useRef(0);
   /** Alternates Punch_Cross/Punch_Jab on successive melee attacks. */
   const punchIndex = useRef(0);
+  /** Accumulated dt across frames skipped by the distance-tiered updater. */
+  const animAccum = useRef(0);
+  /** Frame counter for the update stride (offset by entity id to spread). */
+  const animFrame = useRef(0);
 
   useEffect(() => {
     if (!model || model.animations.length === 0) return;
@@ -594,10 +679,11 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     };
   }, [model, pistolModel, entity.id]);
 
-  // Glowing red silhouette border, enemies only.
+  // Glowing silhouette border: red for enemies, blue for players.
   useEffect(() => {
-    if (!model || !isNpc) return;
-    const { materials, cleanup } = attachEnemyOutline(model.scene);
+    if (!model) return;
+    const color = isNpc ? ENEMY_OUTLINE_COLOR : PLAYER_OUTLINE_COLOR;
+    const { materials, cleanup } = attachOutline(model.scene, color);
     outlineMats.current = materials;
     return () => {
       outlineMats.current = [];
@@ -615,8 +701,26 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     action.play();
   }
 
-  useFrame((_, dt) => {
+  useFrame((state, rawDt) => {
     if (!mixer.current || !model) return;
+
+    // Distance-tiered updates: full rate near the camera, half rate at mid
+    // range, third beyond. Distant characters are a few pixels tall, so the
+    // mixer + blend work (the bulk of per-entity CPU) runs at 20-30 Hz for
+    // them without visible stepping. Skipped frames accumulate dt so clip
+    // playback speed is unaffected; entity id staggers which frame each
+    // character updates on so the work spreads instead of clumping.
+    animAccum.current += rawDt;
+    animFrame.current++;
+    const camPos = state.camera.position;
+    const cdx = entity.x - camPos.x;
+    const cdz = entity.z - camPos.z;
+    const camDistSq = cdx * cdx + cdz * cdz;
+    const stride = camDistSq < 60 * 60 ? 1 : camDistSq < 120 * 120 ? 2 : 3;
+    if (stride > 1 && (animFrame.current + entity.id) % stride !== 0) return;
+    const dt = animAccum.current;
+    animAccum.current = 0;
+
     perf.begin("entities.anim");
     mixer.current.update(dt);
 
@@ -838,7 +942,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
   const tron = useGame((s) => isTronStyle(s.visualStyle));
-  const tint = tron ? new THREE.Color("#4fd0e0") : new THREE.Color(entity.tint);
+  const tint = useMemo(
+    () => (tron ? new THREE.Color("#4fd0e0") : new THREE.Color(entity.tint)),
+    [tron, entity.tint],
+  );
   const isNpc = entity.kind === "Npc";
   const tronNpc = tron && isNpc;
   const bodyColor = tronNpc ? "#000000" : tron ? "#040a0e" : isNpc ? "#4a3038" : "#2b3550";
@@ -874,7 +981,7 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
         {isNpc && (
           <Outlines
             color={RED_HEX}
-            thickness={3}
+            thickness={ENEMY_OUTLINE_THICKNESS}
             transparent
             opacity={0.9}
             screenspace
@@ -893,7 +1000,7 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
         {isNpc && (
           <Outlines
             color={RED_HEX}
-            thickness={3}
+            thickness={ENEMY_OUTLINE_THICKNESS}
             transparent
             opacity={0.9}
             screenspace
@@ -1018,7 +1125,7 @@ function ResourceNodeView({ entity }: { entity: GameEntity }) {
         <cylinderGeometry args={[0.7, 0.85, 0.12, 8]} />
         <meshStandardMaterial color="#20242e" roughness={0.9} />
       </mesh>
-      <pointLight color={color} intensity={2.2} distance={5} position={[0, 0.8, 0]} />
+      <GroundGlow color={color} radius={2.4} y={0.13} />
     </group>
   );
 }
@@ -1067,7 +1174,7 @@ function StationView({ entity }: { entity: GameEntity }) {
         <cylinderGeometry args={[0.07, 0.07, 0.5, 8]} />
         <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
       </mesh>
-      <pointLight color={accent} intensity={2.5} distance={6} position={[0, 1.4, 1]} />
+      <GroundGlow color={accent} radius={3} />
     </group>
   );
 }
@@ -1132,7 +1239,7 @@ function MarketTerminal({ entity }: { entity: GameEntity }) {
           opacity={0.85}
         />
       </mesh>
-      <pointLight color="#ffd700" intensity={2} distance={5} position={[0, 1.6, 0.6]} />
+      <GroundGlow color="#ffd700" radius={2.6} />
     </group>
   );
 }
@@ -1221,7 +1328,14 @@ function EntityView({ entity }: { entity: GameEntity }) {
       entity.vx += (tx - entity.vx) * k;
       entity.vz += (tz - entity.vz) * k;
     }
-    prevPos.current = { x: entity.x, z: entity.z };
+    // Mutate in place: a fresh object here was one allocation per character
+    // per frame.
+    if (prevPos.current) {
+      prevPos.current.x = entity.x;
+      prevPos.current.z = entity.z;
+    } else {
+      prevPos.current = { x: entity.x, z: entity.z };
+    }
 
     // Stand on the visual ground surface (raised sidewalks vs road grade).
     group.current.position.set(
@@ -1351,23 +1465,31 @@ function HealthBar({ entity }: { entity: GameEntity }) {
   );
 }
 
+/** Memoized: an entity's object identity is stable for its lifetime, so the
+ * 500 ms list poll only reconciles keys instead of re-rendering every view. */
+const MemoEntityView = memo(EntityView);
+
 export function Entities() {
-  // Re-render entity list when spawns/despawns happen (poll via joined flag +
-  // an entity count check each frame would be overkill; snapshot cadence is
-  // enough to keep this cheap).
-  const [, force] = useState(0);
+  // Re-render the entity list only when the spawned set actually changes.
+  // The 500 ms poll hashes the id set; identical hash = no React work at all
+  // (the previous version force-rendered ~100 views twice a second).
+  const [, setSig] = useState(0);
   const joined = useGame((s) => s.joined);
 
   useEffect(() => {
     if (!joined) return;
-    const timer = setInterval(() => force((n) => n + 1), 500);
+    const timer = setInterval(() => {
+      let sig = game.entities.size * 0x9e3779b9;
+      for (const id of game.entities.keys()) sig = (sig + id * 2654435761) >>> 0;
+      setSig(sig);
+    }, 500);
     return () => clearInterval(timer);
   }, [joined]);
 
   return (
     <>
       {[...game.entities.values()].map((entity) => (
-        <EntityView key={entity.id} entity={entity} />
+        <MemoEntityView key={entity.id} entity={entity} />
       ))}
       <TargetReticle />
     </>

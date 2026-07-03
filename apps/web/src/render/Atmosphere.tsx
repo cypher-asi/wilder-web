@@ -135,7 +135,15 @@ export function Lighting() {
 export function SkyBackdrop() {
   // groundAlbedo tints the below-horizon ellipsoid (visible past the city
   // edge) so it reads as sunlit hazy ground instead of a black void.
-  return <Sky groundAlbedo={GROUND_ALBEDO} />;
+  //
+  // sun={false} disables the physical solar disk. Its radiance
+  // (transmittance * GetSolarRadiance()) is astronomically large, and because
+  // Bloom runs in scene-linear HDR *before* AgX tone mapping with mipmapBlur,
+  // that point source smears across the whole frame and blinds the view
+  // whenever the camera faces the low western sun. The warm sky scattering
+  // near the sun (orders of magnitude dimmer) still reads as golden hour, and
+  // the SunLight directional still models the scene.
+  return <Sky groundAlbedo={GROUND_ALBEDO} sun={false} />;
 }
 
 const GROUND_ALBEDO = new THREE.Color(0.45, 0.36, 0.27);
@@ -151,7 +159,7 @@ export function Effects() {
   return (
     // MSAA off: SMAA handles the edges, which keeps the AO pass cheap.
     <EffectComposer multisampling={0}>
-      <N8AO halfRes quality="performance" aoRadius={2.2} intensity={1.4} distanceFalloff={1.5} />
+      <N8AO halfRes quality="performance" aoRadius={1.9} intensity={1.8} distanceFalloff={1.5} />
       {/* Volumetric clouds render into buffers here and are composited (with
           atmosphere overlay/shadow routing) by AerialPerspective below. */}
       <Clouds
@@ -168,16 +176,16 @@ export function Effects() {
         stbnTexture="/clouds/stbn.bin"
       />
       <AerialPerspective stbnTexture="/clouds/stbn.bin" />
-      <Bloom intensity={0.55} luminanceThreshold={0.85} luminanceSmoothing={0.3} mipmapBlur />
+      <Bloom intensity={0.7} luminanceThreshold={0.8} luminanceSmoothing={0.3} mipmapBlur />
       {/* The composer disables the renderer's built-in tone mapping, so map
           the physical-luminance HDR buffer to display here (AgX, exposure
           from gl.toneMappingExposure). */}
       <ToneMapping mode={ToneMappingMode.AGX} />
       {/* light golden-hour grade: richer color, gentle contrast */}
-      <HueSaturation saturation={0.22} />
-      <BrightnessContrast brightness={0.0} contrast={0.1} />
+      <HueSaturation saturation={0.18} />
+      <BrightnessContrast brightness={-0.015} contrast={0.15} />
       <SMAA />
-      <Vignette eskil={false} offset={0.15} darkness={0.45} />
+      <Vignette eskil={false} offset={0.15} darkness={0.5} />
     </EffectComposer>
   );
 }
@@ -193,7 +201,7 @@ export function Effects() {
  * colors (fog, env gradient) are divided by this so they land at their
  * authored brightness.
  */
-const EXPOSURE = 7;
+const EXPOSURE = 6.3;
 const DISPLAY_TO_SCENE = 1 / EXPOSURE;
 
 // Gradient dusk env: approximates the physical sky for IBL. Kept procedural
@@ -269,12 +277,12 @@ function makeSunsetEnvironment(gl: THREE.WebGLRenderer): THREE.Texture {
 }
 
 export function SceneSetup() {
-  const { scene, gl } = useThree();
+  const { scene, gl, camera } = useThree();
   useMemo(() => {
     // Fog color tracks the warm horizon; scaled into the physical range.
     scene.fog = new THREE.FogExp2(
-      new THREE.Color("#e8a06a").multiplyScalar(DISPLAY_TO_SCENE),
-      0.0035,
+      new THREE.Color("#cfa07e").multiplyScalar(DISPLAY_TO_SCENE),
+      0.003,
     );
     // No flat background color: the SkyBackdrop screen quad covers the sky.
     scene.background = null;
@@ -288,8 +296,9 @@ export function SceneSetup() {
     if (import.meta.env.DEV) {
       (window as unknown as { __gl?: THREE.WebGLRenderer }).__gl = gl;
       (window as unknown as { __scene?: THREE.Scene }).__scene = scene;
+      (window as unknown as { __camera?: THREE.Camera }).__camera = camera;
     }
-  }, [scene, gl]);
+  }, [scene, gl, camera]);
 
   // Drive time-varying facade shaders (window flicker/toggles).
   useFrame(({ clock }) => tickFacades(clock.elapsedTime));

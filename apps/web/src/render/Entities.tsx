@@ -2,7 +2,7 @@
 // uses the predicted transform for the local player, and animates a rigged
 // GLB character when available (procedural runner otherwise).
 
-import { Html } from "@react-three/drei";
+import { Html, Outlines } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
@@ -339,6 +339,88 @@ function restyleMannequin(
   return flashables;
 }
 
+/** Warning red for the enemy silhouette border (matches reticle/hpbar). */
+const ENEMY_OUTLINE_COLOR = new THREE.Color("#ff3040");
+/** World-space border half-width, in metres. */
+const ENEMY_OUTLINE_THICKNESS = 0.028;
+
+const ENEMY_OUTLINE_VERT = /* glsl */ `
+  #include <common>
+  #include <skinning_pars_vertex>
+  uniform float thickness;
+  void main() {
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    vec3 newPosition = transformed + objectNormal * thickness;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
+  }
+`;
+
+const ENEMY_OUTLINE_FRAG = /* glsl */ `
+  uniform vec3 color;
+  uniform float opacity;
+  void main() {
+    gl_FragColor = vec4(color, opacity);
+  }
+`;
+
+function makeEnemyOutlineMaterial(): THREE.ShaderMaterial {
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false,
+    uniforms: {
+      color: { value: ENEMY_OUTLINE_COLOR.clone() },
+      opacity: { value: 0.85 },
+      thickness: { value: ENEMY_OUTLINE_THICKNESS },
+    },
+    vertexShader: ENEMY_OUTLINE_VERT,
+    fragmentShader: ENEMY_OUTLINE_FRAG,
+  });
+  mat.toneMapped = false;
+  return mat;
+}
+
+/**
+ * Inverted-hull border: for every skinned mesh in the rig, add a slightly
+ * inflated back-face clone sharing the same skeleton so it tracks the pose.
+ * The expanded back faces peek out around the silhouette as a thin red rim
+ * (bloom softens it into a glow). Returns the created materials (for pulsing)
+ * and a cleanup that detaches the clones.
+ */
+function attachEnemyOutline(scene: THREE.Group): {
+  materials: THREE.ShaderMaterial[];
+  cleanup: () => void;
+} {
+  const materials: THREE.ShaderMaterial[] = [];
+  const created: THREE.Object3D[] = [];
+  const skins: THREE.SkinnedMesh[] = [];
+  scene.traverse((obj) => {
+    const skinned = obj as THREE.SkinnedMesh;
+    if (skinned.isSkinnedMesh && skinned.parent) skins.push(skinned);
+  });
+  for (const skinned of skins) {
+    const mat = makeEnemyOutlineMaterial();
+    const outline = new THREE.SkinnedMesh(skinned.geometry, mat);
+    outline.bind(skinned.skeleton, skinned.bindMatrix);
+    outline.frustumCulled = false;
+    outline.renderOrder = -1;
+    skinned.parent!.add(outline);
+    materials.push(mat);
+    created.push(outline);
+  }
+  return {
+    materials,
+    cleanup: () => {
+      for (const obj of created) obj.removeFromParent();
+      for (const mat of materials) mat.dispose();
+    },
+  };
+}
+
 /**
  * Sidearm mesh parented to the right hand bone, with a muzzle empty. The
  * holder is re-oriented every frame (see the useFrame aim block) so its local
@@ -390,6 +472,8 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const spineBones = useRef<THREE.Object3D[]>([]);
   const flashMats = useRef<FlashMaterial[]>([]);
   const flashActive = useRef(false);
+  /** Outline shader materials for enemies (pulsed for a subtle glow). */
+  const outlineMats = useRef<THREE.ShaderMaterial[]>([]);
   /** Last seen shot counter / timestamps, so triggers fire exactly once. */
   const seenShot = useRef(0);
   const seenHit = useRef(0);
@@ -477,6 +561,17 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     };
   }, [model, pistolModel, entity.id]);
 
+  // Glowing red silhouette border, enemies only.
+  useEffect(() => {
+    if (!model || !isNpc) return;
+    const { materials, cleanup } = attachEnemyOutline(model.scene);
+    outlineMats.current = materials;
+    return () => {
+      outlineMats.current = [];
+      cleanup();
+    };
+  }, [model, isNpc]);
+
   /** Fire a clip on the upper-body layer without touching locomotion. */
   function playUpper(name: string, timeScale: number) {
     const action = upperActions.current[name];
@@ -523,6 +618,12 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         f.mat.emissiveIntensity = f.baseIntensity + flash * 1.6;
       }
       flashActive.current = flash > 0;
+    }
+    if (outlineMats.current.length > 0) {
+      // Gentle breathing glow; fade the border out as the enemy dies.
+      const pulse = 0.7 + Math.sin(now * 0.005) * 0.18;
+      const alpha = dying ? 0 : pulse;
+      for (const mat of outlineMats.current) mat.uniforms.opacity.value = alpha;
     }
     let anim = entity.anim;
     if (isLocal) {
@@ -1111,32 +1212,57 @@ function EntityView({ entity }: { entity: GameEntity }) {
   return <group ref={group}>{body}</group>;
 }
 
-/** Keep the bar up briefly after a hit even once you look away, ms. */
-const HEALTH_BAR_LINGER = 1500;
+/** Camera distances (m) between which the bar fades from full to faint. */
+const HP_FADE_NEAR = 12;
+const HP_FADE_FAR = 60;
+/** Minimum opacity for distant (but still visible) enemies. */
+const HP_MIN_OPACITY = 0.3;
 
 /**
  * React health bar: a dark rectangle with a red fill sized to the enemy's
- * remaining health, rendered via drei Html above their head. Shown while you
- * are pointed at that enemy (soft target lock), plus a short post-hit linger.
+ * remaining health, rendered via drei Html above their head. Shown for every
+ * living enemy that is on screen; bars fade with camera distance so far-away
+ * enemies read as fainter than nearby ones.
  */
 function HealthBar({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
+  const container = useRef<HTMLDivElement>(null);
   const fill = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const lastVisible = useRef(false);
+  const world = useRef(new THREE.Vector3());
 
-  useFrame(() => {
-    if (!group.current) return;
-    const aimed = game.hoverTargetId === entity.id;
-    const recent = performance.now() - entity.lastHitAt < HEALTH_BAR_LINGER;
-    const show =
-      (aimed || recent) && entity.anim !== "Death" && entity.healthPct > 0;
+  useFrame(({ camera }) => {
+    const g = group.current;
+    if (!g) return;
+    const alive = entity.anim !== "Death" && entity.healthPct > 0;
+    let show = false;
+    let opacity = 1;
+    if (alive) {
+      g.getWorldPosition(world.current);
+      const dist = camera.position.distanceTo(world.current);
+      // Project to normalized device coords to test on-screen visibility.
+      world.current.project(camera);
+      const v = world.current;
+      show =
+        v.z < 1 && v.x > -1.05 && v.x < 1.05 && v.y > -1.05 && v.y < 1.05;
+      opacity = THREE.MathUtils.clamp(
+        1 -
+          ((dist - HP_FADE_NEAR) / (HP_FADE_FAR - HP_FADE_NEAR)) *
+            (1 - HP_MIN_OPACITY),
+        HP_MIN_OPACITY,
+        1,
+      );
+    }
     if (show !== lastVisible.current) {
       lastVisible.current = show;
       setVisible(show);
     }
-    if (show && fill.current) {
-      fill.current.style.width = `${Math.max(entity.healthPct, 0.02) * 100}%`;
+    if (show) {
+      if (container.current) container.current.style.opacity = String(opacity);
+      if (fill.current) {
+        fill.current.style.width = `${Math.max(entity.healthPct, 0.02) * 100}%`;
+      }
     }
   });
 
@@ -1144,7 +1270,7 @@ function HealthBar({ entity }: { entity: GameEntity }) {
     <group ref={group} position={[0, 2.25, 0]}>
       {visible && (
         <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
-          <div className="enemy-hpbar">
+          <div ref={container} className="enemy-hpbar">
             <div ref={fill} className="enemy-hpbar-fill" />
           </div>
         </Html>

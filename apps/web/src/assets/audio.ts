@@ -279,11 +279,17 @@ let music: Howl | null = null;
 // gesture, is honoured once the Howl exists / audio is unblocked.
 let musicEnabled = false;
 
+// Target playback level for the music bed. It shares the mix with the rain
+// ambience below, so it has to sit clearly above that noise floor to be
+// audible — a subtle dark-ambient track gets masked otherwise.
+const MUSIC_VOLUME = 1.0;
+const MUSIC_FADE_MS = 900;
+
 async function ensureMusic(): Promise<Howl | null> {
   if (music) return music;
   const url = await getAudioUrl("music_theme");
   if (!url) return null;
-  music = new Howl({ src: [url], loop: true, volume: 0.3 });
+  music = new Howl({ src: [url], loop: true, volume: 0 });
   return music;
 }
 
@@ -297,17 +303,32 @@ async function startMusic() {
   // join click / the toggle click) before/after starting playback.
   const ctx = Howler.ctx as AudioContext | undefined;
   if (ctx && ctx.state !== "running") void ctx.resume();
+  const fadeUp = () => howl.fade(howl.volume(), MUSIC_VOLUME, MUSIC_FADE_MS);
   if (!howl.playing()) {
+    howl.volume(0);
     howl.play();
+    fadeUp();
     howl.once("unlock", () => {
-      if (musicEnabled && !howl.playing()) howl.play();
+      if (musicEnabled && !howl.playing()) {
+        howl.volume(0);
+        howl.play();
+        fadeUp();
+      }
     });
+  } else {
+    // Already looping (e.g. re-enabled mid fade-out): bring it back up.
+    fadeUp();
   }
 }
 
 /** Stop the main-music bed without forgetting the enabled preference. */
 export function stopMusic() {
-  music?.stop();
+  const howl = music;
+  if (!howl || !howl.playing()) return;
+  howl.fade(howl.volume(), 0, MUSIC_FADE_MS);
+  howl.once("fade", () => {
+    if (!musicEnabled) howl.stop();
+  });
 }
 
 /** Live on/off from the settings toggle; starts/stops immediately. */
@@ -375,8 +396,9 @@ export function startAmbience() {
 
     src.connect(lowpass).connect(gain).connect(ctx.destination);
     src.start();
-    // Fade in gently.
-    gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 3);
+    // Fade in gently. Kept low so it reads as a background rain bed and does
+    // not mask the main music, which shares the same mix.
+    gain.gain.linearRampToValueAtTime(0.22, ctx.currentTime + 3);
     ambience = { ctx, gain };
   } catch {
     // Audio not available (autoplay policy); retried on next user gesture.

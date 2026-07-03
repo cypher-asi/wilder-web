@@ -100,4 +100,37 @@ impl CollisionWorld for ChunkCache {
         let tz = tz.min(TILES_PER_CHUNK - 1);
         chunk.walkable[tz * TILES_PER_CHUNK + tx]
     }
+
+    fn prop_blocked(&self, x: f32, z: f32, radius: f32) -> bool {
+        // A prop centered up to (radius + its radius) away can overlap the
+        // disc; scan every chunk within that reach (at most a 2x2 block).
+        let reach = radius + wilder_terrain::MAX_PROP_RADIUS;
+        let cx0 = ((x - reach) / CHUNK_SIZE).floor() as i32;
+        let cx1 = ((x + reach) / CHUNK_SIZE).floor() as i32;
+        let cz0 = ((z - reach) / CHUNK_SIZE).floor() as i32;
+        let cz1 = ((z + reach) / CHUNK_SIZE).floor() as i32;
+        for cz in cz0..=cz1 {
+            for cx in cx0..=cx1 {
+                let coord = ChunkCoord::new(cx, cz);
+                self.ensure(coord);
+                let loaded = self.loaded.borrow();
+                let chunk = &loaded[&coord];
+                let ox = cx as f32 * CHUNK_SIZE;
+                let oz = cz as f32 * CHUNK_SIZE;
+                for p in &chunk.data.props {
+                    let pr = wilder_terrain::prop_collision_radius(p.archetype);
+                    if pr <= 0.0 {
+                        continue;
+                    }
+                    let dx = ox + p.x - x;
+                    let dz = oz + p.z - z;
+                    let rr = radius + pr;
+                    if dx * dx + dz * dz < rr * rr {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }

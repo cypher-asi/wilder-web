@@ -6,7 +6,7 @@
 use wilder_types::*;
 
 pub const WALK_SPEED: f32 = 3.0; // m/s
-pub const RUN_SPEED: f32 = 6.0; // m/s
+pub const RUN_SPEED: f32 = 9.0; // m/s
 pub const CROUCH_SPEED: f32 = 1.6; // m/s
 pub const PLAYER_RADIUS: f32 = 0.4; // meters
 
@@ -21,6 +21,13 @@ pub trait CollisionWorld {
     /// Whether the tile containing the world-space point is walkable.
     /// Unloaded chunks should return `false` (treat as solid).
     fn walkable(&self, x: f32, z: f32) -> bool;
+
+    /// Whether a disc of `radius` centered at (x, z) overlaps a solid prop
+    /// collider (bike, trash bin, bench, tree, ...). Default: no prop
+    /// collision, for tile-only worlds (pathfinding tests, unit tests).
+    fn prop_blocked(&self, _x: f32, _z: f32, _radius: f32) -> bool {
+        false
+    }
 }
 
 /// Move with axis-separated collision so players slide along walls.
@@ -66,12 +73,14 @@ pub fn step_move_speed<W: CollisionWorld>(
     out
 }
 
-/// Check the player disc (4 cardinal extents) against the tile grid.
+/// Check the player disc (4 cardinal extents) against the tile grid, then
+/// against nearby prop colliders (circle-vs-circle).
 pub fn position_clear<W: CollisionWorld>(world: &W, x: f32, z: f32) -> bool {
     world.walkable(x + PLAYER_RADIUS, z)
         && world.walkable(x - PLAYER_RADIUS, z)
         && world.walkable(x, z + PLAYER_RADIUS)
         && world.walkable(x, z - PLAYER_RADIUS)
+        && !world.prop_blocked(x, z, PLAYER_RADIUS)
 }
 
 #[cfg(test)]
@@ -113,5 +122,25 @@ mod tests {
     fn clamps_teleport_dt() {
         let p = step_move(&OpenWorld, Vec3::ZERO, 1.0, 0.0, true, 100.0);
         assert!(p.x <= RUN_SPEED * 0.25 + 1e-4);
+    }
+
+    /// Open tiles, but a solid prop (radius 0.5) sits at x = 4.
+    struct PropWorld;
+    impl CollisionWorld for PropWorld {
+        fn walkable(&self, _x: f32, _z: f32) -> bool {
+            true
+        }
+        fn prop_blocked(&self, x: f32, z: f32, radius: f32) -> bool {
+            let (dx, dz) = (x - 4.0, z);
+            dx * dx + dz * dz < (radius + 0.5) * (radius + 0.5)
+        }
+    }
+
+    #[test]
+    fn blocked_by_prop() {
+        let start = Vec3::new(3.0, 0.0, 0.0);
+        let p = step_move(&PropWorld, start, 1.0, 0.0, true, 0.2);
+        // Player disc (0.4) stops before reaching the prop disc (0.5) at x=4.
+        assert!(p.x + PLAYER_RADIUS + 0.5 <= 4.0 + 1e-3, "x went to {}", p.x);
     }
 }

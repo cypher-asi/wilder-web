@@ -411,15 +411,18 @@ export class GameConnection {
       case "WalletUpdate": {
         const prev = useGame.getState().wallet;
         ui.set({ wallet: msg.d });
-        // Bouncy "+N CURRENCY" toasts near the wallet chips on gains
+        // Currency gains are loot too: surface them in the left pickup feed
+        // alongside item pickups instead of the bottom-right wallet toasts
         // (skip the initial balance push right after joining).
         if (prev) {
-          if (msg.d.wild > prev.wild) ui.pushWalletToast(`+${msg.d.wild - prev.wild} WILD`);
+          if (msg.d.wild > prev.wild) {
+            ui.pushPickup({ kind: null, text: `+${msg.d.wild - prev.wild} WILD` });
+          }
           if (msg.d.shards > prev.shards) {
-            ui.pushWalletToast(`+${msg.d.shards - prev.shards} SHARDS`);
+            ui.pushPickup({ kind: null, text: `+${msg.d.shards - prev.shards} SHARDS` });
           }
           if (msg.d.energy > prev.energy) {
-            ui.pushWalletToast(`+${msg.d.energy - prev.energy} ENERGY`);
+            ui.pushPickup({ kind: null, text: `+${msg.d.energy - prev.energy} ENERGY` });
           }
         }
         break;

@@ -33,6 +33,31 @@ pub mod props {
     pub const STOP_SIGN: u16 = 11;
 }
 
+/// Player-collision radius (meters) for a prop archetype. `0.0` means the prop
+/// is walk-through (flat floor grates, wall-mounted signs). Mirrored on the
+/// client in `apps/web/src/game/collision.ts`.
+pub fn prop_collision_radius(archetype: u16) -> f32 {
+    use props::*;
+    match archetype {
+        STREETLIGHT => 0.35,
+        BENCH => 0.6,
+        TRASH => 0.35,
+        HYDRANT => 0.3,
+        TREE => 0.55,
+        CAR => 0.9,
+        BARRIER => 0.5,
+        KIOSK => 1.1,
+        TRAFFIC_LIGHT => 0.3,
+        STOP_SIGN => 0.25,
+        // NEON_SIGN (wall-mounted) and VENT (floor grate) are walk-through.
+        _ => 0.0,
+    }
+}
+
+/// Largest value [`prop_collision_radius`] can return. Bounds how far a
+/// collision query must reach into neighboring chunks.
+pub const MAX_PROP_RADIUS: f32 = 1.1;
+
 const CITYMAP_BIN: &[u8] = include_bytes!("../assets/citymap.bin");
 
 /// The baked city: global tile grid + per-chunk building instances.

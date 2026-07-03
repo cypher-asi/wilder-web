@@ -292,7 +292,7 @@ body {
   left: 44px;
   width: 400px;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(900px) rotateY(8deg);
+  transform: perspective(620px) rotateY(20deg) skewX(-5deg);
   transform-origin: left center;
 }
 
@@ -381,14 +381,18 @@ body {
   box-shadow: 0 0 14px rgba(79, 195, 255, 0.85);
 }
 
-/* Uppercase micro-label in front of each bar (CORE/AUX style). */
+/* Uppercase micro-label in front of each bar (CORE/AUX style). Popped:
+   bright accent with a glow so it reads against the world. */
 .vital-label {
   font-family: var(--font-display);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 800;
   letter-spacing: 0.16em;
-  color: var(--text-dim);
-  min-width: 40px;
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 10px rgba(79, 195, 255, 0.9),
+    0 1px 2px #000;
+  min-width: 44px;
   text-align: right;
 }
 
@@ -406,13 +410,17 @@ body {
 .vital-big.health {
   font-size: 24px;
   color: var(--white);
-  text-shadow: 0 0 10px rgba(233, 245, 255, 0.5);
+  text-shadow:
+    0 0 14px rgba(233, 245, 255, 0.9),
+    0 1px 3px #000;
 }
 
 .vital-big.shield {
   font-size: 15px;
-  color: var(--accent);
-  text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 12px rgba(79, 195, 255, 0.9),
+    0 1px 3px #000;
 }
 
 .vital-max {
@@ -430,7 +438,7 @@ body {
   position: absolute;
   top: 32px;
   right: 24px;
-  width: 233px;
+  width: 230px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -440,12 +448,14 @@ body {
   transform-origin: right center;
 }
 
-/* Bottom-right comms column: style picker + chat, sitting above the backpack. */
+/* Bottom-right comms column: style picker + chat. Anchored by its bottom edge
+   so it grows upward, clearing the backpack quick-grid below it. Shares the
+   backpack's right padding (12px) so the right edges line up. */
 .comms-panel {
   position: absolute;
-  right: 12px;
-  bottom: 84px;
-  width: 240px;
+  right: 24px;
+  bottom: 120px;
+  width: 230px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -877,7 +887,7 @@ body {
   min-width: 320px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(900px) rotateY(8deg);
+  transform: perspective(620px) rotateY(20deg) skewX(-5deg);
   transform-origin: left center;
 }
 
@@ -1360,30 +1370,32 @@ body {
 /* Performance panel (F3): live fps + per-system frame cost readout. */
 .perf-chip {
   position: absolute;
-  top: 120px;
-  left: 16px;
+  top: 250px;
+  left: 44px;
   pointer-events: auto;
-  font: 700 9px/1 var(--font-display);
+  font: 800 13px/1 var(--font-display);
   letter-spacing: 0.18em;
-  color: var(--text-dim);
-  background: rgba(6, 14, 22, 0.55);
-  border: 1px solid var(--steel-border);
-  padding: 4px 7px;
+  color: var(--accent);
+  background: rgba(6, 14, 22, 0.8);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  padding: 6px 12px;
   cursor: pointer;
-  opacity: 0.45;
+  opacity: 0.9;
+  text-shadow: 0 0 10px rgba(79, 195, 255, 0.7);
   transition: opacity 0.15s;
 }
 
 .perf-chip:hover {
   opacity: 1;
-  color: var(--accent);
-  border-color: var(--accent-dim);
+  color: var(--accent-bright);
+  border-color: var(--accent);
 }
 
 .perf-panel {
   position: absolute;
-  top: 120px;
-  left: 16px;
+  top: 250px;
+  left: 44px;
   width: 244px;
   pointer-events: auto;
   padding: 8px 10px 6px;

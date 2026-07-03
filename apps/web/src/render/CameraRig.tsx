@@ -10,6 +10,14 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { game } from "../state/game";
+import { styleRuntime } from "./styles";
+
+/**
+ * Camera far plane, shared by GameCanvas and the Ocean horizon rim. Sized so
+ * the CityProxy far-field skyline stays visible when the fog thins at high
+ * zoom; at street-level zoom the fog fully absorbs the extra range.
+ */
+export const CAMERA_FAR = 1000;
 
 // Wiami streets are boulevard-scale (17-37 m curb to curb), so the resting
 // distance is pulled back far enough that a full road plus both sidewalks and
@@ -34,8 +42,8 @@ export function cameraKick(strength: number, yaw: number) {
   recoil.jolt = Math.min(0.6, recoil.jolt + strength * 0.5);
 }
 
-/** Fog density at the default zoom; thinned as the camera pulls back. */
-const FOG_BASE_DENSITY = 0.0035;
+/** Default-zoom fog distance; density comes from the active visual style
+ * (styleRuntime.fogBaseDensity) and thins as the camera pulls back. */
 const FOG_BASE_DISTANCE = 48;
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
@@ -184,9 +192,11 @@ export function CameraRig() {
     camera.lookAt(target.current.x + offX, 1.2, target.current.z + offZ);
 
     // Thin the fog when zoomed far out so the wider view stays readable.
+    // Slightly superlinear so the CityProxy skyline reaches the horizon at
+    // max zoom instead of drowning in haze; street-level zoom is unchanged.
     if (scene.fog instanceof THREE.FogExp2) {
-      const spread = Math.max(1, cameraState.distance / FOG_BASE_DISTANCE);
-      scene.fog.density = FOG_BASE_DENSITY / spread;
+      const spread = Math.max(1, (cameraState.distance / FOG_BASE_DISTANCE) ** 1.35);
+      scene.fog.density = styleRuntime.fogBaseDensity / spread;
     }
   });
 

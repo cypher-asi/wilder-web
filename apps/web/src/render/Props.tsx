@@ -1,12 +1,10 @@
-// Street props. Each archetype renders a real GLB from the asset manifest
-// when available, with a procedural stand-in otherwise (useAsset handles it).
+// Street props. Most archetypes render GPU-instanced cyberpunk kit GLBs
+// (INSTANCED_PROPS below); the rest are procedural (neon signs, steam).
 
 import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
-import { CAR_LENGTH } from "../game/scale";
-import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
 import { mulberry, NEON_COLORS } from "./facade";
 import { groundHeightAt } from "./Ground";
 import { KitEntry, KitFit } from "./InstancedKit";
@@ -25,138 +23,8 @@ export const KIOSK = 9;
 export const TRAFFIC_LIGHT = 10;
 export const STOP_SIGN = 11;
 
-// Streetlights just flicking on at dusk: soft glow, no strong ground pool.
-const lampGlow = new THREE.MeshStandardMaterial({
-  color: "#ffd9a0",
-  emissive: "#ffb45e",
-  emissiveIntensity: 1.6,
-});
 const poleMat = new THREE.MeshStandardMaterial({ color: "#1a1c20", roughness: 0.6, metalness: 0.7 });
 const darkMetal = new THREE.MeshStandardMaterial({ color: "#22252b", roughness: 0.5, metalness: 0.5 });
-const treeTrunk = new THREE.MeshStandardMaterial({ color: "#3a2d22", roughness: 0.9 });
-const treeCrown = new THREE.MeshStandardMaterial({ color: "#1c3524", roughness: 0.9 });
-
-function Streetlight() {
-  return (
-    <group>
-      <mesh material={poleMat} position={[0, 3.5, 0]} castShadow>
-        <cylinderGeometry args={[0.06, 0.1, 7.0, 6]} />
-      </mesh>
-      <mesh material={poleMat} position={[0.55, 6.85, 0]}>
-        <boxGeometry args={[1.2, 0.08, 0.08]} />
-      </mesh>
-      <mesh material={lampGlow} position={[1.1, 6.77, 0]}>
-        <boxGeometry args={[0.4, 0.1, 0.18]} />
-      </mesh>
-      {/* Fake light pool on the ground. */}
-      <mesh position={[1.1, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[2.2, 20]} />
-        <meshBasicMaterial color="#8a6c40" transparent opacity={0.04} depthWrite={false} />
-      </mesh>
-    </group>
-  );
-}
-
-const trafficRed = new THREE.MeshStandardMaterial({
-  color: "#3a0d0d",
-  emissive: "#ff2a1e",
-  emissiveIntensity: 2.5,
-});
-const trafficAmber = new THREE.MeshStandardMaterial({
-  color: "#3a2a0d",
-  emissive: "#ffab1e",
-  emissiveIntensity: 1.2,
-});
-const trafficGreen = new THREE.MeshStandardMaterial({
-  color: "#0d3a1a",
-  emissive: "#2aff6e",
-  emissiveIntensity: 1.2,
-});
-
-function TrafficLight() {
-  return (
-    <group>
-      <mesh material={poleMat} position={[0, 2.6, 0]} castShadow>
-        <cylinderGeometry args={[0.06, 0.1, 5.2, 6]} />
-      </mesh>
-      {/* 3-lamp head near the top of the pole. */}
-      <mesh material={darkMetal} position={[0, 4.55, 0]} castShadow>
-        <boxGeometry args={[0.32, 0.95, 0.26]} />
-      </mesh>
-      {[
-        { y: 4.85, mat: trafficRed },
-        { y: 4.55, mat: trafficAmber },
-        { y: 4.25, mat: trafficGreen },
-      ].map(({ y, mat }) => (
-        <mesh key={y} material={mat} position={[0, y, -0.135]} rotation={[0, Math.PI, 0]}>
-          <circleGeometry args={[0.09, 12]} />
-        </mesh>
-      ))}
-    </group>
-  );
-}
-
-const stopSignFace = new THREE.MeshStandardMaterial({
-  color: "#7a1418",
-  emissive: "#c01a20",
-  emissiveIntensity: 0.35,
-  roughness: 0.4,
-});
-
-function StopSign() {
-  return (
-    <group>
-      <mesh material={poleMat} position={[0, 1.05, 0]} castShadow>
-        <cylinderGeometry args={[0.04, 0.05, 2.1, 6]} />
-      </mesh>
-      {/* Octagonal plate at the top of the pole. */}
-      <mesh material={stopSignFace} position={[0, 2.1, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[0.38, 0.38, 0.04, 8]} />
-      </mesh>
-    </group>
-  );
-}
-
-function Car({ seed }: { seed: number }) {
-  const color = useMemo(() => {
-    const rng = mulberry(seed);
-    const palette = ["#3d4756", "#4a3540", "#2f4038", "#43413a", "#2e3a52"];
-    return palette[Math.floor(rng() * palette.length)];
-  }, [seed]);
-  return (
-    <group>
-      <mesh position={[0, 0.42, 0]} castShadow>
-        <boxGeometry args={[4.2, 0.75, 1.8]} />
-        <meshStandardMaterial color={color} roughness={0.25} metalness={0.7} />
-      </mesh>
-      <mesh position={[-0.2, 1.02, 0]} castShadow>
-        <boxGeometry args={[2.2, 0.55, 1.6]} />
-        <meshStandardMaterial color="#11151c" roughness={0.1} metalness={0.6} />
-      </mesh>
-      {[-1.4, 1.4].map((wx) =>
-        [-0.85, 0.85].map((wz) => (
-          <mesh key={`${wx}${wz}`} position={[wx, 0.3, wz]} rotation={[Math.PI / 2, 0, 0]}>
-            <cylinderGeometry args={[0.3, 0.3, 0.22, 12]} />
-            <meshStandardMaterial color="#0a0a0c" roughness={0.9} />
-          </mesh>
-        )),
-      )}
-    </group>
-  );
-}
-
-function Tree() {
-  return (
-    <group>
-      <mesh material={treeTrunk} position={[0, 1.1, 0]} castShadow>
-        <cylinderGeometry args={[0.12, 0.2, 2.2, 6]} />
-      </mesh>
-      <mesh material={treeCrown} position={[0, 2.8, 0]} castShadow>
-        <icosahedronGeometry args={[1.3, 1]} />
-      </mesh>
-    </group>
-  );
-}
 
 /**
  * Flickering neon sign plane: mostly steady, with per-seed random dropouts
@@ -294,23 +162,6 @@ export function LightPools({ chunk }: { chunk: ChunkData }) {
   );
 }
 
-function Kiosk({ seed }: { seed: number }) {
-  const neon = useMemo(() => {
-    const rng = mulberry(seed);
-    return NEON_COLORS[Math.floor(rng() * NEON_COLORS.length)];
-  }, [seed]);
-  return (
-    <group>
-      <mesh material={darkMetal} position={[0, 1.1, 0]} castShadow>
-        <boxGeometry args={[1.8, 2.2, 1.4]} />
-      </mesh>
-      <group position={[0, 2.0, 0.71]}>
-        <NeonPlane color={neon} width={1.5} height={0.35} seed={seed} />
-      </group>
-    </group>
-  );
-}
-
 const STEAM_SPRITES = 5;
 const steamMaterial = new THREE.MeshBasicMaterial({
   color: "#9aa7b8",
@@ -350,54 +201,28 @@ function Steam({ seed }: { seed: number }) {
   );
 }
 
-function Fallback({ prop }: { prop: PropInstance }) {
-  switch (prop.archetype) {
-    case STREETLIGHT:
-      return <Streetlight />;
-    case BENCH:
-      return (
-        <mesh material={darkMetal} position={[0, 0.25, 0]} castShadow>
-          <boxGeometry args={[1.8, 0.5, 0.55]} />
-        </mesh>
-      );
-    case TRASH:
-      return (
-        <mesh material={darkMetal} position={[0, 0.45, 0]} castShadow>
-          <cylinderGeometry args={[0.32, 0.28, 0.9, 8]} />
-        </mesh>
-      );
-    case HYDRANT:
-      return (
-        <mesh position={[0, 0.35, 0]} castShadow>
-          <cylinderGeometry args={[0.16, 0.2, 0.7, 8]} />
-          <meshStandardMaterial color="#5a1f22" roughness={0.6} metalness={0.3} />
-        </mesh>
-      );
-    case VENT:
-      return (
-        <mesh material={darkMetal} position={[0, 0.2, 0]}>
-          <boxGeometry args={[1.0, 0.4, 1.0]} />
-        </mesh>
-      );
-    case TREE:
-      return <Tree />;
-    case NEON_SIGN:
-      return <NeonSignProp seed={Math.floor(prop.x * 29 + prop.z * 41)} />;
-    case CAR:
-      return <Car seed={Math.floor(prop.x * 31 + prop.z * 17)} />;
-    case KIOSK:
-      return <Kiosk seed={Math.floor(prop.x * 13 + prop.z * 7)} />;
-    case TRAFFIC_LIGHT:
-      return <TrafficLight />;
-    case STOP_SIGN:
-      return <StopSign />;
-    default:
-      return (
-        <mesh material={darkMetal} position={[0, 0.3, 0]}>
-          <boxGeometry args={[0.6, 0.6, 0.6]} />
-        </mesh>
-      );
-  }
+/** Steam plumes over this chunk's vents (the vent models render instanced). */
+export function SteamVents({ chunk }: { chunk: ChunkData }) {
+  const vents = useMemo(
+    () =>
+      chunk.props
+        .filter((p) => p.archetype === VENT)
+        .map((p) => {
+          const wx = chunk.coord.x * CHUNK_SIZE + p.x;
+          const wz = chunk.coord.z * CHUNK_SIZE + p.z;
+          return { x: p.x, z: p.z, y: groundHeightAt(wx, wz), seed: Math.floor(p.x * 11 + p.z * 23) };
+        }),
+    [chunk],
+  );
+  return (
+    <>
+      {vents.map((v, i) => (
+        <group key={i} position={[v.x, v.y, v.z]}>
+          <Steam seed={v.seed} />
+        </group>
+      ))}
+    </>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +252,23 @@ const INSTANCED_PROPS: Record<number, InstancedVariant[]> = {
     { assetId: "lab_sm_tree2", scale: 0.85 },
     { assetId: "lab_sm_tree3", scale: 1.4 },
     { assetId: "lab_sm_bush_1" },
+  ],
+  // Parked hover bikes hold the curb slots until the kit's multi-part hover
+  // cars get an assembly pass; scale variance keeps rows from reading cloned.
+  [CAR]: [
+    { assetId: "lab_sm_motorbike01" },
+    { assetId: "lab_sm_motorbike01", scale: 0.94 },
+    { assetId: "lab_sm_motorbike01", scale: 1.05 },
+  ],
+  // No hydrants in the cyberpunk kit: streets get utility barrels instead.
+  [HYDRANT]: [{ assetId: "lab_sm_citybarrels_01" }, { assetId: "lab_sm_cyberbarrels01" }],
+  [VENT]: [{ assetId: "lab_sm_recylcer_01" }],
+  [KIOSK]: [{ assetId: "lab_sm_cpticketmachine01" }],
+  [TRAFFIC_LIGHT]: [{ assetId: "lab_sm_traffic_lamp_001" }],
+  [STOP_SIGN]: [
+    { assetId: "lab_sm_trafficsign01" },
+    { assetId: "lab_sm_trafficsign02" },
+    { assetId: "lab_sm_trafficsign05" },
   ],
 };
 
@@ -467,42 +309,23 @@ export function collectInstancedProps(chunks: ChunkData[]): KitEntry[] {
 }
 
 /**
- * Real-world target dimension per archetype, used to normalize loaded models
- * of unknown authoring scale. "height" measures the bbox Y extent; "length"
- * measures the longest horizontal bbox axis (max of X/Z).
+ * Representative meshes for the shared procedural prop materials (light
+ * pools, sign metal, steam), used by the chunk prewarm to compile their
+ * programs off the render path before a chunk reveals.
  */
-const PROP_TARGETS: Record<number, { size: number; axis: "height" | "length" }> = {
-  [STREETLIGHT]: { size: 7.0, axis: "height" },
-  [BENCH]: { size: 1.8, axis: "length" },
-  [TRASH]: { size: 1.1, axis: "height" },
-  [HYDRANT]: { size: 0.75, axis: "height" },
-  [VENT]: { size: 1.3, axis: "height" }, // dumpster model
-  [CAR]: { size: CAR_LENGTH, axis: "length" },
-  [KIOSK]: { size: 2.4, axis: "height" },
-  [TRAFFIC_LIGHT]: { size: 5.2, axis: "height" },
-};
+export function propPrewarmObjects(): THREE.Object3D[] {
+  return [
+    new THREE.Mesh(poolGeo, poolMat),
+    new THREE.Mesh(poolGeo, darkMetal),
+    new THREE.Mesh(poolGeo, steamMaterial),
+  ];
+}
 
+/**
+ * Non-instanced archetypes: procedural props with per-instance animation
+ * state (neon flicker). Everything model-based renders through InstancedKit.
+ */
 export function PropMesh({ prop, chunk }: { prop: PropInstance; chunk?: ChunkData }) {
-  const assetId =
-    prop.archetype === CAR
-      ? CAR_MODELS[Math.abs(Math.floor(prop.x * 7 + prop.z * 13)) % CAR_MODELS.length]
-      : PROP_MODELS[prop.archetype];
-  const model = useAssetModel(assetId);
-
-  // Uniform scale from measured bbox -> real-world target, plus a Y offset
-  // that snaps the (scaled) model bottom to ground level.
-  const { scale, yOffset } = useMemo(() => {
-    if (!model) return { scale: 1, yOffset: 0 };
-    const target = PROP_TARGETS[prop.archetype];
-    let scale = 1;
-    if (target) {
-      const measured =
-        target.axis === "height" ? model.size.y : Math.max(model.size.x, model.size.z);
-      if (measured > 1e-4) scale = target.size / measured;
-    }
-    return { scale, yOffset: -model.minY * scale };
-  }, [model, prop.archetype]);
-
   // Stand on the visual ground surface (raised sidewalk vs road grade). The
   // parent group sits at the chunk origin, so prop.x/z are chunk-local.
   const groundY = chunk
@@ -511,12 +334,13 @@ export function PropMesh({ prop, chunk }: { prop: PropInstance; chunk?: ChunkDat
 
   return (
     <group position={[prop.x, groundY, prop.z]} rotation={[0, prop.rotation, 0]}>
-      {model ? (
-        <primitive object={model.scene} scale={scale} position={[0, yOffset, 0]} />
+      {prop.archetype === NEON_SIGN ? (
+        <NeonSignProp seed={Math.floor(prop.x * 29 + prop.z * 41)} />
       ) : (
-        <Fallback prop={prop} />
+        <mesh material={darkMetal} position={[0, 0.3, 0]}>
+          <boxGeometry args={[0.6, 0.6, 0.6]} />
+        </mesh>
       )}
-      {prop.archetype === VENT && <Steam seed={Math.floor(prop.x * 11 + prop.z * 23)} />}
     </group>
   );
 }

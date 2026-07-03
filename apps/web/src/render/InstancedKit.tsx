@@ -3,6 +3,7 @@
 // across all visible chunks, so N placements of an asset cost a fixed number
 // of draw calls regardless of N.
 
+import { useThree } from "@react-three/fiber";
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import { useSharedModel } from "../assets/catalog";
@@ -43,6 +44,10 @@ interface SubMesh {
 
 const UP = new THREE.Vector3(0, 1, 0);
 
+/** Extra instance capacity allocated on growth, so streaming a few more
+ * placements updates matrices in place instead of reallocating buffers. */
+const CAPACITY_HEADROOM = 1.5;
+
 /** All placements of a single kit asset as instanced meshes. */
 export function InstancedKitAsset({
   assetId,
@@ -54,6 +59,9 @@ export function InstancedKitAsset({
   fit?: KitFit;
 }) {
   const model = useSharedModel(assetId);
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
 
   // Flatten the (small) GLB node hierarchy into geometry/material/transform
   // triples once; instance matrices bake each node transform back in.
@@ -74,8 +82,16 @@ export function InstancedKitAsset({
     return out;
   }, [model]);
 
+  // The group lives as long as the model does; placement changes rewrite the
+  // instance matrices in place (growing capacity only when exceeded), so
+  // chunk streaming does not reallocate GPU buffers every rebuild.
   const group = useMemo(() => {
-    if (!model || subMeshes.length === 0 || placements.length === 0) return null;
+    if (!model || subMeshes.length === 0) return null;
+    return new THREE.Group();
+  }, [model, subMeshes]);
+
+  useEffect(() => {
+    if (!group || !model) return;
 
     let normScale = 1;
     if (fit) {
@@ -84,16 +100,46 @@ export function InstancedKitAsset({
       if (measured > 1e-4) normScale = fit.size / measured;
     }
 
-    const g = new THREE.Group();
     const place = new THREE.Matrix4();
     const final = new THREE.Matrix4();
     const quat = new THREE.Quaternion();
     const pos = new THREE.Vector3();
     const scl = new THREE.Vector3();
+    const count = placements.length;
 
-    for (const sub of subMeshes) {
-      const im = new THREE.InstancedMesh(sub.geometry, sub.material, placements.length);
-      for (let i = 0; i < placements.length; i++) {
+    const bySub = (group.userData.bySub ??= []) as (THREE.InstancedMesh | undefined)[];
+    for (let s = 0; s < subMeshes.length; s++) {
+      const sub = subMeshes[s];
+      let im = bySub[s];
+      const capacity = im ? (im.userData.capacity as number) : 0;
+      if (!im || capacity < count) {
+        const first = !im;
+        if (im) {
+          group.remove(im);
+          im.dispose();
+        }
+        const alloc = Math.max(4, Math.ceil(count * CAPACITY_HEADROOM));
+        im = new THREE.InstancedMesh(sub.geometry, sub.material, alloc);
+        im.userData.capacity = alloc;
+        im.castShadow = true;
+        im.receiveShadow = true;
+        group.add(im);
+        bySub[s] = im;
+        if (first) {
+          // First appearance of this asset's instanced program: compile it
+          // off the render path so the reveal frame doesn't stall on a
+          // synchronous shader build. Capacity regrowth reuses the program.
+          const mesh = im;
+          mesh.userData.compiling = true;
+          gl.compileAsync(mesh, camera, scene)
+            .catch(() => undefined)
+            .then(() => {
+              mesh.userData.compiling = false;
+              mesh.visible = mesh.userData.wantVisible === true;
+            });
+        }
+      }
+      for (let i = 0; i < count; i++) {
         const p = placements[i];
         const ps = p.scale ?? 1;
         if (Array.isArray(ps)) {
@@ -108,17 +154,16 @@ export function InstancedKitAsset({
         final.multiplyMatrices(place, sub.matrix);
         im.setMatrixAt(i, final);
       }
+      im.count = count;
       im.instanceMatrix.needsUpdate = true;
-      im.castShadow = true;
-      im.receiveShadow = true;
-      im.computeBoundingSphere();
-      g.add(im);
+      im.userData.wantVisible = count > 0;
+      im.visible = count > 0 && im.userData.compiling !== true;
+      if (count > 0) im.computeBoundingSphere();
     }
-    return g;
-  }, [model, subMeshes, placements, fit]);
+  }, [group, model, subMeshes, placements, fit, gl, scene, camera]);
 
-  // Release per-instance GPU buffers on rebuild/unmount; geometry and
-  // materials belong to the shared model cache and stay alive.
+  // Release per-instance GPU buffers on unmount; geometry and materials
+  // belong to the shared model cache and stay alive.
   useEffect(() => {
     return () => {
       group?.traverse((obj) => {

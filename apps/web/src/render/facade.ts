@@ -5,6 +5,7 @@
 import * as THREE from "three";
 import { getPbrTextureSet } from "../assets/catalog";
 import { BuildingInstance } from "../net/protocol";
+import { STYLE_TOON_APPLY, STYLE_TOON_DECLS, styleUniforms } from "./styles";
 
 // ---------------------------------------------------------------------------
 // Stable exports used by other modules (Props.tsx, Atmosphere.tsx).
@@ -80,6 +81,11 @@ uniform float uLitRatio;
 uniform float uTopY;
 uniform float uSeed;
 uniform float uFTime;
+uniform float uFLitBoost;
+uniform float uFGlowGain;
+uniform float uFWarmth;
+uniform vec3 uFTint;
+${STYLE_TOON_DECLS}
 float fhash(vec2 p) {
   return fract(sin(dot(p + uSeed, vec2(127.1, 311.7))) * 43758.5453);
 }
@@ -104,7 +110,7 @@ vec3 fGlow = vec3(0.0);
 {
   vec3 fWn = normalize(vFWorldNormal);
   float fy = vFWorldPos.y - 0.14; // buildings sit on raised tiles (GROUND_Y)
-  diffuseColor.rgb *= uTint;
+  diffuseColor.rgb *= uTint * uFTint;
   // Splash-back band at street level + parapet weathering up top.
   float fGrime = mix(0.48, 1.0, smoothstep(0.05, 6.0, fy));
   fGrime *= 1.0 - 0.28 * smoothstep(uTopY - 2.2, uTopY - 0.3, fy);
@@ -124,13 +130,18 @@ vec3 fGlow = vec3(0.0);
       vec2 fCell = vec2(floor(fu / 1.4), floor(fv / 3.0));
       vec2 fFr = vec2(fract(fu / 1.4), fract(fv / 3.0));
       float fIn = step(0.26, fFr.x) * step(fFr.x, 0.74) * step(0.25, fFr.y) * step(fFr.y, 0.7);
-      float fLit = step(1.0 - uLitRatio, fhash(fCell * 1.13 + fFace));
-      vec3 fCol = mix(uWinColor, vec3(1.0, 0.8, 0.52), fhash(fCell + fFace + 3.0) * 0.75);
+      // Style boost: anime presets light far more windows (warm interiors).
+      float fRatio = clamp(uLitRatio * uFLitBoost, 0.0, 0.6);
+      float fLit = step(1.0 - fRatio, fhash(fCell * 1.13 + fFace));
+      // uFWarmth pulls the whole mix toward amber interiors (blue-hour mood
+      // where window light is the main warm source in the frame).
+      float fWarmMix = clamp(fhash(fCell + fFace + 3.0) * 0.75 + uFWarmth, 0.0, 1.0);
+      vec3 fCol = mix(uWinColor, vec3(1.0, 0.78, 0.48), fWarmMix);
       float fBr = 0.5 + 0.95 * fhash(fCell + fFace + 11.0);
       float fFl = fhash(fCell + fFace + 23.0);
       float fFlick = 1.0;
       if (fFl > 0.93) fFlick = 0.72 + 0.28 * sin(uFTime * (2.0 + 6.0 * fFl) + fFl * 40.0);
-      fGlow = fCol * (fIn * fLit * fBr * fFlick * 1.35);
+      fGlow = fCol * (fIn * fLit * fBr * fFlick * 1.35 * uFGlowGain);
       diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.012, 0.015, 0.02), fIn);
       // Rain streaks running down from window sills (~45% of windows):
       // strongest right under the sill, fading toward the cell bottom.
@@ -187,7 +198,7 @@ function makeFacadeMaterial(tex: string, topY: number, variant: number): THREE.M
     uFTime: timeUniform,
   };
   mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
+    Object.assign(shader.uniforms, uniforms, styleUniforms);
     shader.vertexShader =
       FACADE_VERT_HEADER +
       shader.vertexShader.replace("#include <worldpos_vertex>", FACADE_VERT_WORLDPOS);
@@ -195,7 +206,8 @@ function makeFacadeMaterial(tex: string, topY: number, variant: number): THREE.M
       FACADE_FRAG_HEADER +
       shader.fragmentShader
         .replace("#include <map_fragment>", FACADE_FRAG_MAP)
-        .replace("#include <emissivemap_fragment>", FACADE_FRAG_EMISSIVE);
+        .replace("#include <emissivemap_fragment>", FACADE_FRAG_EMISSIVE)
+        .replace("#include <opaque_fragment>", STYLE_TOON_APPLY);
   };
   mat.customProgramCacheKey = () => "wilder-facade";
   return mat;

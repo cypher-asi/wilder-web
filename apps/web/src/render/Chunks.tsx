@@ -1,12 +1,19 @@
 // Renders streamed chunks: ground (Ground.tsx), buildings (Buildings.tsx),
 // and street props (Props.tsx). Prop archetypes with promoted kit models are
 // batched world-wide through InstancedKit instead of per-prop clones.
+//
+// Streamed ChunkData does not mount directly: chunkBuilder.ts amortizes the
+// procedural building merges over frames and reveals chunks in batches, so
+// crossing a chunk boundary never lands a burst of geometry work on one
+// frame. Until a chunk is revealed the CityProxy far-field layer covers it.
 
-import { useMemo } from "react";
+import { useMemo, useReducer } from "react";
+import { useFrame } from "@react-three/fiber";
 import { CHUNK_SIZE, ChunkData } from "../net/protocol";
-import { game, useGame } from "../state/game";
+import { game } from "../state/game";
 import { collectBuildingKit } from "./building";
 import { Building } from "./Buildings";
+import { mountedChunks, processChunkBuilds } from "./chunkBuilder";
 import { ChunkGround } from "./Ground";
 import { InstancedKit } from "./InstancedKit";
 import {
@@ -15,7 +22,11 @@ import {
   isInstancedProp,
   LightPools,
   PropMesh,
+  SteamVents,
 } from "./Props";
+
+/** Per-frame budget (ms) for building chunk models off the streamed queue. */
+const BUILD_BUDGET_MS = 3;
 
 function Chunk({ chunk }: { chunk: ChunkData }) {
   const origin: [number, number, number] = [
@@ -34,19 +45,27 @@ function Chunk({ chunk }: { chunk: ChunkData }) {
         isInstancedProp(p.archetype) ? null : <PropMesh key={`p${i}`} prop={p} chunk={chunk} />,
       )}
       <LightPools chunk={chunk} />
+      <SteamVents chunk={chunk} />
     </group>
   );
 }
 
 export function Chunks() {
-  // chunkVersion bumps whenever the streamed set changes.
-  const chunkVersion = useGame((s) => s.chunkVersion);
-  const chunks = [...game.chunks.chunks.values()];
-  const kitEntries = useMemo(() => {
-    const all = [...game.chunks.chunks.values()];
-    return [...collectInstancedProps(all), ...collectBuildingKit(all)];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chunkVersion]);
+  // Bumped only when the *mounted* chunk set changes (batched reveals and
+  // retire expiries), not on every streamed network message.
+  const [mountVersion, bumpMounted] = useReducer((n: number) => n + 1, 0);
+
+  useFrame(({ gl, scene, camera }) => {
+    const p = game.rendered;
+    if (processChunkBuilds(p.x, p.z, BUILD_BUDGET_MS, gl, scene, camera)) bumpMounted();
+  });
+
+  const chunks = useMemo(() => mountedChunks(), [mountVersion]);
+  const kitEntries = useMemo(
+    () => [...collectInstancedProps(chunks), ...collectBuildingKit(chunks)],
+    [chunks],
+  );
+
   return (
     <>
       {chunks.map((chunk) => (

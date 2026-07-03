@@ -6,6 +6,7 @@
 
 import * as THREE from "three";
 import { getPbrTextureSet } from "../assets/catalog";
+import { STYLE_TOON_APPLY, STYLE_TOON_DECLS, styleUniforms } from "./styles";
 
 function solidTex(r: number, g: number, b: number, srgb = false): THREE.DataTexture {
   const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1);
@@ -72,6 +73,12 @@ varying float vKind;
 varying float vRoadD;
 varying vec3 vWPos;
 varying vec3 vWNormal;
+uniform float uGDetail;
+uniform float uGPuddle;
+uniform float uGWet;
+uniform float uGSat;
+uniform vec3 uGTint;
+${STYLE_TOON_DECLS}
 uniform sampler2D uAsphaltMap;
 uniform sampler2D uAsphaltNormal;
 uniform sampler2D uAsphaltRough;
@@ -197,15 +204,47 @@ vec3 gAlb;
 float gRgh;
 vec2 gNrm2 = vec2(0.0);
 float gNStr = 0.0;
-if (gKind == 0) {
-  gAlb = gTriRGB(uAsphaltMap, wp, gW, 3.6, 3.6) * 1.2;
+vec3 gEmissive = vec3(0.0);
+float gPud = 0.0;
+if (uTron > 0.5) {
+  // TRON: stark blue-black slab, all light from emissive lines. This path
+  // does zero texture fetches and skips every grunge/wear field below.
+  gAlb = TRON_BASE * (gKind == 0 ? 0.55 : 1.0);
+  gRgh = gKind == 0 ? 0.3 : 0.45;
+  if (gKind > 4 && gKind < 6) { gAlb = TRON_BASE * 0.4; gRgh = 0.08; }
+  // Grid fades with camera distance so far chunks stay clean (no shimmer).
+  float tCamD = distance(wp.xz, cameraPosition.xz);
+  float tFade = 1.0 - smoothstep(60.0, 170.0, tCamD);
+  if (tFade > 0.001) {
+    // Minor line every 4 m, brighter major line every 16 m, AA via fwidth.
+    vec2 tD4 = (0.5 - abs(fract(wp.xz / 4.0) - 0.5)) * 4.0;
+    float tMinor = min(tD4.x, tD4.y);
+    vec2 tD16 = (0.5 - abs(fract(wp.xz / 16.0) - 0.5)) * 16.0;
+    float tMajor = min(tD16.x, tD16.y);
+    float tAA = fwidth(tMinor);
+    float tLine = (1.0 - smoothstep(0.025, 0.05 + tAA, tMinor)) * 0.5
+                + (1.0 - smoothstep(0.045, 0.08 + tAA, tMajor)) * 0.9;
+    // Dim inside road surfaces so streets read as dark channels between
+    // glowing blocks; kill the grid on vertical curb faces.
+    tLine *= (gKind == 0 ? 0.3 : 1.0) * gW.y * tFade;
+    gEmissive += TRON_BLUE * tLine;
+  }
+  // Curb circuit: a hot line tracing every road edge across the city.
+  float tEdge = 1.0 - smoothstep(0.1, 0.3, abs(vRoadD));
+  gEmissive += mix(TRON_BLUE, TRON_WHITE, 0.3) * (tEdge * 2.0);
+} else if (gKind == 0) {
+  // Base kept dark so roads sit low in value and glowing signage carries the
+  // frame; the per-batch drift below provides the mid-grey variation.
+  gAlb = gTriRGB(uAsphaltMap, wp, gW, 3.6, 3.6) * 1.05;
   // Per-block tint drift: paving batches age brown-gray or blue-black, on a
   // ~30 m scale plus a soft fbm blend so streets don't read as one material.
   float batch = gHash12(floor(wp.xz / 30.0) + 77.0);
   float batchMix = clamp(batch + 0.5 * (gFbm(wp.xz * 0.02 + 640.0) - 0.5), 0.0, 1.0);
   gAlb *= mix(vec3(1.05, 1.0, 0.93), vec3(0.93, 0.97, 1.06), batchMix);
   gAlb *= 0.9 + 0.25 * gHash12(floor(wp.xz / 30.0) + 12.0);
-  gRgh = clamp(gTriR(uAsphaltRough, wp, gW, 3.6, 3.6) * 0.5 + 0.03, 0.1, 0.6);
+  // Roughness floor keeps the sun-glint path on the road from going
+  // near-mirror (a hot specular column straight toward the low sun).
+  gRgh = clamp(gTriR(uAsphaltRough, wp, gW, 3.6, 3.6) * 0.5 + 0.12, 0.28, 0.7);
   gNrm2 = gTriRG(uAsphaltNormal, wp, gW, 3.6, 3.6) * 2.0 - 1.0;
   gNStr = 0.5;
 } else if (gKind == 1) {
@@ -216,8 +255,9 @@ if (gKind == 0) {
   gSlabField(wp.xz, 2.0, pitch, jit, tone, joint);
   vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
   gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.44 * vec3(0.97, 0.95, 0.92);
-  // Bias tone downward: bright outlier slabs are what read as "white".
-  gAlb *= 0.6 + 0.55 * (tone - 0.72);
+  // Bias tone downward (bright outlier slabs read as "white") with a wide
+  // per-slab contrast so neighboring pours clearly differ, like the ref.
+  gAlb *= 0.52 + 0.72 * (tone - 0.72);
   // Per-slab hue drift: pours cure warm (tan) or cool (blue-gray).
   vec2 slabId = floor(wp.xz / pitch);
   gAlb *= mix(vec3(1.05, 0.99, 0.91), vec3(0.91, 0.96, 1.05), gHash12(slabId + 47.1));
@@ -229,7 +269,7 @@ if (gKind == 0) {
   gNStr = 0.35;
   // Recessed joint grooves between slabs: darker core plus a V-groove
   // normal tilt so each joint catches light like a saw cut, not a stripe.
-  gAlb *= 1.0 - 0.55 * joint;
+  gAlb *= 1.0 - 0.62 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
   vec2 jf = fract(wp.xz / pitch + 0.5) - 0.5;
   vec2 jTilt = -sign(jf) * (1.0 - smoothstep(0.005, 0.08, abs(jf) * pitch));
@@ -288,13 +328,13 @@ if (gKind == 0) {
   gSlabField(wp.xz + 37.0, 4.0, pitch, jit, tone, joint);
   vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
   gAlb = gTriRGB(uConcreteMap, wps, gW, 4.2, 0.9) * 0.46 * vec3(0.94, 0.96, 1.0);
-  // Same downward tone bias as sidewalks: kill the white outlier slabs.
-  gAlb *= 0.6 + 0.55 * (tone - 0.72);
+  // Same downward tone bias as sidewalks, with the same widened contrast.
+  gAlb *= 0.52 + 0.72 * (tone - 0.72);
   gRgh = clamp(gTriR(uConcreteRough, wps, gW, 4.2, 0.9) * 0.6 + 0.3, 0.55, 0.97);
   gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 9.1) - 0.5);
   gNrm2 = gTriRG(uConcreteNormal, wps, gW, 4.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.3;
-  gAlb *= 1.0 - 0.5 * joint;
+  gAlb *= 1.0 - 0.6 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
   vec2 jfP = fract((wp.xz + 37.0) / pitch + 0.5) - 0.5;
   vec2 jTiltP = -sign(jfP) * (1.0 - smoothstep(0.005, 0.08, abs(jfP) * pitch));
@@ -314,8 +354,16 @@ if (gKind == 0) {
   gRgh = 0.05;
 }
 
+// Everything below (mottle, grunge detail, wetness, puddles, grading) is
+// the textured-style pipeline; the tron path is already final.
+if (uTron < 0.5) {
+
 // Large-scale mottle so big surfaces don't read flat in low sun.
 gAlb *= 0.8 + 0.3 * gFbm(wp.xz * 0.06 + 7.7);
+
+// Style detail gate: anime presets skip the grunge detail below (cracks,
+// stains, wear) for a cleaner painterly read and fewer fbm/voronoi evals.
+if (uGDetail > 0.5) {
 
 // Dirt blotches + broad weathering patches on walkable concrete: small-scale
 // boot-traffic grime plus large irregular darkened regions like the
@@ -413,12 +461,6 @@ if (gKind == 0) {
   gNStr *= 1.0 - 0.5 * repair; // fresh asphalt reads smoother
   gAlb *= 1.0 - 0.3 * rim;
   gRgh = mix(gRgh, 0.3, rim);
-
-  // Uniform damp sheen: the whole street reads recently rained-on, with
-  // large-scale variation so some stretches dried out more than others.
-  float damp = clamp(0.35 + 0.55 * gFbm(wp.xz * 0.03 + 200.0), 0.0, 1.0);
-  gAlb *= 1.0 - 0.2 * damp;
-  gRgh = mix(gRgh, gRgh * 0.55 + 0.02, damp);
 }
 
 // Curb weathering and gutters: grime, painted sections, contact shadows.
@@ -466,10 +508,34 @@ if (gKind == 1) {
   gAlb *= 1.0 - 0.14 * seamAO;
 }
 
+} // end detail gate
+
+// Wetness (uGWet, runs in every style): the street reads recently rained-on,
+// with large-scale fbm variation so some stretches dried out more. At 1 this
+// matches the old golden damp sheen (soft, well above mirror); above 1 the
+// asphalt darkens further and polishes toward a slick wet-road reflection,
+// and damp sheen bleeds onto sidewalk/plaza stone.
+if (uGWet > 0.001) {
+  float dampN = clamp(0.35 + 0.55 * gFbm(wp.xz * 0.03 + 200.0), 0.0, 1.0);
+  if (gKind == 0 || gKind >= 9) {
+    float damp = dampN * min(uGWet, 1.0);
+    gAlb *= 1.0 - 0.2 * damp;
+    gRgh = mix(gRgh, gRgh * 0.75 + 0.08, damp);
+    float soak = dampN * clamp(uGWet - 1.0, 0.0, 1.0);
+    gAlb *= 1.0 - 0.25 * soak;
+    gRgh = mix(gRgh, 0.12, soak * gUp);
+  } else if (gKind == 1 || gKind == 2) {
+    // Damp stone: subtle darkening + grazing-angle sheen, never mirror.
+    float soakS = dampN * clamp(uGWet - 0.8, 0.0, 1.0);
+    gAlb *= 1.0 - 0.18 * soakS;
+    gRgh = mix(gRgh, 0.38, soakS * gUp * 0.8);
+  }
+}
+
 // Puddles: pooled in gutters and low spots; mirror-smooth, slightly dark.
-float gPud = 0.0;
+// uGPuddle widens coverage for the anime styles (rain-mirrored streets).
 {
-  float pn = gFbm(wp.xz * 0.16 + 55.0);
+  float pn = gFbm(wp.xz * 0.16 + 55.0) + uGPuddle;
   if (gKind == 0) gPud = smoothstep(0.56, 0.68, pn + gNearC * 0.06);
   else if (gKind == 1 || gKind == 2) gPud = 0.45 * smoothstep(0.66, 0.76, pn);
   gPud *= gUp;
@@ -478,11 +544,19 @@ float gPud = 0.0;
 }
 
 // Grime: alleys and block interiors far from any road get dirtier.
-if (gKind >= 1 && gKind <= 4 && gUp > 0.5) {
+if (uGDetail > 0.5 && gKind >= 1 && gKind <= 4 && gUp > 0.5) {
   float grime = smoothstep(2.5, 9.0, gDistRoad) * (0.65 + 0.35 * gFbm(wp.xz * 0.45 + 9.0));
   gAlb *= 1.0 - 0.3 * grime;
   gRgh = mix(gRgh, min(gRgh + 0.15, 1.0), grime * 0.5);
 }
+
+// Style grade: saturation + tint on the final albedo.
+{
+  float gLum = dot(gAlb, vec3(0.2126, 0.7152, 0.0722));
+  gAlb = max(mix(vec3(gLum), gAlb, uGSat) * uGTint, 0.0);
+}
+
+} // end textured-style pipeline (uTron < 0.5)
 
 // Normal: perturb up-facing surfaces with the per-kind normal map; puddles flatten.
 vec3 gWN = gGeoN;
@@ -499,7 +573,7 @@ export const groundMaterial = new THREE.MeshStandardMaterial({
 });
 
 groundMaterial.onBeforeCompile = (shader) => {
-  Object.assign(shader.uniforms, uniforms);
+  Object.assign(shader.uniforms, uniforms, styleUniforms);
   shader.vertexShader = shader.vertexShader
     .replace("#include <common>", VERT_DECLS)
     .replace("#include <fog_vertex>", VERT_MAIN);
@@ -510,6 +584,11 @@ groundMaterial.onBeforeCompile = (shader) => {
       "#include <roughnessmap_fragment>",
       "#include <roughnessmap_fragment>\n  roughnessFactor = gRgh;",
     )
+    // Tron grid / road-edge circuit lines (zero vector in every other style).
+    .replace(
+      "#include <emissivemap_fragment>",
+      "#include <emissivemap_fragment>\n  totalEmissiveRadiance += gEmissive;",
+    )
     // Puddles pick up a metalness kick so the env map reads as a real water
     // reflection (diffuse dies, specular tint from the darkened albedo).
     .replace(
@@ -519,5 +598,7 @@ groundMaterial.onBeforeCompile = (shader) => {
     .replace(
       "#include <normal_fragment_begin>",
       "#include <normal_fragment_begin>\n  normal = normalize(mat3(viewMatrix) * gWN);",
-    );
+    )
+    // Painterly luminance banding for the anime styles (no-op when 0).
+    .replace("#include <opaque_fragment>", STYLE_TOON_APPLY);
 };

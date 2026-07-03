@@ -26,6 +26,14 @@ export function Game() {
     };
   }, [connection]);
 
+  // Right-click is a gameplay input (move / camera); suppress the browser
+  // context menu everywhere in-game, not just on the WebGL canvas.
+  useEffect(() => {
+    const suppress = (event: MouseEvent) => event.preventDefault();
+    window.addEventListener("contextmenu", suppress);
+    return () => window.removeEventListener("contextmenu", suppress);
+  }, []);
+
   if (!connection) return null;
 
   return (

@@ -1,7 +1,14 @@
-// Golden-hour atmosphere, physically based: Bruneton precomputed atmospheric
-// scattering for the sky, volumetric clouds, a transmittance-derived sun
-// light, and post-processing. (Same stack as three.js PR #33292:
-// @takram/three-atmosphere + @takram/three-clouds.)
+// Atmosphere with switchable visual styles.
+//
+// "golden" is the physically based golden-hour stack: Bruneton precomputed
+// atmospheric scattering for the sky, volumetric clouds, a transmittance-
+// derived sun light, and post-processing (same stack as three.js PR #33292:
+// @takram/three-atmosphere + @takram/three-clouds).
+//
+// The anime styles replace all of that with a hand-painted sky dome shader
+// (gradient + painterly FBM clouds + stars/moon/sun), a simple three-light
+// rig, and a lighter post stack (no AO, no volumetric clouds) so they render
+// meaningfully faster.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import {
@@ -26,13 +33,14 @@ import {
 } from "@takram/three-atmosphere/r3f";
 import { Clouds } from "@takram/three-clouds/r3f";
 import { Ellipsoid, Geodetic, radians } from "@takram/three-geospatial";
-import { useCallback, useMemo, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import * as THREE from "three";
-import { game } from "../state/game";
+import { game, useGame } from "../state/game";
 import { tickFacades } from "./facade";
+import { applyStyle, STYLES, type AnimeSkySpec, type VisualStyle } from "./styles";
 
 // ---------------------------------------------------------------------------
-// Sun & world placement
+// Sun & world placement (golden style)
 // ---------------------------------------------------------------------------
 
 /**
@@ -64,9 +72,16 @@ const WORLD_TO_ECEF = Ellipsoid.WGS84.getNorthUpEastFrame(
 
 const SUN_DIR_ECEF = SUN_DIR.clone().transformDirection(WORLD_TO_ECEF);
 
+function useVisualStyle(): VisualStyle {
+  return STYLES[useGame((s) => s.visualStyle)];
+}
+
 /**
- * Context provider for the atmosphere components (sky, clouds, aerial
- * perspective, sun light). Fixed sun direction: perpetual golden hour.
+ * Context provider for the physical atmosphere components (sky, clouds,
+ * aerial perspective, sun light). Fixed sun direction: perpetual golden hour.
+ * Always mounted so switching styles doesn't remount the whole scene graph;
+ * the physical consumers (Sky/SunLight/Clouds/AerialPerspective) mount only
+ * in the golden style.
  */
 export function SunsetAtmosphere({ children }: { children: ReactNode }) {
   const apiRef = useCallback((api: AtmosphereApi | null) => {
@@ -82,7 +97,7 @@ export function SunsetAtmosphere({ children }: { children: ReactNode }) {
 // Lighting
 // ---------------------------------------------------------------------------
 
-export function Lighting() {
+function GoldenLighting() {
   const sunRef = useRef<SunDirectionalLight>(null);
 
   useFrame(() => {
@@ -115,7 +130,7 @@ export function Lighting() {
       {/* Cool counter-fill opposite the sun so shadowed faces stay readable.
           Placed far out with the default (origin) target so its direction is
           effectively constant anywhere on the map. Intensities are in the
-          physical luminance scale (see EXPOSURE below). */}
+          physical luminance scale (see the golden style's exposure). */}
       <directionalLight color="#93a9e6" intensity={0.12} position={[3400, 2200, -2600]} />
       {/* faint warm ambient floor so nothing crushes to black */}
       <ambientLight color="#ffd9b0" intensity={0.08} />
@@ -123,26 +138,243 @@ export function Lighting() {
   );
 }
 
+/**
+ * Anime light rig: one shadowed key light (moon or low sun per style) plus a
+ * strong hemisphere and warm ambient. Half the shadow map of the golden rig;
+ * soft painterly lighting hides the resolution loss.
+ */
+function AnimeLighting({ style }: { style: VisualStyle }) {
+  const lights = style.lights!;
+  const keyRef = useRef<THREE.DirectionalLight>(null);
+  const target = useMemo(() => new THREE.Object3D(), []);
+
+  useFrame(() => {
+    const key = keyRef.current;
+    if (!key) return;
+    target.position.set(game.predicted.x, 0, game.predicted.z);
+    key.position.set(
+      game.predicted.x + lights.sunDir.x * 120,
+      lights.sunDir.y * 120,
+      game.predicted.z + lights.sunDir.z * 120,
+    );
+  });
+
+  return (
+    <>
+      <primitive object={target} />
+      <directionalLight
+        ref={keyRef}
+        color={lights.sunColor}
+        intensity={lights.sunIntensity}
+        target={target}
+        castShadow
+        shadow-mapSize={[2048, 2048]}
+        shadow-camera-left={-70}
+        shadow-camera-right={70}
+        shadow-camera-top={70}
+        shadow-camera-bottom={-70}
+        shadow-camera-far={260}
+        shadow-bias={-0.0002}
+        shadow-normalBias={0.5}
+      />
+      <hemisphereLight args={[lights.hemiSky, lights.hemiGround, lights.hemiIntensity]} />
+      <ambientLight color={lights.ambient} intensity={lights.ambientIntensity} />
+    </>
+  );
+}
+
+export function Lighting() {
+  const style = useVisualStyle();
+  return style.physicalSky ? (
+    <GoldenLighting />
+  ) : (
+    <AnimeLighting key={style.id} style={style} />
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Sky
 // ---------------------------------------------------------------------------
 
+/** Hand-painted anime sky dome shader: gradient, painterly FBM clouds with
+ * sun underlighting, hash star field, moon disc, and a sun halo/disc. */
+export function makeAnimeSkyMaterial(
+  spec: AnimeSkySpec,
+  lum: number,
+  { stars = true }: { stars?: boolean } = {},
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      uZenith: { value: new THREE.Color(spec.zenith) },
+      uMid: { value: new THREE.Color(spec.mid) },
+      uHorizon: { value: new THREE.Color(spec.horizon) },
+      uSunDir: { value: spec.sunDir },
+      uSunColor: { value: new THREE.Color(spec.sunColor) },
+      uSunHalo: { value: spec.sunHalo },
+      uSunDisc: { value: spec.sunDisc },
+      uMoonDir: { value: spec.moonDir },
+      uMoonColor: { value: new THREE.Color(spec.moonColor) },
+      uMoonAmt: { value: spec.moonAmt },
+      uStars: { value: stars ? spec.stars : 0 },
+      uCloudCover: { value: spec.cloudCover },
+      uCloudLit: { value: new THREE.Color(spec.cloudLit) },
+      uCloudShade: { value: new THREE.Color(spec.cloudShade) },
+      uCloudSharp: { value: spec.cloudSharp },
+      uLum: { value: lum },
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vDir;
+      void main() {
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec3 vDir;
+      uniform vec3 uZenith;
+      uniform vec3 uMid;
+      uniform vec3 uHorizon;
+      uniform vec3 uSunDir;
+      uniform vec3 uSunColor;
+      uniform float uSunHalo;
+      uniform float uSunDisc;
+      uniform vec3 uMoonDir;
+      uniform vec3 uMoonColor;
+      uniform float uMoonAmt;
+      uniform float uStars;
+      uniform float uCloudCover;
+      uniform vec3 uCloudLit;
+      uniform vec3 uCloudShade;
+      uniform float uCloudSharp;
+      uniform float uLum;
+
+      float shash(vec2 p) {
+        vec3 q = fract(vec3(p.xyx) * 0.1031);
+        q += dot(q, q.yzx + 33.33);
+        return fract((q.x + q.y) * q.z);
+      }
+      float shash3(vec3 p) {
+        p = fract(p * 0.1031);
+        p += dot(p, p.zyx + 31.32);
+        return fract((p.x + p.y) * p.z);
+      }
+      float snoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(shash(i), shash(i + vec2(1.0, 0.0)), u.x),
+          mix(shash(i + vec2(0.0, 1.0)), shash(i + vec2(1.0, 1.0)), u.x),
+          u.y);
+      }
+      float sfbm(vec2 p) {
+        float a = 0.5;
+        float s = 0.0;
+        for (int i = 0; i < 4; i++) { s += a * snoise(p); p *= 2.13; a *= 0.5; }
+        return s;
+      }
+
+      void main() {
+        vec3 dir = normalize(vDir);
+        float h = dir.y;
+
+        // Base gradient: horizon band -> mid -> zenith.
+        vec3 sky = mix(uMid, uZenith, smoothstep(0.06, 0.55, h));
+        sky = mix(uHorizon, sky, smoothstep(-0.04, 0.14, h));
+
+        // Warm halo around the sun direction (behind the clouds).
+        float sunAmt = clamp(dot(dir, uSunDir), 0.0, 1.0);
+        sky += uSunColor * pow(sunAmt, 8.0) * uSunHalo;
+
+        // Painterly clouds: planar-projected FBM with a hard-ish coverage
+        // edge; lit face picks up the sun color (underlighting), shaded face
+        // sinks toward the cool shade color.
+        float cloud = 0.0;
+        if (uCloudCover > 0.001 && h > 0.015) {
+          vec2 cuv = dir.xz / (h + 0.22);
+          float n = sfbm(cuv * 1.35 + vec2(3.7, 9.1));
+          float cov = uCloudCover * (0.75 + 0.5 * (1.0 - h));
+          cloud = smoothstep(1.0 - cov - uCloudSharp, 1.0 - cov + uCloudSharp, n);
+          cloud *= smoothstep(0.015, 0.12, h);
+          float n2 = sfbm(cuv * 2.7 + 40.0);
+          float lit = clamp(0.3 + 1.1 * (n2 - 0.4) + 0.9 * pow(sunAmt, 3.0), 0.0, 1.0);
+          vec3 ccol = mix(uCloudShade, uCloudLit, lit);
+          // Bright rim where the coverage edge faces the sun.
+          float edge = cloud * (1.0 - cloud) * 4.0;
+          ccol += uSunColor * edge * pow(sunAmt, 4.0) * 0.55;
+          sky = mix(sky, ccol, cloud * 0.94);
+        }
+
+        // Hash star field, masked by clouds and faded near the horizon.
+        if (uStars > 0.001) {
+          vec3 g = dir * 70.0;
+          vec3 cell = floor(g);
+          float rnd = shash3(cell);
+          vec3 jit = vec3(shash3(cell + 17.0), shash3(cell + 29.0), shash3(cell + 43.0));
+          float d = length(fract(g) - 0.2 - 0.6 * jit);
+          float star = step(0.978, rnd) * smoothstep(0.12, 0.02, d)
+            * (0.35 + 0.65 * shash3(cell + 7.0));
+          sky += vec3(1.0, 0.97, 0.9) * star * uStars
+            * smoothstep(0.05, 0.35, h) * (1.0 - cloud);
+        }
+
+        // Moon: big soft disc plus a wide glow.
+        if (uMoonAmt > 0.001) {
+          float mAmt = clamp(dot(dir, uMoonDir), 0.0, 1.0);
+          float disc = smoothstep(0.99875, 0.99925, mAmt);
+          float glow = pow(mAmt, 40.0) * 0.3;
+          sky += uMoonColor * (disc * 1.5 + glow) * uMoonAmt * (1.0 - cloud * 0.9);
+        }
+
+        // Hot sun disc (sunset style), occluded by clouds.
+        sky += uSunColor * smoothstep(0.99915, 0.99965, sunAmt) * uSunDisc * (1.0 - cloud);
+
+        gl_FragColor = vec4(sky * uLum, 1.0);
+      }
+    `,
+  });
+}
+
+/** Anime sky dome: a back-side sphere that follows the camera on XZ. Radius
+ * stays inside the 400 m far plane at the highest camera position. */
+function AnimeSky({ style }: { style: VisualStyle }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const material = useMemo(
+    () => makeAnimeSkyMaterial(style.sky!, 1 / style.exposure),
+    [style],
+  );
+  useEffect(() => () => material.dispose(), [material]);
+  useFrame(({ camera }) => {
+    meshRef.current?.position.set(camera.position.x, 0, camera.position.z);
+  });
+  return (
+    <mesh ref={meshRef} renderOrder={-1} frustumCulled={false}>
+      <sphereGeometry args={[250, 48, 24]} />
+      <primitive object={material} attach="material" />
+    </mesh>
+  );
+}
+
 /**
- * Physical sky backdrop, rendered in the scene (a screen quad at far depth)
- * rather than in post so transparent effects blend against it correctly.
+ * Sky backdrop. Golden: physical sky rendered in the scene (a screen quad at
+ * far depth) rather than in post so transparent effects blend against it
+ * correctly. Anime: hand-painted dome.
  */
 export function SkyBackdrop() {
+  const style = useVisualStyle();
+  if (!style.physicalSky) return <AnimeSky key={style.id} style={style} />;
   // groundAlbedo tints the below-horizon ellipsoid (visible past the city
   // edge and past the Ocean plane's far clip) so it reads as distant hazy
   // sea, handing off from the animated ocean plane at the far plane.
   //
   // sun={false} disables the physical solar disk. Its radiance
-  // (transmittance * GetSolarRadiance()) is astronomically large, and because
-  // Bloom runs in scene-linear HDR *before* AgX tone mapping with mipmapBlur,
-  // that point source smears across the whole frame and blinds the view
-  // whenever the camera faces the low western sun. The warm sky scattering
-  // near the sun (orders of magnitude dimmer) still reads as golden hour, and
-  // the SunLight directional still models the scene.
+  // (transmittance * GetSolarRadiance()) is astronomically large and would
+  // clip a huge patch of sky to white; the warm scattering near the sun
+  // (orders of magnitude dimmer) still reads as golden hour, and the
+  // SunLight directional still models the scene.
   return <Sky groundAlbedo={GROUND_ALBEDO} sun={false} />;
 }
 
@@ -155,7 +387,7 @@ const GROUND_ALBEDO = new THREE.Color(0.1, 0.16, 0.18);
 const WEATHER_VELOCITY = new THREE.Vector2(0.001, 0);
 const SHADOW_MAP_SIZE = new THREE.Vector2(256, 256);
 
-export function Effects() {
+function GoldenEffects() {
   return (
     // MSAA off: SMAA handles the edges, which keeps the AO pass cheap.
     <EffectComposer multisampling={0}>
@@ -176,15 +408,16 @@ export function Effects() {
         stbnTexture="/clouds/stbn.bin"
       />
       <AerialPerspective stbnTexture="/clouds/stbn.bin" />
-      {/* Threshold sits in scene-linear HDR (pre tone map), so it must be
-          well above tone-mapped white or the whole sun-facing sky blooms
-          into a screen-filling glare. Only genuinely hot sources (neon,
-          emissive props, specular sun glints) should pass. */}
-      <Bloom intensity={0.3} luminanceThreshold={2.2} luminanceSmoothing={0.5} mipmapBlur />
       {/* The composer disables the renderer's built-in tone mapping, so map
           the physical-luminance HDR buffer to display here (AgX, exposure
           from gl.toneMappingExposure). */}
       <ToneMapping mode={ToneMappingMode.AGX} />
+      {/* Bloom runs AFTER tone mapping on display-referred [0,1] values, so
+          its energy is bounded: an HDR sun glint on the ground or the sky's
+          forward-scattering halo (orders of magnitude above any pre-tonemap
+          threshold) can no longer smear a screen-filling glare. Near-white
+          pixels (neon, emissives, the sun's core glow) still get a halo. */}
+      <Bloom intensity={0.25} luminanceThreshold={0.92} luminanceSmoothing={0.08} mipmapBlur />
       {/* light golden-hour grade: richer color, gentle contrast */}
       <HueSaturation saturation={0.18} />
       <BrightnessContrast brightness={0} contrast={0.15} />
@@ -194,24 +427,69 @@ export function Effects() {
   );
 }
 
+/** Post stack for the painted-sky styles: no volumetric clouds — bloom for
+ * the glowing windows/neon, a neutral tone map (preserves the authored
+ * palette), and a per-style grade. AO is opt-in per style (blue hour wants
+ * the grounded contact darkening; the painterly styles skip it for speed). */
+function AnimeEffects({ style }: { style: VisualStyle }) {
+  const post = style.post!;
+  const effects = [
+    <Bloom
+      key="bloom"
+      intensity={post.bloom}
+      luminanceThreshold={post.bloomThreshold}
+      luminanceSmoothing={0.3}
+      mipmapBlur
+    />,
+    <ToneMapping key="tm" mode={ToneMappingMode.NEUTRAL} />,
+    <HueSaturation key="hs" saturation={post.saturation} />,
+    <BrightnessContrast key="bc" brightness={post.brightness} contrast={post.contrast} />,
+    <SMAA key="smaa" />,
+    <Vignette key="vig" eskil={false} offset={0.15} darkness={post.vignette} />,
+  ];
+  if (post.ao) {
+    effects.unshift(
+      <N8AO
+        key="ao"
+        halfRes
+        quality="performance"
+        aoRadius={1.9}
+        intensity={1.8}
+        distanceFalloff={1.5}
+      />,
+    );
+  }
+  return <EffectComposer multisampling={0}>{effects}</EffectComposer>;
+}
+
+export function Effects() {
+  const style = useVisualStyle();
+  return style.physicalSky ? (
+    <GoldenEffects />
+  ) : (
+    <AnimeEffects key={style.id} style={style} />
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Scene setup: environment map, fog, tone mapping
 // ---------------------------------------------------------------------------
 
 /**
- * Scene radiance is in the atmosphere packages' physical luminance scale,
- * displayed through AgX at high exposure (the takram examples use ~10; a bit
- * lower here keeps the sun-facing sky from washing out). Display-referred
- * colors (fog, env gradient) are divided by this so they land at their
- * authored brightness.
+ * Scene radiance in the golden style is in the atmosphere packages' physical
+ * luminance scale, displayed through AgX at high exposure (the takram
+ * examples use ~10; a bit lower here keeps the sun-facing sky from washing
+ * out). Display-referred colors (fog, env gradient) are divided by the
+ * active exposure so they land at their authored brightness. Anime styles
+ * use a near-1 exposure with the same convention.
  */
-const EXPOSURE = 5.0;
-export const DISPLAY_TO_SCENE = 1 / EXPOSURE;
+const GOLDEN_EXPOSURE = STYLES.golden.exposure;
+export const DISPLAY_TO_SCENE = 1 / GOLDEN_EXPOSURE;
 
 // Gradient dusk env: approximates the physical sky for IBL. Kept procedural
 // (rather than capturing the real SkyMaterial into a cubemap) because PMREM
 // only needs a plausible warm-west/cool-zenith gradient for reflections.
-const envSkyMaterial = new THREE.ShaderMaterial({
+export const envSkyMaterial = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
   fog: false,
@@ -280,23 +558,66 @@ function makeSunsetEnvironment(gl: THREE.WebGLRenderer): THREE.Texture {
   return env;
 }
 
+/**
+ * Anime environment map: the style's painted sky (stars off — they'd sparkle
+ * in reflections) plus a matching ground bounce. This is what makes glass,
+ * metal, and street puddles mirror the pink/red anime sky.
+ */
+function makeAnimeEnvironment(gl: THREE.WebGLRenderer, style: VisualStyle): THREE.Texture {
+  const spec = style.sky!;
+  const envScene = new THREE.Scene();
+  const material = makeAnimeSkyMaterial(spec, 1 / style.exposure, { stars: false });
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(100, 32, 16), material);
+  envScene.add(sky);
+
+  const ground = new THREE.Mesh(
+    new THREE.CircleGeometry(90, 24).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({
+      color: new THREE.Color(spec.envGround).multiplyScalar(1 / style.exposure),
+    }),
+  );
+  ground.position.y = -2;
+  envScene.add(ground);
+
+  const pmrem = new THREE.PMREMGenerator(gl);
+  const env = pmrem.fromScene(envScene, 0.04).texture;
+  pmrem.dispose();
+  material.dispose();
+  return env;
+}
+
 export function SceneSetup() {
   const { scene, gl, camera } = useThree();
-  useMemo(() => {
-    // Fog color tracks the warm horizon; scaled into the physical range.
+  const style = useVisualStyle();
+
+  useEffect(() => {
+    // Push style values into the shared ground/facade shader uniforms and
+    // the runtime knobs (fog density base for CameraRig).
+    applyStyle(style);
+
+    // Fog color tracks the horizon; scaled into the active radiance range.
     scene.fog = new THREE.FogExp2(
-      new THREE.Color("#cfa07e").multiplyScalar(DISPLAY_TO_SCENE),
-      0.003,
+      new THREE.Color(style.fogColor).multiplyScalar(1 / style.exposure),
+      style.fogDensity,
     );
-    // No flat background color: the SkyBackdrop screen quad covers the sky.
+    // No flat background color: the sky (physical quad or painted dome)
+    // covers the whole view.
     scene.background = null;
-    scene.environment = makeSunsetEnvironment(gl);
-    scene.environmentIntensity = 0.6;
+    const env = style.physicalSky
+      ? makeSunsetEnvironment(gl)
+      : makeAnimeEnvironment(gl, style);
+    scene.environment = env;
+    scene.environmentIntensity = style.envIntensity;
     // The EffectComposer forces the renderer to NoToneMapping and the display
-    // mapping happens in the ToneMapping effect (AgX), which reads the
-    // exposure from here.
-    gl.toneMapping = THREE.AgXToneMapping;
-    gl.toneMappingExposure = EXPOSURE;
+    // mapping happens in the ToneMapping effect, which reads exposure here.
+    gl.toneMapping = style.physicalSky ? THREE.AgXToneMapping : THREE.NeutralToneMapping;
+    gl.toneMappingExposure = style.exposure;
+    return () => {
+      env.dispose();
+    };
+  }, [scene, gl, style]);
+
+  useEffect(() => {
     if (import.meta.env.DEV) {
       (window as unknown as { __gl?: THREE.WebGLRenderer }).__gl = gl;
       (window as unknown as { __scene?: THREE.Scene }).__scene = scene;

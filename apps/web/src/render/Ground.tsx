@@ -193,6 +193,9 @@ function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
   for (let tz = 0; tz < n; tz++) {
     for (let tx = 0; tx < n; tx++) {
       const tileKind = chunk.tiles[tz * n + tx];
+      // Water tiles emit no ground: the ocean plane (Ocean.tsx) sits just
+      // below road grade and shows through.
+      if (tileKind === "Water") continue;
       const kind = KIND_ID[tileKind] ?? 2;
       const x0 = tx * TILE_SIZE, x1 = x0 + TILE_SIZE;
       const z0 = tz * TILE_SIZE, z1 = z0 + TILE_SIZE;

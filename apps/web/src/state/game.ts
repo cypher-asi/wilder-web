@@ -7,6 +7,7 @@
 
 import { create } from "zustand";
 import { ChunkStore } from "../game/collision";
+import { VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import {
   AbilityKind,
   AnimState,
@@ -303,11 +304,24 @@ interface UiState {
   marketOpen: boolean;
   /** Fullscreen city map overlay (M key). */
   mapOpen: boolean;
+  /** Active visual style preset (persisted to localStorage). */
+  visualStyle: VisualStyleId;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
+  setVisualStyle: (style: VisualStyleId) => void;
+}
+
+const STYLE_STORAGE_KEY = "wilder.visualStyle";
+
+function loadVisualStyle(): VisualStyleId {
+  if (typeof localStorage !== "undefined") {
+    const saved = localStorage.getItem(STYLE_STORAGE_KEY) as VisualStyleId | null;
+    if (saved && VISUAL_STYLE_IDS.includes(saved)) return saved;
+  }
+  return "golden";
 }
 
 export const useGame: import("zustand").UseBoundStore<
@@ -342,12 +356,19 @@ export const useGame: import("zustand").UseBoundStore<
   nearMarket: false,
   marketOpen: false,
   mapOpen: false,
+  visualStyle: loadVisualStyle(),
 
   set: (partial) => set(partial),
   pushChat: (line) =>
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
+  setVisualStyle: (style) => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STYLE_STORAGE_KEY, style);
+    }
+    set({ visualStyle: style });
+  },
 }));
 
 if (typeof window !== "undefined" && import.meta.env.DEV) {

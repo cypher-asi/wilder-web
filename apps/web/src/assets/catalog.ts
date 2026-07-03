@@ -55,6 +55,15 @@ async function loadModel(id: string): Promise<LoadedModel | null> {
       if ((obj as THREE.Mesh).isMesh) {
         obj.castShadow = true;
         obj.receiveShadow = true;
+        // Kit textures (perforated metal, fences, grilles) alias into moiré
+        // bands at grazing angles without anisotropic filtering.
+        const mats = (obj as THREE.Mesh).material;
+        for (const mat of Array.isArray(mats) ? mats : [mats]) {
+          const m = mat as THREE.MeshStandardMaterial;
+          for (const tex of [m.map, m.normalMap, m.roughnessMap, m.metalnessMap, m.aoMap]) {
+            if (tex) tex.anisotropy = 8;
+          }
+        }
       }
     });
     const bbox = new THREE.Box3().setFromObject(gltf.scene);
@@ -184,27 +193,6 @@ export function usePbrTextureSet(name: string | undefined): PbrTextureSet | null
   }, [name]);
   return set;
 }
-
-/** Prop archetype id -> manifest asset id (see wilder-terrain::props). */
-export const PROP_MODELS: Record<number, string> = {
-  0: "prop_streetlight",
-  1: "prop_bench",
-  2: "prop_trash",
-  3: "prop_hydrant",
-  5: "prop_vent",
-  9: "prop_box",
-  10: "prop_trafficlight",
-};
-
-/** Car archetype rotates between model variants for street variety. */
-export const CAR_MODELS = [
-  "prop_car_sedan",
-  "prop_car_hatchback",
-  "prop_car_taxi",
-  "prop_car_stationwagon",
-  "prop_car_sedan",
-  "prop_car_police",
-];
 
 export const CHARACTER_MODEL = "character_main";
 export const PISTOL_MODEL = "weapon_pistol";

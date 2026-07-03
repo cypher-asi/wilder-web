@@ -22,24 +22,22 @@
     5px 6px 0 -1px rgba(79, 195, 255, 0.07),
     -3px 9px 0 -2px rgba(233, 245, 255, 0.04),
     0 0 26px rgba(79, 195, 255, 0.07);
-  /* Notched corners (top-left + bottom-right cut). */
+  /* Notched corners (bottom-right cut only; left corners stay square). */
   --notch: 10px;
   --notch-sm: 6px;
   --clip-notch: polygon(
-    var(--notch) 0,
+    0 0,
     100% 0,
     100% calc(100% - var(--notch)),
     calc(100% - var(--notch)) 100%,
-    0 100%,
-    0 var(--notch)
+    0 100%
   );
   --clip-notch-sm: polygon(
-    var(--notch-sm) 0,
+    0 0,
     100% 0,
     100% calc(100% - var(--notch-sm)),
     calc(100% - var(--notch-sm)) 100%,
-    0 100%,
-    0 var(--notch-sm)
+    0 100%
   );
   /* Diagonal hatch fill (selected / emphasis states). */
   --hatch: repeating-linear-gradient(
@@ -579,7 +577,6 @@ body {
   background: rgba(9, 15, 24, 0.5);
   border: 1px solid var(--steel-border);
   border-bottom: none;
-  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
   color: var(--text-dim);
   cursor: pointer;
 }
@@ -927,7 +924,6 @@ body {
   color: #0a0508;
   font-size: 10px;
   font-weight: 800;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 3px 100%, 0 calc(100% - 3px));
   letter-spacing: 0;
 }
 

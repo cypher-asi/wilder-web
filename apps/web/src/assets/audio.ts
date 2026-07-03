@@ -167,38 +167,57 @@ function getNoiseBuffer(ctx: AudioContext): AudioBuffer {
 }
 
 /**
- * Mechanical "cha-chik" for picking up ammo: two short band-passed noise
- * bursts (the metallic clack of a magazine/charging handle) so ammo reads
- * distinctly from the coin/loot chime. Synthesized — no asset file needed.
+ * Mechanical "cha-chik" for picking up ammo: two clacks, each a wide-band
+ * noise burst (metallic snap of a magazine/charging handle) reinforced by a
+ * short tonal click for body, so ammo reads distinctly - and at a comparable
+ * loudness to - the coin/loot chime. Filtered noise is perceptually weak, so
+ * this runs hot and leans on the tonal clicks to carry. Synthesized.
  */
-export function playAmmo(volume = 0.3) {
+export function playAmmo(volume = 0.6) {
   const ctx = getBlipCtx();
   if (!ctx) return;
   const t0 = ctx.currentTime;
   // Two clacks: a heavier "cha" then a snappier "chik".
   const clacks = [
-    { at: 0, freq: 850, q: 3, dur: 0.06, gain: volume },
-    { at: 0.09, freq: 1500, q: 5, dur: 0.05, gain: volume * 0.85 },
+    { at: 0, noiseFreq: 1000, q: 0.9, dur: 0.075, clickFreq: 180 },
+    { at: 0.1, noiseFreq: 2000, q: 1.2, dur: 0.06, clickFreq: 300 },
   ];
   for (const c of clacks) {
+    const start = t0 + c.at;
+    // Wide-band noise burst (metallic snap), boosted hard.
     const src = ctx.createBufferSource();
     src.buffer = getNoiseBuffer(ctx);
     const filter = ctx.createBiquadFilter();
     filter.type = "bandpass";
-    filter.frequency.value = c.freq;
+    filter.frequency.value = c.noiseFreq;
     filter.Q.value = c.q;
-    const gain = ctx.createGain();
-    const start = t0 + c.at;
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.linearRampToValueAtTime(c.gain, start + 0.004);
-    gain.gain.exponentialRampToValueAtTime(0.001, start + c.dur);
-    src.connect(filter).connect(gain).connect(ctx.destination);
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.0001, start);
+    nGain.gain.linearRampToValueAtTime(volume, start + 0.003);
+    nGain.gain.exponentialRampToValueAtTime(0.001, start + c.dur);
+    src.connect(filter).connect(nGain).connect(ctx.destination);
     src.start(start);
     src.stop(start + c.dur + 0.02);
     src.onended = () => {
       src.disconnect();
       filter.disconnect();
-      gain.disconnect();
+      nGain.disconnect();
+    };
+    // Short tonal click gives the clack presence/loudness.
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(c.clickFreq, start);
+    osc.frequency.exponentialRampToValueAtTime(c.clickFreq * 0.6, start + 0.03);
+    const oGain = ctx.createGain();
+    oGain.gain.setValueAtTime(0.0001, start);
+    oGain.gain.linearRampToValueAtTime(volume * 0.7, start + 0.003);
+    oGain.gain.exponentialRampToValueAtTime(0.001, start + 0.05);
+    osc.connect(oGain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + 0.07);
+    osc.onended = () => {
+      osc.disconnect();
+      oGain.disconnect();
     };
   }
 }

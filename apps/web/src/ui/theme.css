@@ -347,7 +347,8 @@ body {
   overflow: hidden;
 }
 
-/* Segment dividers: thin dark gaps across the whole bar (fill + track). */
+/* Segment dividers: chunky dark gaps across the whole bar (fill + track),
+   like the AUX example's blocky segments. */
 .vital-bar::after {
   content: "";
   position: absolute;
@@ -356,9 +357,9 @@ body {
   background: repeating-linear-gradient(
     90deg,
     transparent 0,
-    transparent 9px,
-    rgba(4, 6, 11, 0.7) 9px,
-    rgba(4, 6, 11, 0.7) 11px
+    transparent 20px,
+    rgba(4, 6, 11, 0.9) 20px,
+    rgba(4, 6, 11, 0.9) 24px
   );
 }
 
@@ -437,6 +438,21 @@ body {
   top: 12px;
   right: 12px;
   width: 233px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  pointer-events: auto;
+  transform: perspective(900px) rotateY(-8deg);
+  transform-origin: right center;
+}
+
+/* Bottom-right comms column: style picker + chat, sitting above the backpack. */
+.comms-panel {
+  position: absolute;
+  right: 12px;
+  bottom: 84px;
+  width: 240px;
   display: flex;
   flex-direction: column;
   align-items: stretch;

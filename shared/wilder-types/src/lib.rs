@@ -177,6 +177,19 @@ impl ItemKind {
         }
     }
 
+    /// How much backpack/stash volume one stack entry of this kind occupies.
+    /// Capacity is the container's slot count (36 backpack / 48 stash), so a
+    /// pistol at cost 4 genuinely crowds out four stacks of resources. The
+    /// grid UI renders costly items spanning multiple cells.
+    pub fn slot_cost(&self) -> u32 {
+        match self {
+            ItemKind::Pistol | ItemKind::Smg => 4,
+            ItemKind::PlateArmor => 3,
+            ItemKind::JacketArmor | ItemKind::Pipe | ItemKind::Knife | ItemKind::PowerCell => 2,
+            _ => 1,
+        }
+    }
+
     pub fn is_weapon(&self) -> bool {
         matches!(
             self,
@@ -341,6 +354,8 @@ pub enum AnimState {
     Walk,
     Run,
     Attack,
+    /// Flinching from a recent hit; the NPC is briefly stunned in place.
+    Hit,
     Death,
     Gather,
     Roll,

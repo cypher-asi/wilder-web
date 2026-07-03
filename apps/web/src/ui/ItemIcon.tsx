@@ -58,6 +58,32 @@ export function itemLabel(kind: ItemKind): string {
   return ITEM_INFO[kind]?.label ?? kind;
 }
 
+/**
+ * Backpack/stash volume one stack entry occupies (mirror of the server's
+ * `ItemKind::slot_cost`). Bulky gear takes multiple grid cells.
+ */
+export function slotCost(kind: ItemKind): number {
+  switch (kind) {
+    case "Pistol":
+    case "Smg":
+      return 4;
+    case "PlateArmor":
+      return 3;
+    case "JacketArmor":
+    case "Pipe":
+    case "Knife":
+    case "PowerCell":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+/** Total volume used by a container's occupied entries. */
+export function usedVolume(slots: (import("../net/protocol").ItemStack | null)[]): number {
+  return slots.reduce((n, s) => n + (s ? slotCost(s.kind) : 0), 0);
+}
+
 // Shared silhouette colors (cool steel, matching the HUD palette).
 const FILL = "#c9d8e6";
 const DIM = "#8aa0b4";

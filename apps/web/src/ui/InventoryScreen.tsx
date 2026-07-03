@@ -14,7 +14,7 @@ import {
 import { GameConnection } from "../net/connection";
 import { InventoryActionMsg, ItemKind, ItemStack } from "../net/protocol";
 import { useGame } from "../state/game";
-import { CATEGORY_TICK, ITEM_INFO, ItemIcon, itemLabel } from "./ItemIcon";
+import { CATEGORY_TICK, ITEM_INFO, ItemIcon, itemLabel, slotCost, usedVolume } from "./ItemIcon";
 
 const BACKPACK_COLS = 4;
 
@@ -250,10 +250,12 @@ function ItemCard({
   title?: string;
 }) {
   const cat = stack ? ITEM_INFO[stack.kind]?.category : null;
+  const cost = stack ? slotCost(stack.kind) : 1;
   return (
     <div
       className={
         "invx-slot" +
+        (cost > 1 ? ` cost-${cost}` : "") +
         (stack ? " filled" : "") +
         (selected ? " selected" : "") +
         (dimmed ? " dimmed" : "") +
@@ -269,7 +271,7 @@ function ItemCard({
       {stack && (
         <>
           <span className="invx-tick" style={{ background: cat ? CATEGORY_TICK[cat] : "#888" }} />
-          <ItemIcon kind={stack.kind} size={34} />
+          <ItemIcon kind={stack.kind} size={cost >= 4 ? 56 : cost >= 2 ? 42 : 34} />
           <span className="invx-count">x{stack.count}</span>
         </>
       )}
@@ -380,8 +382,9 @@ export function InventoryScreen({ connection }: { connection: GameConnection }) 
 
   if (!inventory) return null;
 
-  const used = inventory.slots.filter((s) => s !== null).length;
-  const stashUsed = (stash ?? []).filter((s) => s !== null).length;
+  // Capacity is volume-based: bulky items consume several cells.
+  const used = usedVolume(inventory.slots);
+  const stashUsed = usedVolume(stash ?? []);
   const showStash = nearStash && stash !== null;
 
   const send = (d: import("../net/protocol").InventoryActionMsg) =>

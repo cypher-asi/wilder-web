@@ -2,11 +2,22 @@
 
 use wilder_types::*;
 
+/// Total volume the occupied entries consume (see `ItemKind::slot_cost`).
+/// Capacity is the container's slot count, so bulky items crowd out others.
+pub fn used_volume(inv_slots: &[Option<ItemStack>]) -> u32 {
+    inv_slots
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.kind.slot_cost())
+        .sum()
+}
+
 /// Add items to the first available slots, stacking where possible.
-/// Returns the number of items that did NOT fit.
+/// Returns the number of items that did NOT fit. Opening a new slot entry
+/// requires enough free volume for the kind's slot cost.
 pub fn add_items(inv_slots: &mut [Option<ItemStack>], kind: ItemKind, mut count: u32) -> u32 {
     let max = kind.max_stack();
-    // Fill existing stacks first.
+    // Fill existing stacks first (no new volume consumed).
     for slot in inv_slots.iter_mut() {
         if count == 0 {
             break;
@@ -19,15 +30,22 @@ pub fn add_items(inv_slots: &mut [Option<ItemStack>], kind: ItemKind, mut count:
             }
         }
     }
-    // Then empty slots.
+    // Then empty slots, while the volume budget allows.
+    let cost = kind.slot_cost();
+    let capacity = inv_slots.len() as u32;
+    let mut volume = used_volume(inv_slots);
     for slot in inv_slots.iter_mut() {
         if count == 0 {
             break;
         }
         if slot.is_none() {
+            if volume + cost > capacity {
+                break;
+            }
             let take = max.min(count);
             *slot = Some(ItemStack { kind, count: take });
             count -= take;
+            volume += cost;
         }
     }
     count
@@ -178,6 +196,23 @@ mod tests {
         assert!(equip(&mut inv, 1, 0));
         assert_eq!(inv.equipped_weapon, Some(ItemKind::Pistol));
         assert_eq!(inv.slots[1].unwrap().kind, ItemKind::Pipe);
+    }
+
+    #[test]
+    fn bulky_items_consume_volume() {
+        // 4 slots of capacity; a pistol (cost 4) fills the whole budget.
+        let mut slots = vec![None; 4];
+        assert_eq!(add_items(&mut slots, ItemKind::Pistol, 1), 0);
+        assert_eq!(used_volume(&slots), 4);
+        // No volume left: iron can't open a new entry even though 3 array
+        // positions are empty.
+        assert_eq!(add_items(&mut slots, ItemKind::Iron, 10), 10);
+        // But an existing stack can still top up.
+        let mut slots = vec![None; 5];
+        assert_eq!(add_items(&mut slots, ItemKind::Pistol, 1), 0);
+        assert_eq!(add_items(&mut slots, ItemKind::Iron, 100), 0);
+        assert_eq!(add_items(&mut slots, ItemKind::Iron, 50), 50);
+        assert_eq!(count_items(&slots, ItemKind::Iron), 100);
     }
 
     #[test]

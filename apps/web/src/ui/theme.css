@@ -2054,12 +2054,32 @@ body {
 .invx-grid {
   display: grid;
   grid-template-columns: repeat(4, 64px);
+  grid-auto-rows: 64px;
+  grid-auto-flow: dense;
   gap: 9px;
   overflow-y: auto;
   align-content: start;
   padding-right: 4px;
   flex: 1;
   min-height: 0;
+}
+
+/* Bulky items (slot cost > 1) span multiple grid cells. */
+.invx-grid .invx-slot.cost-2 {
+  width: auto;
+  grid-column: span 2;
+}
+
+.invx-grid .invx-slot.cost-3 {
+  width: auto;
+  grid-column: span 3;
+}
+
+.invx-grid .invx-slot.cost-4 {
+  width: auto;
+  height: auto;
+  grid-column: span 2;
+  grid-row: span 2;
 }
 
 .invx-tick {

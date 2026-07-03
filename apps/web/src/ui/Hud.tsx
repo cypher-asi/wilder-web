@@ -12,7 +12,7 @@ import { RED_HEX } from "./colors";
 import { GameMenu } from "./GameMenu";
 import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
 import { InventoryScreen } from "./InventoryScreen";
-import { ItemIcon } from "./ItemIcon";
+import { ItemIcon, usedVolume } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 
@@ -502,7 +502,7 @@ function BackpackBar() {
   const toggleInventory = useGame((s) => s.toggleInventory);
 
   const slots = inventory?.slots ?? [];
-  const used = slots.filter((s) => s !== null).length;
+  const used = usedVolume(slots);
 
   return (
     <div className="backpack">

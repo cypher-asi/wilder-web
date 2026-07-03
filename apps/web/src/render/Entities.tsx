@@ -169,8 +169,13 @@ const MOVE_EPSILON = 0.15;
 const MAX_LEG_YAW = (75 * Math.PI) / 180;
 /** Above this speed the sprint clip takes over from the jog (m/s). */
 const SPRINT_MIN = (WALK_SPEED + RUN_SPEED) / 2;
-/** Below this speed the slow walk clip is used instead of the jog (m/s). */
-const WALK_MAX = 2.2;
+/**
+ * At or below this speed the walk clip is used instead of the jog (m/s).
+ * Sits just above the player WALK_SPEED (3.0) so walking plays a sped-up
+ * walk cycle (~1.9x) rather than a slowed-down jog, which read as slow
+ * motion.
+ */
+const WALK_MAX = 3.2;
 /** Spine bones sharing the torso counter-twist (GLTF-sanitized names). */
 const SPINE_BONES = ["DEF-spine001", "DEF-spine002", "DEF-spine003"];
 
@@ -219,41 +224,6 @@ const gunBasis = new THREE.Matrix4();
 const gunWorldQ = new THREE.Quaternion();
 const gunParentQ = new THREE.Quaternion();
 const gunRecoilQ = new THREE.Quaternion();
-
-/**
- * Map a replicated anim state to a single base-layer clip: full-body
- * overrides first, then locomotion loops (players shoot via the upper-body
- * layer, so Attack falls through to idle/locomotion here).
- */
-function chooseClip(anim: AnimState, isNpc: boolean, gunIdle: boolean): ClipChoice {
-  const override = chooseOverride(anim, isNpc);
-  if (override) return override;
-  switch (anim) {
-    case "Crouch":
-      return { name: "Crouch_Idle_Loop", timeScale: 1 };
-    case "CrouchWalk":
-      return {
-        name: "Crouch_Fwd_Loop",
-        timeScale: CROUCH_SPEED / CLIP_REF_SPEED.Crouch_Fwd_Loop,
-      };
-    case "Run":
-      return {
-        name: "Sprint_Loop",
-        timeScale: RUN_SPEED / CLIP_REF_SPEED.Sprint_Loop,
-      };
-    case "Walk":
-      // A real walk cycle for everyone; players pace it up to their 3 m/s
-      // move speed (brisk march) instead of playing the jog clip slowed
-      // down, which read as slow motion.
-      return isNpc
-        ? { name: "Walk_Loop", timeScale: 1 }
-        : { name: "Walk_Loop", timeScale: WALK_SPEED / CLIP_REF_SPEED.Walk_Loop };
-    default:
-      return gunIdle
-        ? { name: "Pistol_Idle_Loop", timeScale: 1 }
-        : { name: "Idle_Loop", timeScale: 1 };
-  }
-}
 
 /** Cloned material + its resting emissive, for the red damage flash. */
 interface FlashMaterial {
@@ -1602,6 +1572,16 @@ const HP_FADE_NEAR = 12;
 const HP_FADE_FAR = 60;
 /** Minimum opacity for distant (but still visible) enemies. */
 const HP_MIN_OPACITY = 0.3;
+/**
+ * Camera distance (m) at which the bar renders at its base CSS size. Closer
+ * than this it scales up (much larger, reading as attached to the enemy),
+ * farther it shrinks — keeping a roughly constant size relative to the enemy
+ * instead of a fixed pixel size on screen.
+ */
+const HP_SCALE_REF = 14;
+/** Clamp so point-blank bars stay sane and distant ones stay legible. */
+const HP_SCALE_MIN = 0.45;
+const HP_SCALE_MAX = 3.2;
 
 /**
  * React health bar: a dark rectangle with a red fill sized to the enemy's
@@ -1623,9 +1603,10 @@ function HealthBar({ entity }: { entity: GameEntity }) {
     const alive = entity.anim !== "Death" && entity.healthPct > 0;
     let show = false;
     let opacity = 1;
+    let dist = 0;
     if (alive) {
       g.getWorldPosition(world.current);
-      const dist = camera.position.distanceTo(world.current);
+      dist = camera.position.distanceTo(world.current);
       // Project to normalized device coords to test on-screen visibility.
       world.current.project(camera);
       const v = world.current;
@@ -1644,7 +1625,17 @@ function HealthBar({ entity }: { entity: GameEntity }) {
       setVisible(show);
     }
     if (show) {
-      if (container.current) container.current.style.opacity = String(opacity);
+      if (container.current) {
+        container.current.style.opacity = String(opacity);
+        // Scale inversely with distance so the bar keeps a constant size
+        // relative to the enemy: much larger up close, smaller far away.
+        const scale = THREE.MathUtils.clamp(
+          HP_SCALE_REF / dist,
+          HP_SCALE_MIN,
+          HP_SCALE_MAX,
+        );
+        container.current.style.transform = `scale(${scale})`;
+      }
       if (fill.current) {
         fill.current.style.width = `${Math.max(entity.healthPct, 0.02) * 100}%`;
       }
@@ -1652,7 +1643,7 @@ function HealthBar({ entity }: { entity: GameEntity }) {
   });
 
   return (
-    <group ref={group} position={[0, 2.25, 0]}>
+    <group ref={group} position={[0, 2.05, 0]}>
       {visible && (
         <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
           <div ref={container} className="enemy-hpbar">

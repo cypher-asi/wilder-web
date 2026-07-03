@@ -992,12 +992,26 @@ function buildStackedFacade(
 ): number {
   if (cfg.panels.length === 0) return baseY;
   const rng = mulberry(b.style ^ 0x8c17f2ad);
-  const rowH = cfg.rowHeight ?? 6;
+  // Slices only join cleanly with slices of the same authored footprint:
+  // mixing the 12.2 x 4.152 walkway with the 12 x 4.072 window bands leaves
+  // 0.1 m ledges and pokes interior floor slabs through the rows around it.
+  // Commit to one footprint group per building; rows vary within the group.
+  // Footprints are quantized to 0.25 m so trim-lip variants (12 x 4 vs
+  // 12 x 4.072) still stack together.
+  const groups = new Map<string, KitTowerPanel[]>();
+  const q = (v: number) => Math.round(v * 4) / 4;
+  for (const p of cfg.panels) {
+    const key = `${q(p.w ?? cfg.moduleWidth)}x${q(p.d ?? 4)}`;
+    const list = groups.get(key);
+    if (list) list.push(p);
+    else groups.set(key, [p]);
+  }
+  const pool = [...groups.values()][Math.floor(rng() * groups.size)];
   const front: Face = { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 };
   const back: Face = { axis: "z", wall: d / 2, sign: 1, len: w, center: 0 };
   let y = baseY;
   for (;;) {
-    const fits = cfg.panels.filter((p) => y + gridHeight(p, rowH) <= height + 0.6);
+    const fits = pool.filter((p) => y + p.h <= height + 0.6);
     if (fits.length === 0) break;
     const mod = fits[Math.floor(rng() * fits.length)];
     const sliceD = mod.d ?? 4;
@@ -1012,7 +1026,10 @@ function buildStackedFacade(
         kit.push(facePlacement(f, mod.assetId, 0, y, (sliceD - d) / 2));
       }
     }
-    y += gridHeight(mod, rowH);
+    // Advance by the authored height, not the rounded grid pitch: the
+    // 3.002 m window bands stacked on a rounded 3 m step would overlap the
+    // row above by 2 mm and z-fight along every floor line.
+    y += mod.h;
   }
   return y;
 }

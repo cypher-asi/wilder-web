@@ -374,9 +374,45 @@ def clamp_untextured_pbr(mat):
             base.default_value = UNTEXTURED_FALLBACK_COLOR
 
 
+# Unreal fake-interior planes (MI_CubeMap*) and black backing sheets
+# (MI_CB01_BlackBack) rely on runtime shaders (interior cubemap projection /
+# plain black) and ship no matching kit texture. The name-convention
+# fallback would wire the asset's wall atlas onto them, which renders as
+# bright concrete patches behind the window glass; keep them flat and dark.
+DARK_INTERIOR_RE = re.compile(r"cubemap|blackback", re.IGNORECASE)
+
+# Window glass (MI_GlassCB01_2, MI_Glass01, ...). The kit's T_Glass_B is a
+# flat mid-gray sheet meant for a translucent Unreal shader; wiring it as an
+# opaque base color with the FBX's metallic=1 renders as a smeared dark
+# mirror. Replace with an untextured dark glossy dielectric.
+GLASS_RE = re.compile(r"glass", re.IGNORECASE)
+
+
+def make_flat_material(mat, base, metallic, roughness):
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        return
+    for node in list(mat.node_tree.nodes):
+        if node.type == "TEX_IMAGE":
+            mat.node_tree.nodes.remove(node)
+    bsdf.inputs["Base Color"].default_value = base
+    bsdf.inputs["Metallic"].default_value = metallic
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Alpha"].default_value = 1.0
+
+
 materials = []
 texture_files = set()
 for mat in bpy.data.materials:
+    if DARK_INTERIOR_RE.search(mat.name):
+        make_flat_material(mat, (0.010, 0.012, 0.016, 1.0), 0.0, 0.85)
+        materials.append({"name": mat.name, "textures": {}})
+        continue
+    if GLASS_RE.search(mat.name):
+        make_flat_material(mat, (0.016, 0.024, 0.035, 1.0), 0.0, 0.12)
+        materials.append({"name": mat.name, "textures": {}})
+        continue
     # 1. Repoint the FBX's own texture references into the kit's Textures dir.
     rescued, key_hints = rescue_fbx_references(mat)
     # 2. Drop whatever still points at missing files.

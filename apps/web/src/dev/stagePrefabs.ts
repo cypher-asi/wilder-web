@@ -164,12 +164,13 @@ const PREFAB_DEFAULTS = {
  * the slices are complete floors, so no procedural massing/roof belongs
  * here. Narrow fills and freestanding chunks stay out of the default pool.
  */
+// module11/12 are L-shaped half-plan slices (they only close the plan as a
+// mirrored pair) and module17/18/19 are sloped roof-crown wedges, so they
+// stay out of the default whole-slice pool.
 const CB01_SLICES = [
   "lab_sm_cb01_module01",
   "lab_sm_cb01_module02",
   "lab_sm_cb01_module08",
-  "lab_sm_cb01_module11",
-  "lab_sm_cb01_module18",
 ];
 
 function cb01Prefabs(modules: StageModule[]): BuildingPrefab[] {

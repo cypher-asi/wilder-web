@@ -121,20 +121,26 @@ function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
 
   return (
     <group ref={group} quaternion={quat} visible={false}>
-      {/* Bolt head: hot elongated slug. */}
-      <mesh scale={[1, 0.16, 1]}>
-        <cylinderGeometry args={[0.035, 0.035, 1, 6]} />
+      {/* Bolt head: hot elongated slug. Opaque core so it stays visible on
+          bright daylight backgrounds where additive glow washes out. */}
+      <mesh scale={[1, 0.45, 1]}>
+        <cylinderGeometry args={[0.05, 0.05, 1, 6]} />
+        <meshBasicMaterial color="#fffbe8" toneMapped={false} />
+      </mesh>
+      {/* Additive halo around the core. */}
+      <mesh scale={[1, 0.55, 1]}>
+        <cylinderGeometry args={[0.1, 0.1, 1, 6]} />
         <meshBasicMaterial
-          color="#fff2c8"
+          color="#ffca6a"
           transparent
-          opacity={1}
+          opacity={0.55}
           blending={THREE.AdditiveBlending}
           depthWrite={false}
         />
       </mesh>
       {/* Fading streak trail behind the bolt. */}
       <mesh ref={trail}>
-        <cylinderGeometry args={[0.022, 0.022, 1, 5]} />
+        <cylinderGeometry args={[0.035, 0.035, 1, 5]} />
         <meshBasicMaterial
           color="#ffd27a"
           transparent

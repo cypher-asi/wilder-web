@@ -70,6 +70,14 @@ function hasRangedWeapon(): boolean {
   return weapon != null && RANGED_WEAPONS.has(weapon);
 }
 
+function ammoCount(): number {
+  const inv = useGame.getState().inventory;
+  if (!inv) return 0;
+  let total = 0;
+  for (const s of inv.slots) if (s?.kind === "Ammo9mm") total += s.count;
+  return total;
+}
+
 export function PlayerInput({ connection }: { connection: GameConnection }) {
   const { camera, gl } = useThree();
   const keys = useRef<Record<string, boolean>>({});
@@ -386,6 +394,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (!game.gun.drawn || now < game.gun.readyAt) return;
     if (game.roll) return; // no shooting mid-roll
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
+    // Dry trigger: don't send a doomed Attack or play phantom shot FX that
+    // would look like hits silently not registering.
+    if (hasRangedWeapon() && ammoCount() === 0) return;
     pendingShotAt.current = -Infinity; // consume the buffered click
     lastShotAt.current = now;
     game.gun.lastShotAt = now;

@@ -306,17 +306,18 @@ body {
   margin-bottom: 12px;
 }
 
-/* Currency chips (WILD / Shards / Energy) directly under the vitals bars,
-   on the same angled holo plane. */
+/* Currency chips (WILD / Shards / Energy) tucked into the bottom-right cluster,
+   directly under the inventory grid on the same angled holo plane. */
 .currency-panel {
   position: absolute;
-  top: 168px;
-  left: 44px;
+  right: 24px;
+  bottom: 40px;
   display: flex;
+  justify-content: flex-end;
   gap: 10px;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(1100px) rotateX(9deg) rotateY(9deg) rotateZ(2deg);
-  transform-origin: left center;
+  transform: perspective(1100px) rotateX(-9deg) rotateY(-9deg) rotateZ(2deg);
+  transform-origin: right center;
   pointer-events: none;
 }
 
@@ -515,7 +516,7 @@ body {
 .comms-panel {
   position: absolute;
   right: 24px;
-  bottom: 120px;
+  bottom: 176px;
   width: 230px;
   display: flex;
   flex-direction: column;
@@ -701,30 +702,21 @@ body {
   font-weight: 700;
   letter-spacing: 0.14em;
   padding: 4px 0;
-  background: rgba(9, 15, 24, 0.5);
-  border: 1px solid var(--steel-border);
-  border-bottom: none;
+  background: transparent;
+  border: none;
   color: var(--text-dim);
   cursor: pointer;
 }
 
 .chatwin-tab.active {
   color: var(--accent-bright);
-  background: rgba(9, 15, 24, 0.85);
-  background-image: linear-gradient(180deg, var(--accent-faint), transparent);
+  background: transparent;
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
 }
 
 .chatwin-body {
-  background: rgba(9, 15, 24, 0.4);
-  border: 1px solid var(--steel-border);
-  clip-path: polygon(
-    100% 0,
-    100% calc(100% - 8px),
-    calc(100% - 8px) 100%,
-    0 100%,
-    0 0
-  );
+  background: transparent;
+  border: none;
   padding: 6px;
 }
 
@@ -734,6 +726,25 @@ body {
   font-size: 12px;
   display: flex;
   flex-direction: column-reverse;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-dim) transparent;
+}
+
+.chatwin-lines::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chatwin-lines::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chatwin-lines::-webkit-scrollbar-thumb {
+  background: var(--accent-dim);
+  border-radius: 0;
+}
+
+.chatwin-lines::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 
 .chat-line.combat-out {
@@ -882,7 +893,7 @@ body {
    tilted back like a cockpit dashboard. */
 .action-bar {
   position: absolute;
-  bottom: 32px;
+  bottom: 56px;
   left: 50%;
   transform: translateX(-50%) perspective(900px) rotateX(7deg);
   transform-origin: center bottom;
@@ -891,6 +902,24 @@ body {
   gap: 10px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+}
+
+/* Slight concave arc across the fixed roll + ability slots (first four),
+   leaving the consumable slots after .action-sep flat. */
+.action-bar > .action-slot:nth-child(1) {
+  transform: translateY(9px) rotate(-3deg);
+}
+
+.action-bar > .action-slot:nth-child(2) {
+  transform: translateY(3px) rotate(-1.5deg);
+}
+
+.action-bar > .action-slot:nth-child(3) {
+  transform: translateY(3px) rotate(1.5deg);
+}
+
+.action-bar > .action-slot:nth-child(4) {
+  transform: translateY(9px) rotate(3deg);
 }
 
 .action-slot {
@@ -1169,13 +1198,15 @@ body {
 .backpack {
   position: absolute;
   right: 24px;
-  bottom: 32px;
+  bottom: 84px;
   display: flex;
   gap: 8px;
   align-items: stretch;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(900px) rotateY(-8deg);
+  /* Angled holo plane matching the bottom-left weapon dock's lean, mirrored
+     for the right anchor so the bottom-right cluster shares one tilt. */
+  transform: perspective(1100px) rotateX(-9deg) rotateY(-9deg) rotateZ(2deg);
   transform-origin: right center;
 }
 

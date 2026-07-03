@@ -439,6 +439,9 @@ float tRow = floor(tVw);
 float tBlk = floor(tU / 2.0);
 float tOn = step(0.3, thash(vec2(tBlk * 3.1 + tFc, floor(tVw / 14.0))));
 tOn *= step(fract(tU / 2.0), 0.15 + 0.85 * thash(vec2(tBlk + tFc, tRow * 0.37)));
+// Kill ~half the columns outright (random per-column) so empty vertical
+// lanes and larger dark voids open up instead of a full sheet of code.
+tOn *= step(0.5, thash(vec2(tCol * 4.19 + tFc, 9.7)));
 // More off-glyphs (was 0.42) → more dark gaps punched down each column.
 float tGl = step(0.55, thash(vec2(tCol * 1.31 + tFc, tRow)));
 vec2 tFr = vec2(fract(tU / 0.22), fract(tVw));

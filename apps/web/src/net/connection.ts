@@ -2,6 +2,7 @@
 
 import * as THREE from "three";
 import { playSfx } from "../assets/audio";
+import { setTerritory } from "../game/territory";
 import { armorShield, game, initialAbilities, spawnEntity, useGame } from "../state/game";
 import { C2S, decode, encode, S2C } from "./protocol";
 
@@ -369,6 +370,10 @@ export class GameConnection {
             system: true,
           });
         }
+        break;
+      }
+      case "TerritoryState": {
+        setTerritory(msg.d.cells);
         break;
       }
       case "BlueprintsUpdate": {

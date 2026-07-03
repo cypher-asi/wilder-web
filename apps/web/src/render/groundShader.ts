@@ -6,7 +6,13 @@
 
 import * as THREE from "three";
 import { getPbrTextureSet } from "../assets/catalog";
-import { STYLE_TOON_APPLY, STYLE_TOON_DECLS, styleUniforms } from "./styles";
+import {
+  STYLE_TOON_APPLY,
+  STYLE_TOON_DECLS,
+  styleUniforms,
+  TERR_MAX,
+  TRON_RED,
+} from "./styles";
 
 function solidTex(r: number, g: number, b: number, srgb = false): THREE.DataTexture {
   const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1);
@@ -79,6 +85,21 @@ uniform float uGWet;
 uniform float uGSat;
 uniform vec3 uGTint;
 ${STYLE_TOON_DECLS}
+// Territory: enemy-held regions tint the tron grid red.
+const vec3 TRON_RED = vec3(${TRON_RED.r.toFixed(5)}, ${TRON_RED.g.toFixed(5)}, ${TRON_RED.b.toFixed(5)});
+uniform vec3 uTerrCells[${TERR_MAX}];
+uniform int uTerrCount;
+uniform float uRegionSize;
+// 1.0 when the world-xz position lies in an enemy-controlled region.
+float gTerrEnemy(vec2 wxz) {
+  vec2 rg = floor(wxz / uRegionSize);
+  for (int i = 0; i < ${TERR_MAX}; i++) {
+    if (i >= uTerrCount) break;
+    vec3 c = uTerrCells[i];
+    if (abs(c.x - rg.x) < 0.5 && abs(c.y - rg.y) < 0.5) return 1.0;
+  }
+  return 0.0;
+}
 uniform sampler2D uAsphaltMap;
 uniform sampler2D uAsphaltNormal;
 uniform sampler2D uAsphaltRough;
@@ -213,6 +234,9 @@ if (uTron > 0.5) {
   gAlb = TRON_BASE * (gKind == 0 ? 1.6 : 3.0);
   gRgh = gKind == 0 ? 0.3 : 0.45;
   if (gKind > 4 && gKind < 6) { gAlb = TRON_BASE * 1.2; gRgh = 0.08; }
+  // Enemy-held ground swaps the neon line color from blue to red.
+  float tEnemy = gTerrEnemy(wp.xz);
+  vec3 tGrid = mix(TRON_BLUE, TRON_RED, tEnemy);
   // Grid lines on street surfaces only (sidewalks/plazas stay clean dark
   // slabs); fades with camera distance so far chunks don't shimmer.
   if (gKind == 0) {
@@ -234,13 +258,13 @@ if (uTron > 0.5) {
       // neon look, but narrow so the brightness comes from bloom, not girth.
       float tHalo = (1.0 - smoothstep(0.0, 0.45, tMajor)) * 0.06
                   + (1.0 - smoothstep(0.0, 0.16, tMinor)) * 0.03;
-      gEmissive += TRON_BLUE * (tLine * 1.4 + tHalo) * (gW.y * tFade);
+      gEmissive += tGrid * (tLine * 1.4 + tHalo) * (gW.y * tFade);
     }
   }
   // Curb circuit: a hot hairline tracing every road edge, with its own bleed.
   float tEdge = 1.0 - smoothstep(0.03, 0.1 + fwidth(vRoadD), abs(vRoadD));
   float tEdgeHalo = (1.0 - smoothstep(0.0, 1.5, abs(vRoadD))) * 0.3;
-  gEmissive += mix(TRON_BLUE, TRON_WHITE, 0.3) * (tEdge * 2.8 + tEdgeHalo);
+  gEmissive += mix(tGrid, TRON_WHITE, 0.3) * (tEdge * 2.8 + tEdgeHalo);
 } else if (gKind == 0) {
   // Base kept dark so roads sit low in value and glowing signage carries the
   // frame; the per-batch drift below provides the mid-grey variation.

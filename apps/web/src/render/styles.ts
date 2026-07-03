@@ -7,6 +7,10 @@
 // plus a React remount of the lighting/sky/post components in Atmosphere.tsx.
 
 import * as THREE from "three";
+import { CHUNK_SIZE, REGION_CHUNKS } from "../net/protocol";
+
+/** Max enemy regions the ground shader tints red at once. */
+export const TERR_MAX = 48;
 
 export type VisualStyleId =
   | "golden"
@@ -380,6 +384,12 @@ export const styleUniforms = {
   uFGlowGain: { value: 1 },
   uFWarmth: { value: 0 },
   uFTint: { value: new THREE.Color(1, 1, 1) },
+  // Territory control: enemy-held regions the ground grid tints red.
+  uTerrCells: {
+    value: Array.from({ length: TERR_MAX }, () => new THREE.Vector3()),
+  },
+  uTerrCount: { value: 0 },
+  uRegionSize: { value: CHUNK_SIZE * REGION_CHUNKS },
 };
 
 // ---------------------------------------------------------------------------
@@ -395,6 +405,8 @@ export const TRON_BASE = new THREE.Color("#020a0d");
 export const TRON_BLUE = new THREE.Color("#4fd0e0");
 /** White-hot core for the brightest accents. */
 export const TRON_WHITE = new THREE.Color("#d6fbff");
+/** Hostile neon: grid lines in enemy-controlled territory. */
+export const TRON_RED = new THREE.Color("#ff2d5e");
 
 /** True when the given style id renders the tron look. */
 export function isTronStyle(id: VisualStyleId): boolean {

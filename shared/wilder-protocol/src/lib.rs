@@ -8,6 +8,10 @@
 use serde::{Deserialize, Serialize};
 use wilder_types::*;
 
+/// Territory grid: a controllable zone is a square block of this many chunks
+/// on a side. Region math must match `apps/web/src/game/territory.ts`.
+pub const REGION_CHUNKS: i32 = 4;
+
 /// Client -> Server messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
@@ -108,6 +112,8 @@ pub enum S2C {
     ProductionState { building: EntityId, jobs: Vec<ProductionJob> },
     MarketState { listings: Vec<MarketListing>, wallet: u32 },
     MarketResult { ok: bool, error: Option<String> },
+    /// Territory control overlay: every region not under neutral control.
+    TerritoryState { cells: Vec<TerritoryCell> },
     BlueprintsUpdate { known: Vec<String> },
     Chat { from: String, text: String },
     Ping { nonce: u32 },
@@ -147,6 +153,15 @@ pub struct MarketListing {
     pub kind: ItemKind,
     pub count: u32,
     pub price_each: u32,
+}
+
+/// One controlled region on the territory grid. `control`: 1 = player-held,
+/// 2 = enemy-held (neutral regions are never sent).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TerritoryCell {
+    pub rx: i32,
+    pub rz: i32,
+    pub control: u8,
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> String {

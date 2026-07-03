@@ -47,6 +47,10 @@ const EXTRACT_SECONDS: f32 = 5.0;
 const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
 const LOOT_TTL_SECONDS: f32 = 120.0;
+/// Static ammo caches scattered through every chunk so ammo is plentiful and
+/// easy to find; count per chunk and rounds per cache.
+const AMMO_CACHE_COUNT: usize = 3;
+const AMMO_CACHE_ROUNDS: u32 = 24;
 /// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
 const NODE_CHARGES: u32 = 5;
 const NODE_RESPAWN_SECONDS: f32 = 60.0;
@@ -69,6 +73,43 @@ const RESEARCH_RESOURCES: &[(ItemKind, u32)] =
 /// XP granted per NPC kill.
 const XP_SCAV_KILL: u32 = 25;
 const XP_RAIDER_KILL: u32 = 50;
+
+/// Territory control encoding (matches `wilder_protocol::TerritoryCell`).
+const CONTROL_NEUTRAL: u8 = 0;
+const CONTROL_PLAYER: u8 = 1;
+const CONTROL_ENEMY: u8 = 2;
+/// Minimum living hostile NPCs in a region for the enemy to hold it.
+const CAPTURE_MIN: usize = 3;
+/// Fraction (percent) of gathered/extracted yield seized in enemy regions.
+const TERRITORY_TAX_PCT: u32 = 25;
+/// Recompute territory occupancy every N ticks (20 Hz -> ~1 Hz).
+const TERRITORY_TICK_INTERVAL: u64 = 20;
+
+/// Territory region containing a world position. Region math mirrors the
+/// client (`apps/web/src/game/territory.ts`) so lines/tax agree.
+fn region_of(pos: Vec3) -> (i32, i32) {
+    let c = ChunkCoord::from_world(pos);
+    (c.x.div_euclid(REGION_CHUNKS), c.z.div_euclid(REGION_CHUNKS))
+}
+
+/// True if a region overlaps the safe hub and so can never be captured.
+fn region_is_protected(r: (i32, i32)) -> bool {
+    let (rx, rz) = r;
+    let cx0 = rx * REGION_CHUNKS;
+    let cx1 = cx0 + REGION_CHUNKS - 1;
+    let cz0 = rz * REGION_CHUNKS;
+    let cz1 = cz0 + REGION_CHUNKS - 1;
+    cx0 <= SAFE_RADIUS && cx1 >= -SAFE_RADIUS && cz0 <= SAFE_RADIUS && cz1 >= -SAFE_RADIUS
+}
+
+/// Reduce a yield count by the territory tax when `enemy` is true.
+fn apply_territory_tax(count: u32, enemy: bool) -> u32 {
+    if enemy {
+        count - count * TERRITORY_TAX_PCT / 100
+    } else {
+        count
+    }
+}
 
 /// XP needed to advance from `level` to `level + 1`.
 fn xp_for_level(level: u32) -> u32 {
@@ -128,6 +169,44 @@ fn hub_spots(chunk: &ChunkData, count: usize) -> Vec<Vec3> {
             Vec3::new((tx as f32 + 0.5) * TILE_SIZE, 0.0, (tz as f32 + 0.5) * TILE_SIZE)
         })
         .collect()
+}
+
+/// Deterministic, spread-out walkable tiles in a chunk for scattering ammo
+/// caches. Returns world-space positions; may be shorter than `count` if the
+/// chunk has few walkable tiles.
+fn ammo_cache_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3> {
+    let mut walkables: Vec<(usize, usize)> = Vec::new();
+    for tz in 1..TILES_PER_CHUNK {
+        for tx in 1..TILES_PER_CHUNK {
+            if chunk.tile(tx, tz).walkable() {
+                walkables.push((tx, tz));
+            }
+        }
+    }
+    let mut spots = Vec::new();
+    if walkables.is_empty() {
+        return spots;
+    }
+    let base = (coord.x.wrapping_mul(73856093) ^ coord.z.wrapping_mul(19349663)) as u32;
+    let mut used: Vec<usize> = Vec::new();
+    for i in 0..count {
+        let mut idx =
+            (base.wrapping_add((i as u32).wrapping_mul(2654435761)) as usize) % walkables.len();
+        // Step off any already-used tile so caches don't stack on one spot.
+        let mut tries = 0;
+        while used.contains(&idx) && tries < walkables.len() {
+            idx = (idx + 1) % walkables.len();
+            tries += 1;
+        }
+        used.push(idx);
+        let (tx, tz) = walkables[idx];
+        spots.push(Vec3::new(
+            coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
+            0.0,
+            coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
+        ));
+    }
+    spots
 }
 
 /// Commands from connections into the sim.
@@ -285,6 +364,8 @@ struct LootContainer {
     position: Vec3,
     items: Vec<ItemStack>,
     ttl: f32,
+    /// 0 = generic drop, 1 = ammo cache (persistent, highlighted client-side).
+    variant: u32,
 }
 
 struct StaticEntity {
@@ -333,6 +414,8 @@ pub struct World {
     market: Vec<wilder_market::Listing>,
     next_listing_id: u64,
     next_job_id: u64,
+    /// Non-neutral territory control per region (recomputed from presence).
+    territory: HashMap<(i32, i32), u8>,
 }
 
 /// Create the world and spawn its tick loop. Returns a handle for connections.
@@ -370,6 +453,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         seed,
         rng: SmallRng::seed_from_u64(seed ^ 0xC0FFEE),
         rx,
+        territory: HashMap::new(),
     };
     tokio::spawn(world.run());
     WorldHandle { tx, seed }
@@ -511,6 +595,7 @@ impl World {
         let _ = tx.send(S2C::BlueprintsUpdate {
             known: player.blueprints.iter().cloned().collect(),
         });
+        let _ = tx.send(S2C::TerritoryState { cells: self.territory_cells() });
         for ability in AbilityKind::ALL {
             let _ = tx.send(S2C::AbilityUpdate { ability, cooldown: 0.0, active: 0.0 });
         }
@@ -927,8 +1012,8 @@ impl World {
                     let kind = table[rng.random_range(0..table.len())];
                     items.push(ItemStack { kind, count: rng.random_range(1..4) });
                 }
-                if rng.random_bool(0.35) {
-                    items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(5..15) });
+                if rng.random_bool(0.7) {
+                    items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(10..25) });
                 }
                 if rng.random_bool(0.15) {
                     items.push(ItemStack { kind: ItemKind::Medkit, count: 1 });
@@ -974,7 +1059,23 @@ impl World {
         let entity = self.alloc_entity();
         self.loot.insert(
             entity,
-            LootContainer { entity, position, items, ttl: LOOT_TTL_SECONDS },
+            LootContainer { entity, position, items, ttl: LOOT_TTL_SECONDS, variant: 0 },
+        );
+    }
+
+    /// A persistent, highlighted cache of ammo placed in the world. Uses an
+    /// infinite TTL so scattered supplies stay put until a player grabs them.
+    fn spawn_ammo_cache(&mut self, position: Vec3, count: u32) {
+        let entity = self.alloc_entity();
+        self.loot.insert(
+            entity,
+            LootContainer {
+                entity,
+                position,
+                items: vec![ItemStack { kind: ItemKind::Ammo9mm, count }],
+                ttl: f32::INFINITY,
+                variant: 1,
+            },
         );
     }
 
@@ -987,8 +1088,12 @@ impl World {
                 return;
             }
             let mut leftovers = Vec::new();
+            let mut ammo_gained = 0u32;
             for stack in container.items.drain(..) {
                 let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
+                if stack.kind == ItemKind::Ammo9mm {
+                    ammo_gained += stack.count - rem;
+                }
                 if rem > 0 {
                     leftovers.push(ItemStack { kind: stack.kind, count: rem });
                 }
@@ -996,7 +1101,10 @@ impl World {
             container.items = leftovers;
             player.dirty = true;
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-            let _ = player.tx.send(S2C::GatherResult { gained: None });
+            // Surface ammo pickups (chat + SFX) so the caches feel rewarding.
+            let gained = (ammo_gained > 0)
+                .then_some(ItemStack { kind: ItemKind::Ammo9mm, count: ammo_gained });
+            let _ = player.tx.send(S2C::GatherResult { gained });
             if container.items.is_empty() {
                 self.loot.remove(&target);
             }
@@ -1023,7 +1131,10 @@ impl World {
             }
             use rand::Rng;
             let kind = wilder_economy::node_yield(node.variant);
-            let count = self.rng.random_range(2..=5u32);
+            let rolled = self.rng.random_range(2..=5u32);
+            // Enemy-held ground taxes what you can carry out of it.
+            let enemy = self.territory.get(&region_of(node.position)) == Some(&CONTROL_ENEMY);
+            let count = apply_territory_tax(rolled, enemy);
             let leftover = inv::add_items(&mut player.inventory.slots, kind, count);
             let gained = count - leftover;
             // Rare blueprint fragments feed Laboratory research (Phase 3).
@@ -1350,6 +1461,86 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // Territory
+    // -----------------------------------------------------------------------
+
+    fn territory_cells(&self) -> Vec<TerritoryCell> {
+        self.territory
+            .iter()
+            .map(|(&(rx, rz), &control)| TerritoryCell { rx, rz, control })
+            .collect()
+    }
+
+    fn broadcast_territory(&self) {
+        let cells = self.territory_cells();
+        for p in self.players.values() {
+            let _ = p.tx.send(S2C::TerritoryState { cells: cells.clone() });
+        }
+    }
+
+    /// True when the region at `pos` is currently enemy-controlled (taxed).
+    fn region_taxed(&self, pos: Vec3) -> bool {
+        self.territory.get(&region_of(pos)) == Some(&CONTROL_ENEMY)
+    }
+
+    /// Recompute presence-based control for regions with any activity. A region
+    /// flips to the enemy when living hostiles dominate it, to the players when
+    /// they are present and hold the numbers, else it relaxes to neutral.
+    fn tick_territory(&mut self) {
+        if self.tick % TERRITORY_TICK_INTERVAL != 0 {
+            return;
+        }
+        let mut npc_count: HashMap<(i32, i32), usize> = HashMap::new();
+        for npc in self.npcs.values() {
+            if npc.state == wilder_ai::NpcState::Dead {
+                continue;
+            }
+            *npc_count.entry(region_of(npc.position)).or_default() += 1;
+        }
+        let mut player_count: HashMap<(i32, i32), usize> = HashMap::new();
+        for p in self.players.values() {
+            if p.character.health <= 0.0 {
+                continue;
+            }
+            *player_count.entry(region_of(p.character.position)).or_default() += 1;
+        }
+
+        let mut regions: HashSet<(i32, i32)> = HashSet::new();
+        regions.extend(npc_count.keys().copied());
+        regions.extend(player_count.keys().copied());
+        regions.extend(self.territory.keys().copied());
+
+        let mut changed = false;
+        for r in regions {
+            let cur = self.territory.get(&r).copied().unwrap_or(CONTROL_NEUTRAL);
+            let desired = if region_is_protected(r) {
+                CONTROL_NEUTRAL
+            } else {
+                let npc = npc_count.get(&r).copied().unwrap_or(0);
+                let plr = player_count.get(&r).copied().unwrap_or(0);
+                if npc >= CAPTURE_MIN && npc > plr {
+                    CONTROL_ENEMY
+                } else if plr > 0 && plr >= npc {
+                    CONTROL_PLAYER
+                } else {
+                    CONTROL_NEUTRAL
+                }
+            };
+            if desired != cur {
+                if desired == CONTROL_NEUTRAL {
+                    self.territory.remove(&r);
+                } else {
+                    self.territory.insert(r, desired);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.broadcast_territory();
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Market
     // -----------------------------------------------------------------------
 
@@ -1589,6 +1780,7 @@ impl World {
         self.tick_loot();
         self.tick_nodes();
         self.tick_production();
+        self.tick_territory();
         self.tick_regen();
         self.update_interest();
         self.replicate();
@@ -1708,14 +1900,21 @@ impl World {
             }
         }
         for entity in completed {
+            // Extracting from enemy-held territory forfeits part of the haul.
+            let taxed = self
+                .players
+                .get(&entity)
+                .map(|p| self.region_taxed(p.character.position))
+                .unwrap_or(false);
             let Some(player) = self.players.get_mut(&entity) else { continue };
             player.extracting = None;
             // Bank everything carried into the stash.
             let mut banked: Vec<ItemStack> = Vec::new();
             for slot in player.inventory.slots.iter_mut() {
                 if let Some(stack) = slot.take() {
-                    let rem = inv::add_items(&mut player.stash.slots, stack.kind, stack.count);
-                    let banked_count = stack.count - rem;
+                    let bankable = apply_territory_tax(stack.count, taxed);
+                    let rem = inv::add_items(&mut player.stash.slots, stack.kind, bankable);
+                    let banked_count = bankable - rem;
                     if banked_count > 0 {
                         banked.push(ItemStack { kind: stack.kind, count: banked_count });
                     }
@@ -1988,6 +2187,12 @@ impl World {
                     }
                 }
             }
+            // Ammo caches everywhere (including the safe hub) so ammo is easy
+            // to find and obvious. Persistent until looted.
+            let chunk = self.chunks.get(coord);
+            for pos in ammo_cache_spots(&chunk, coord, AMMO_CACHE_COUNT) {
+                self.spawn_ammo_cache(pos, AMMO_CACHE_ROUNDS);
+            }
         }
     }
 
@@ -2054,13 +2259,13 @@ impl World {
                 spawn: EntitySpawnData {
                     id: container.entity,
                     kind: EntityKind::LootContainer,
-                    name: "Loot".into(),
+                    name: if container.variant == 1 { "Ammo Cache".into() } else { "Loot".into() },
                     appearance: Appearance::default(),
                     position: container.position,
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: 1.0,
-                    variant: 0,
+                    variant: container.variant,
                 },
                 snap: EntitySnapshot {
                     id: container.entity,

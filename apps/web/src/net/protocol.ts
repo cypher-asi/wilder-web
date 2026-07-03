@@ -12,6 +12,8 @@ export interface ChunkCoord {
 export const CHUNK_SIZE = 32;
 export const TILE_SIZE = 2;
 export const TILES_PER_CHUNK = 16;
+/** Territory zone = square block of this many chunks (mirror of wilder-protocol). */
+export const REGION_CHUNKS = 4;
 
 export type TileKind =
   | "Road"
@@ -220,6 +222,13 @@ export interface MarketListing {
   price_each: number;
 }
 
+/** One controlled region: control 1 = player-held, 2 = enemy-held. */
+export interface TerritoryCell {
+  rx: number;
+  rz: number;
+  control: number;
+}
+
 export type CombatEvent =
   | Tagged<
       "Hit",
@@ -273,6 +282,7 @@ export type S2C =
   | Tagged<"ProductionState", { building: number; jobs: ProductionJob[] }>
   | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
   | Tagged<"MarketResult", { ok: boolean; error: string | null }>
+  | Tagged<"TerritoryState", { cells: TerritoryCell[] }>
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>

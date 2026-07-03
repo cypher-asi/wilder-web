@@ -19,6 +19,7 @@ import {
   cityTileAt,
   onCityMapReady,
 } from "../game/citymap";
+import { enemyRegions, REGION_SIZE } from "../game/territory";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
 import { RED_HEX, redGlow } from "./colors";
@@ -179,6 +180,18 @@ export function Minimap() {
         ctx.setLineDash([]);
       }
 
+      // Enemy-controlled territory: translucent red region cells.
+      for (const { rx, rz } of enemyRegions()) {
+        const [rx0, ry0] = toScreen(rx * REGION_SIZE, rz * REGION_SIZE);
+        const [rx1, ry1] = toScreen((rx + 1) * REGION_SIZE, (rz + 1) * REGION_SIZE);
+        if (rx1 < 0 || ry1 < 0 || rx0 > SIZE || ry0 > SIZE) continue;
+        ctx.fillStyle = redGlow(0.14);
+        ctx.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        ctx.strokeStyle = redGlow(0.6);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+      }
+
       // Entity blips.
       for (const entity of game.entities.values()) {
         if (entity.id === game.localEntityId) continue;
@@ -207,6 +220,16 @@ export function Minimap() {
           ctx.beginPath();
           ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
           ctx.fill();
+        } else if (entity.kind === "LootContainer" && entity.variant === 1) {
+          // Ammo cache: bright amber blip so ammo is easy to find.
+          ctx.save();
+          ctx.shadowColor = "rgba(255, 190, 40, 0.9)";
+          ctx.shadowBlur = 6;
+          ctx.fillStyle = "#ffbe28";
+          ctx.beginPath();
+          ctx.arc(sx, sy, 2.6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
         } else if (entity.kind !== "LootContainer" && entity.kind !== "ResourceNode") {
           // Hub stations / stash / market terminals.
           ctx.fillStyle = "rgba(79, 195, 255, 0.9)";

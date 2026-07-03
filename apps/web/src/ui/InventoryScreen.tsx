@@ -367,6 +367,9 @@ export function InventoryScreen({ connection }: { connection: GameConnection }) 
   const [tab, setTab] = useState<"loadout" | "clothing">("loadout");
   const [stashFilter, setStashFilter] = useState<StashFilter>("all");
   const [search, setSearch] = useState("");
+  // Destroy is irreversible: first click arms, second click confirms.
+  const [confirmDestroy, setConfirmDestroy] = useState(false);
+  useEffect(() => setConfirmDestroy(false), [selected]);
 
   const selectedStack = useMemo(
     () => (selected !== null ? (inventory?.slots[selected] ?? null) : null),
@@ -567,6 +570,38 @@ export function InventoryScreen({ connection }: { connection: GameConnection }) 
               {used}/{inventory.slots.length}
             </span>
           </div>
+          {/* Drop / Destroy actions for the selected backpack stack. */}
+          {selectedStack && selected !== null && (
+            <div className="invx-item-actions">
+              <span className="invx-item-actions-label">
+                {itemLabel(selectedStack.kind)} x{selectedStack.count}
+              </span>
+              <button
+                className="invx-action-btn"
+                onClick={() => {
+                  send({ t: "Drop", d: { slot: selected } });
+                  setSelected(null);
+                }}
+                title="Drop on the ground (anyone can pick it up)"
+              >
+                DROP
+              </button>
+              <button
+                className={`invx-action-btn danger${confirmDestroy ? " armed" : ""}`}
+                onClick={() => {
+                  if (!confirmDestroy) {
+                    setConfirmDestroy(true);
+                  } else {
+                    send({ t: "Destroy", d: { slot: selected } });
+                    setSelected(null);
+                  }
+                }}
+                title="Permanently destroy this stack"
+              >
+                {confirmDestroy ? "CONFIRM?" : "DESTROY"}
+              </button>
+            </div>
+          )}
           <div className="invx-grid">
             {inventory.slots.map((slot, i) => (
               <ItemCard

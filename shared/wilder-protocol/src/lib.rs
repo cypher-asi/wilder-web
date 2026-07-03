@@ -70,6 +70,8 @@ pub enum InventoryAction {
     /// Switch the weapon in hand between Weapon 1 (0) and Weapon 2 (1).
     SelectWeapon { weapon_slot: u8 },
     Drop { slot: u16 },
+    /// Permanently destroy a backpack stack (burned on the ledger).
+    Destroy { slot: u16 },
     /// Move items between inventory and stash (only near stash access).
     Deposit { slot: u16 },
     Withdraw { stash_slot: u16 },

@@ -1185,6 +1185,7 @@ body {
 }
 
 .xp-bar {
+  position: relative;
   flex: 1;
   height: 8px;
   background: rgba(0, 0, 0, 0.45);
@@ -1195,6 +1196,193 @@ body {
   height: 100%;
   background: linear-gradient(90deg, #1f7fc4, var(--accent));
   transition: width 0.3s;
+}
+
+/* Brief bright sweep over the XP bar whenever XP ticks up. */
+.xp-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(234, 247, 255, 0.85),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: xp-flash 0.5s ease-out;
+}
+
+@keyframes xp-flash {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.9;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* Level badge bounce, replayed via a changing React key on level-up. */
+.badge-pop {
+  animation: badge-pop 0.5s cubic-bezier(0.22, 1.4, 0.5, 1);
+}
+
+@keyframes badge-pop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.6);
+    color: #ffcc33;
+    text-shadow: 0 0 14px rgba(255, 200, 40, 0.9);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Bouncy "+N WILD" coin toasts stacked above the bottom-right dock. */
+.wallet-toasts {
+  position: absolute;
+  right: 24px;
+  bottom: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.wallet-toast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: #ffcc33;
+  text-shadow:
+    0 0 12px rgba(255, 190, 30, 0.85),
+    0 2px 4px rgba(0, 0, 0, 0.6);
+  animation: wallet-bump 1.6s ease-out forwards;
+}
+
+.wallet-toast-coin {
+  color: #ffe08a;
+  filter: drop-shadow(0 0 5px rgba(255, 200, 40, 0.9));
+}
+
+@keyframes wallet-bump {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.7);
+  }
+  18% {
+    opacity: 1;
+    transform: translateY(0) scale(1.15);
+  }
+  30% {
+    transform: translateY(0) scale(1);
+  }
+  75% {
+    opacity: 1;
+    transform: translateY(-6px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-22px);
+  }
+}
+
+/* Level-up celebration banner: centered bounce + drifting sparkles. */
+.levelup-banner {
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  animation: levelup-in 2.4s cubic-bezier(0.18, 1.5, 0.4, 1) forwards;
+}
+
+.levelup-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.levelup-title {
+  font-family: var(--font-display);
+  font-size: 46px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  color: #ffcc33;
+  text-shadow:
+    0 0 24px rgba(255, 190, 30, 0.9),
+    0 0 6px rgba(255, 255, 255, 0.8),
+    0 3px 6px rgba(0, 0, 0, 0.6);
+}
+
+.levelup-sub {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+  color: var(--accent-bright);
+  text-shadow: 0 0 12px var(--accent-dim);
+}
+
+.levelup-star {
+  font-size: 30px;
+  color: #ffe08a;
+  filter: drop-shadow(0 0 8px rgba(255, 200, 40, 0.9));
+  animation: star-twirl 2.4s ease-out forwards;
+}
+
+.levelup-star-r {
+  animation-delay: 0.08s;
+}
+
+@keyframes levelup-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.4);
+  }
+  14% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.12);
+  }
+  24% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -58%) scale(1);
+  }
+}
+
+@keyframes star-twirl {
+  0% {
+    transform: rotate(0deg) scale(0.5);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(320deg) scale(1.2);
+    opacity: 0;
+  }
 }
 
 /* Aiming crosshair that follows the mouse while the gun is drawn. */
@@ -2062,6 +2250,55 @@ body {
   padding-right: 4px;
   flex: 1;
   min-height: 0;
+}
+
+/* Drop / Destroy row for the selected backpack stack. */
+.invx-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 8px;
+  min-height: 24px;
+}
+
+.invx-item-actions-label {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invx-action-btn {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent-bright);
+  background: rgba(79, 195, 255, 0.08);
+  border: 1px solid var(--accent-dim);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.invx-action-btn:hover {
+  background: rgba(79, 195, 255, 0.18);
+  border-color: var(--accent);
+}
+
+.invx-action-btn.danger {
+  color: var(--red);
+  background: rgba(255, 106, 124, 0.08);
+  border-color: rgba(255, 106, 124, 0.4);
+}
+
+.invx-action-btn.danger:hover,
+.invx-action-btn.danger.armed {
+  background: rgba(255, 106, 124, 0.22);
+  border-color: var(--red);
 }
 
 /* Bulky items (slot cost > 1) span multiple grid cells. */

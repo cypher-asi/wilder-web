@@ -131,6 +131,7 @@ export type AnimState =
   | "Walk"
   | "Run"
   | "Attack"
+  | "Hit"
   | "Death"
   | "Gather"
   | "Roll"
@@ -198,6 +199,7 @@ export type InventoryActionMsg =
   | Tagged<"Unequip", { weapon: boolean; weapon_slot?: number | null }>
   | Tagged<"SelectWeapon", { weapon_slot: number }>
   | Tagged<"Drop", { slot: number }>
+  | Tagged<"Destroy", { slot: number }>
   | Tagged<"Deposit", { slot: number }>
   | Tagged<"Withdraw", { stash_slot: number }>;
 

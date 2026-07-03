@@ -1275,6 +1275,9 @@ impl World {
                 if self.players.contains_key(&attacker) {
                     npc.provoke(attacker);
                 }
+                // Brief hit-stun: the NPC flinches in place before resuming.
+                npc.stun_timer = crate::npc::HIT_STUN_SECONDS;
+                npc.anim = AnimState::Hit;
                 None
             }
         };
@@ -2490,6 +2493,22 @@ impl World {
                         player.dirty = true;
                         self.spawn_loot(pos, items, Some(dropper), true);
                         return;
+                    }
+                }
+            }
+            InventoryAction::Destroy { slot } => {
+                if let Some(s) = player.inventory.slots.get_mut(slot as usize) {
+                    if let Some(stack) = s.take() {
+                        // Destroyed items leave the world for good: burn them
+                        // on the ledger, attributed to the destroyer.
+                        let owner = player_party(player);
+                        self.ledger.record(
+                            TxKind::Burn,
+                            owner,
+                            TxParty::Burn,
+                            TxAmount::Item { kind: stack.kind, count: stack.count },
+                            0,
+                        );
                     }
                 }
             }

@@ -2677,8 +2677,8 @@ body {
   background: var(--accent);
 }
 
-.econ-feed-list .econ-row:first-child {
-  background: var(--accent-faint);
+.econ-feed-list .econ-row:hover {
+  background: rgba(159, 180, 200, 0.08);
 }
 
 .econ-hash {

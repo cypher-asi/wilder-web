@@ -5,11 +5,12 @@ import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
 import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
-import { consumableHotbar, game, useGame } from "../state/game";
+import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
 import { RED_HEX } from "./colors";
 import { GameMenu } from "./GameMenu";
-import { HoloMap } from "./HoloMap";
+import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
+import { InventoryScreen } from "./InventoryScreen";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 
@@ -17,6 +18,19 @@ export function Hud({ connection }: { connection: GameConnection }) {
   const connected = useGame((s) => s.connected);
   const joined = useGame((s) => s.joined);
   const inventoryOpen = useGame((s) => s.inventoryOpen);
+
+  // Warm the fullscreen map's assets (geo fetch + worker ground bake) once
+  // the world has spawned in, so the first M press is instant. Idle-deferred
+  // so it never competes with join-time streaming.
+  useEffect(() => {
+    if (!joined) return;
+    if ("requestIdleCallback" in window) {
+      const id = requestIdleCallback(() => prefetchHoloMapAssets());
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(() => prefetchHoloMapAssets(), 1500);
+    return () => clearTimeout(id);
+  }, [joined]);
 
   return (
     <div className="hud">
@@ -39,7 +53,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
-          {inventoryOpen && <InventoryPanel connection={connection} />}
+          {inventoryOpen && <InventoryScreen connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
           <VendorPanel connection={connection} />
@@ -288,7 +302,7 @@ function ActionBar({ connection }: { connection: GameConnection }) {
           key={i}
           glyph={entry ? "▣" : ""}
           label={entry ? `${shortName(entry.stack.kind)} x${entry.stack.count}` : "Empty"}
-          keybind={`${i + 1}`}
+          keybind=""
           remaining={0}
           total={0}
           count={entry?.stack.count}
@@ -357,18 +371,19 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
   const xp = useGame((s) => s.xp);
   const nextLevelXp = useGame((s) => s.nextLevelXp);
 
-  const weapon = inventory?.equipped_weapon ?? null;
+  const weapon = activeWeaponKind(inventory);
   const label = weapon ? (WEAPON_LABEL[weapon] ?? weapon.toUpperCase()) : "FISTS";
   const ranged = weapon !== null && RANGED_WEAPONS.has(weapon);
   const ammo = invCount(inventory, "Ammo9mm");
   const ammoPct = Math.min(ammo / AMMO_DISPLAY_CAP, 1) * 100;
   const xpPct = Math.min((xp / Math.max(nextLevelXp, 1)) * 100, 100);
 
-  // Other weapons carried in the backpack (click to equip).
-  const carried = (inventory?.slots ?? [])
-    .map((stack, slot) => ({ stack, slot }))
-    .filter((e) => e.stack && WEAPONS.includes(e.stack.kind))
-    .slice(0, 4);
+  // The two weapon equip slots mapped to keys 1/2; 0 holsters to fists.
+  const weaponSlots: (ItemKind | null)[] = [
+    inventory?.equipped_weapon ?? null,
+    inventory?.equipped_weapon2 ?? null,
+  ];
+  const activeSlot = inventory?.active_weapon ?? 0;
 
   return (
     <div className="weapon-dock">
@@ -397,18 +412,48 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
           )}
         </div>
         <div className="weapon-dock-swaps">
-          {carried.map(({ stack, slot }) => (
-            <div
-              key={slot}
-              className="weapon-swap-slot"
-              title={`Equip ${stack!.kind}`}
-              onClick={() =>
-                connection.send({ t: "InventoryAction", d: { t: "Equip", d: { slot } } })
-              }
-            >
-              {WEAPON_LABEL[stack!.kind]?.slice(0, 3) ?? stack!.kind.slice(0, 3).toUpperCase()}
-            </div>
-          ))}
+          {weaponSlots.map((kind, i) => {
+            const inHand = kind !== null && activeSlot === i;
+            return (
+              <div
+                key={i}
+                className={`weapon-swap-slot${inHand ? " equipped" : ""}`}
+                title={
+                  kind
+                    ? inHand
+                      ? `${kind} (in hand)`
+                      : `Draw ${kind}  [${i + 1}]`
+                    : `Weapon ${i + 1} — empty (equip via inventory)`
+                }
+                onClick={() => {
+                  if (kind && !inHand)
+                    connection.send({
+                      t: "InventoryAction",
+                      d: { t: "SelectWeapon", d: { weapon_slot: i } },
+                    });
+                }}
+              >
+                <span className="weapon-swap-key">{i + 1}</span>
+                {kind
+                  ? (WEAPON_LABEL[kind]?.slice(0, 3) ?? kind.slice(0, 3).toUpperCase())
+                  : "—"}
+              </div>
+            );
+          })}
+          <div
+            className={`weapon-swap-slot${weapon === null ? " equipped" : ""}`}
+            title={weapon === null ? "Fists (equipped)" : "Fists / melee  [0]"}
+            onClick={() => {
+              if (weapon !== null)
+                connection.send({
+                  t: "InventoryAction",
+                  d: { t: "Unequip", d: { weapon: true, weapon_slot: activeSlot } },
+                });
+            }}
+          >
+            <span className="weapon-swap-key">0</span>
+            FST
+          </div>
         </div>
       </div>
       <div className="weapon-dock-xp">
@@ -435,7 +480,7 @@ function BackpackBar() {
 
   return (
     <div className="backpack">
-      <div className="backpack-grid" onClick={toggleInventory} title="Open inventory (I)">
+      <div className="backpack-grid" onClick={toggleInventory} title="Open backpack (B)">
         {slots.slice(0, 12).map((slot, i) => (
           <div key={i} className={`backpack-slot${slot ? " filled" : ""}`}>
             {slot && (
@@ -450,13 +495,13 @@ function BackpackBar() {
       <div
         className={`backpack-btn${inventoryOpen ? " open" : ""}`}
         onClick={toggleInventory}
-        title="Open inventory (I)"
+        title="Open backpack (B)"
       >
         <span className="backpack-btn-glyph">▤</span>
         <span className="backpack-btn-count">
-          {used}/{slots.length || 24}
+          {used}/{slots.length || 36}
         </span>
-        <span className="action-key">I</span>
+        <span className="action-key">B</span>
       </div>
     </div>
   );
@@ -1286,101 +1331,6 @@ function PositionReadout() {
       <span style={{ color: safe ? "var(--accent)" : "var(--alert)" }}>
         {safe ? "SAFE ZONE" : "HOSTILE"}
       </span>
-    </div>
-  );
-}
-
-const WEAPONS = ["Pipe", "Knife", "Pistol", "Smg"];
-const ARMOR = ["JacketArmor", "PlateArmor"];
-
-function InventoryPanel({ connection }: { connection: GameConnection }) {
-  const inventory = useGame((s) => s.inventory);
-  const stash = useGame((s) => s.stash);
-  const nearStash = useGame((s) => s.nearStash);
-  const [selected, setSelected] = useState<number | null>(null);
-  if (!inventory) return null;
-
-  function onSlotClick(index: number) {
-    const slot = inventory!.slots[index];
-    if (selected === null) {
-      if (slot) setSelected(index);
-    } else if (selected === index) {
-      // Second click on the same slot: contextual action.
-      const kind = slot?.kind ?? "";
-      if (kind === "Medkit") {
-        connection.send({ t: "UseItem", d: { slot: selected } });
-      } else if (WEAPONS.includes(kind) || ARMOR.includes(kind)) {
-        connection.send({ t: "InventoryAction", d: { t: "Equip", d: { slot: selected } } });
-      } else if (nearStash) {
-        connection.send({ t: "InventoryAction", d: { t: "Deposit", d: { slot: selected } } });
-      }
-      setSelected(null);
-    } else {
-      connection.send({
-        t: "InventoryAction",
-        d: { t: "MoveSlot", d: { from: selected, to: index } },
-      });
-      setSelected(null);
-    }
-  }
-
-  return (
-    <div className="inventory">
-      <h3>Inventory</h3>
-      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
-        Weapon: {inventory.equipped_weapon ?? "—"} · Armor: {inventory.equipped_armor ?? "—"}
-      </div>
-      <div className="inv-grid">
-        {inventory.slots.map((slot, i) => (
-          <div
-            key={i}
-            className="inv-slot"
-            style={selected === i ? { borderColor: "var(--accent)", background: "var(--hatch)" } : undefined}
-            onClick={() => onSlotClick(i)}
-            title={slot ? `${slot.kind} x${slot.count}` : ""}
-          >
-            {slot && (
-              <>
-                <span>{shortName(slot.kind)}</span>
-                {slot.count > 1 && <span className="inv-count">{slot.count}</span>}
-              </>
-            )}
-          </div>
-        ))}
-      </div>
-      <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 8 }}>
-        Click item, click again: equip / use{nearStash ? " / deposit" : ""}. Click two
-        slots to move.
-      </div>
-      {nearStash && stash && (
-        <>
-          <h3 style={{ marginTop: 16 }}>Stash</h3>
-          <div className="inv-grid">
-            {stash.map((slot, i) => (
-              <div
-                key={i}
-                className="inv-slot"
-                onClick={() => {
-                  if (slot) {
-                    connection.send({
-                      t: "InventoryAction",
-                      d: { t: "Withdraw", d: { stash_slot: i } },
-                    });
-                  }
-                }}
-                title={slot ? `${slot.kind} x${slot.count} (click to withdraw)` : ""}
-              >
-                {slot && (
-                  <>
-                    <span>{shortName(slot.kind)}</span>
-                    {slot.count > 1 && <span className="inv-count">{slot.count}</span>}
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   );
 }

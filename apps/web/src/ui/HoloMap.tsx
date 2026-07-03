@@ -54,11 +54,16 @@ interface HoloView {
 
 export function HoloMap() {
   const mapOpen = useGame((s) => s.mapOpen);
-  if (!mapOpen) return null;
-  return <HoloMapView />;
+  // Stay mounted after the first open: reopening then skips WebGL context
+  // creation, shader compiles, and the whole React scene remount, so M is
+  // instant. While closed the canvas is display:none with a stopped frameloop.
+  const opened = useRef(false);
+  if (mapOpen) opened.current = true;
+  if (!opened.current) return null;
+  return <HoloMapView open={mapOpen} />;
 }
 
-function HoloMapView() {
+function HoloMapView({ open }: { open: boolean }) {
   const view = useRef<HoloView>({
     tx: game.predicted.x,
     tz: game.predicted.z,
@@ -76,6 +81,19 @@ function HoloMapView() {
   const drag = useRef<{ x: number; y: number; button: number } | null>(null);
 
   useEffect(() => {
+    if (!open) return;
+    // Each open starts fresh on the player, matching the old mount-per-open
+    // behavior (the component now stays mounted across opens).
+    const v = view.current;
+    v.tx = v.sTx = game.predicted.x;
+    v.tz = v.sTz = game.predicted.z;
+    v.dist = v.sDist = OPEN_DIST;
+    v.yaw = Math.PI;
+    v.topDown = false;
+    v.follow = true;
+    v.sPitch = PITCH_3D;
+    v.keys = {};
+    setTopDown(false);
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (e.code === "Escape") useGame.getState().set({ mapOpen: false });
@@ -99,11 +117,12 @@ function HoloMapView() {
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [open]);
 
   return (
     <div
       className="map-overlay holo-map"
+      style={{ display: open ? undefined : "none" }}
       onContextMenu={(e) => e.preventDefault()}
       onPointerDown={(e) => {
         drag.current = { x: e.clientX, y: e.clientY, button: e.button };
@@ -147,6 +166,7 @@ function HoloMapView() {
         gl={{ antialias: true, powerPreference: "high-performance" }}
         camera={{ fov: FOV, near: 2, far: 90000 }}
         style={{ position: "absolute", inset: 0 }}
+        frameloop={open ? "always" : "never"}
       >
         <HoloScene view={view} />
       </Canvas>
@@ -244,164 +264,91 @@ function HoloCamera({ view }: { view: RefObject<HoloView> }) {
 // City geometry (built once, cached across map opens)
 // ---------------------------------------------------------------------------
 
-interface CityAssets {
+interface GroundAsset {
   ground: THREE.Mesh;
+  groundMat: THREE.ShaderMaterial;
+}
+
+interface GeoAssets {
   buildings: THREE.Mesh;
   streets: THREE.Mesh;
   buildingMat: THREE.ShaderMaterial;
+  streetMat: THREE.MeshBasicMaterial;
 }
 
-let cityAssetsPromise: Promise<CityAssets> | null = null;
+let groundPromise: Promise<GroundAsset> | null = null;
+let geoAssetsPromise: Promise<GeoAssets> | null = null;
 
-function loadCityAssets(): Promise<CityAssets> {
-  cityAssetsPromise ??= (async () => {
-    const [geo] = await Promise.all([
-      getCityGeo(),
-      new Promise<void>((resolve) => onCityMapReady(resolve)),
-    ]);
-    const { mesh, mat } = buildBuildings(geo);
-    return { ...buildGround(), buildings: mesh, streets: buildStreets(geo), buildingMat: mat };
+/** Ground plane: the heavy per-tile texture bake runs in a worker so the main
+ * thread never blocks; only the cheap texture/mesh creation happens here. */
+function loadGroundAsset(): Promise<GroundAsset> {
+  groundPromise ??= (async () => {
+    await new Promise<void>((resolve) => onCityMapReady(resolve));
+    const g = getCityGrid()!;
+    const lut = new Uint8Array(8);
+    lut[CITY_ROAD] = 60;
+    lut[CITY_ROAD_LINE] = 60;
+    lut[CITY_SIDEWALK] = 78;
+    lut[CITY_PLAZA] = 58;
+    lut[CITY_BUILDING] = 30;
+    lut[CITY_PARK] = 20;
+    const worker = new Worker(new URL("./holoGround.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    // Copy the tiles so transferring the buffer doesn't detach the shared grid.
+    const tiles = g.tiles.slice();
+    const data = await new Promise<Uint8Array>((resolve, reject) => {
+      worker.onmessage = (e: MessageEvent<{ data: Uint8Array }>) => resolve(e.data.data);
+      worker.onerror = (e) => reject(new Error(e.message));
+      worker.postMessage(
+        { tiles, width: g.width, height: g.height, lut, water: CITY_WATER },
+        [tiles.buffer],
+      );
+    });
+    worker.terminate();
+    return buildGround(data);
   })();
-  return cityAssetsPromise;
+  return groundPromise;
 }
 
-/** Two-pass 3-4 chamfer distance transform. Returns, per texel, the distance
- * (in units of 3 per tile) to the nearest set texel. When `feat` is given,
- * the byte value of that nearest texel is propagated along with the distance
- * (used to bleed land intensity across water). */
-function chamfer(set: Uint8Array, w: number, h: number, feat?: Uint8Array): Int32Array {
-  const INF = 0x3fffffff;
-  const d = new Int32Array(w * h);
-  for (let i = 0; i < d.length; i++) d[i] = set[i] ? 0 : INF;
-  // Forward sweep: left, up-left, up, up-right.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      let best = d[i];
-      let from = -1;
-      if (x > 0 && d[i - 1] + 3 < best) { best = d[i - 1] + 3; from = i - 1; }
-      if (y > 0) {
-        if (d[i - w] + 3 < best) { best = d[i - w] + 3; from = i - w; }
-        if (x > 0 && d[i - w - 1] + 4 < best) { best = d[i - w - 1] + 4; from = i - w - 1; }
-        if (x < w - 1 && d[i - w + 1] + 4 < best) { best = d[i - w + 1] + 4; from = i - w + 1; }
-      }
-      if (from >= 0) {
-        d[i] = best;
-        if (feat) feat[i] = feat[from];
-      }
-    }
-  }
-  // Backward sweep: right, down-right, down, down-left.
-  for (let y = h - 1; y >= 0; y--) {
-    for (let x = w - 1; x >= 0; x--) {
-      const i = y * w + x;
-      let best = d[i];
-      let from = -1;
-      if (x < w - 1 && d[i + 1] + 3 < best) { best = d[i + 1] + 3; from = i + 1; }
-      if (y < h - 1) {
-        if (d[i + w] + 3 < best) { best = d[i + w] + 3; from = i + w; }
-        if (x < w - 1 && d[i + w + 1] + 4 < best) { best = d[i + w + 1] + 4; from = i + w + 1; }
-        if (x > 0 && d[i + w - 1] + 4 < best) { best = d[i + w - 1] + 4; from = i + w - 1; }
-      }
-      if (from >= 0) {
-        d[i] = best;
-        if (feat) feat[i] = feat[from];
-      }
-    }
-  }
-  return d;
+/** Buildings + streets (both need the ~12 MB geo.bin, so they resolve
+ * together, independently of the ground texture). */
+function loadGeoAssets(): Promise<GeoAssets> {
+  geoAssetsPromise ??= getCityGeo().then((geo) => {
+    const { mesh, mat } = buildBuildings(geo);
+    const streets = buildStreets(geo);
+    return {
+      buildings: mesh,
+      buildingMat: mat,
+      streets,
+      streetMat: streets.material as THREE.MeshBasicMaterial,
+    };
+  });
+  return geoAssetsPromise;
 }
 
-/** Separable box blur, `passes` iterations (2+ approximates a Gaussian).
- * Edge texels are clamped. Radius is in texels. */
-function boxBlur(f: Float32Array, w: number, h: number, r: number, passes: number) {
-  const tmp = new Float32Array(f.length);
-  const inv = 1 / (2 * r + 1);
-  for (let p = 0; p < passes; p++) {
-    // Horizontal, f -> tmp.
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      let acc = 0;
-      for (let x = -r; x <= r; x++) acc += f[row + Math.min(Math.max(x, 0), w - 1)];
-      for (let x = 0; x < w; x++) {
-        tmp[row + x] = acc * inv;
-        acc += f[row + Math.min(x + r + 1, w - 1)] - f[row + Math.max(x - r, 0)];
-      }
-    }
-    // Vertical, tmp -> f.
-    for (let x = 0; x < w; x++) {
-      let acc = 0;
-      for (let y = -r; y <= r; y++) acc += tmp[Math.min(Math.max(y, 0), h - 1) * w + x];
-      for (let y = 0; y < h; y++) {
-        f[y * w + x] = acc * inv;
-        acc += tmp[Math.min(y + r + 1, h - 1) * w + x] - tmp[Math.max(y - r, 0) * w + x];
-      }
-    }
-  }
+/** Warm every map asset (geo.bin fetch, worker ground bake, meshes) so the
+ * first M press finds everything already cached. Called after join. */
+export function prefetchHoloMapAssets(): void {
+  void loadGroundAsset().catch((e) => console.error("holo map ground prefetch failed", e));
+  void loadGeoAssets().catch((e) => console.error("holo map geo prefetch failed", e));
 }
 
 /** Faint land-fabric plane (sidewalks, plazas, parks, island silhouette).
  * Roads come from the real street mesh, so they stay dim here.
  *
  * The island silhouette is cut with a signed distance field baked from the
- * tile grid. The SDF alone is not enough: a diagonal coastline is stored as
- * literal 1-tile stair-steps, and an exact SDF faithfully reproduces those
- * steps with crisp edges. So the field is low-passed (small Gaussian-ish
- * blur) before baking — the blurred zero contour is the smooth line the
- * staircase approximates — and the shader then cuts it with a screen-space
- * fwidth smoothstep for a ~1px anti-aliased edge at any zoom. */
-function buildGround(): { ground: THREE.Mesh } {
+ * tile grid (in holoGround.worker.ts). The SDF alone is not enough: a
+ * diagonal coastline is stored as literal 1-tile stair-steps, and an exact
+ * SDF faithfully reproduces those steps with crisp edges. So the field is
+ * low-passed (small Gaussian-ish blur) before baking — the blurred zero
+ * contour is the smooth line the staircase approximates — and the shader
+ * then cuts it with a screen-space fwidth smoothstep for a ~1px anti-aliased
+ * edge at any zoom. */
+function buildGround(data: Uint8Array): GroundAsset {
   const g = getCityGrid()!;
-  const lut = new Uint8Array(8);
-  lut[CITY_ROAD] = 60;
-  lut[CITY_ROAD_LINE] = 60;
-  lut[CITY_SIDEWALK] = 78;
-  lut[CITY_PLAZA] = 58;
-  lut[CITY_BUILDING] = 30;
-  lut[CITY_PARK] = 20;
   const w = g.width;
   const h = g.height;
-  const t = g.tiles;
-  const n = w * h;
-
-  const land = new Uint8Array(n);
-  const water = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    land[i] = t[i] === CITY_WATER ? 0 : 1;
-    water[i] = land[i] ^ 1;
-  }
-  // Intensity per tile; the chamfer pass bleeds each water texel's value from
-  // its nearest land texel so there's no dark intensity ramp at the coast —
-  // the silhouette cut comes purely from the SDF.
-  const intensity = new Uint8Array(n);
-  for (let i = 0; i < n; i++) intensity[i] = lut[t[i]];
-  const distToLand = chamfer(land, w, h, intensity);
-  const distToWater = chamfer(water, w, h);
-
-  // Signed distance in tiles (positive inside land), clamped to ±8 tiles,
-  // then blurred so the zero contour rounds off the tile staircase instead
-  // of tracing it exactly.
-  const sdf = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const sd = (distToWater[i] - distToLand[i]) / 3;
-    sdf[i] = Math.max(-8, Math.min(8, sd));
-  }
-  boxBlur(sdf, w, h, 2, 2);
-
-  // The interior fabric regions (sidewalk vs building vs park) are stepped
-  // tile shapes too; a light blur softens their boundaries the same way.
-  const fab = new Float32Array(n);
-  for (let i = 0; i < n; i++) fab[i] = intensity[i];
-  boxBlur(fab, w, h, 1, 2);
-
-  // RG texture: R = intensity, G = signed distance to the coastline
-  // (128 = coast, 16 per tile, positive inside land).
-  const data = new Uint8Array(n * 2);
-  for (let i = 0; i < n; i++) {
-    data[i * 2] = fab[i];
-    const sd = sdf[i] * 16 + 128;
-    data[i * 2 + 1] = sd < 0 ? 0 : sd > 255 ? 255 : sd;
-  }
   const tex = new THREE.DataTexture(data, w, h, THREE.RGFormat, THREE.UnsignedByteType);
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -418,7 +365,8 @@ function buildGround(): { ground: THREE.Mesh } {
       uOrigin: { value: new THREE.Vector2(g.tileMinX * TILE_SIZE, g.tileMinZ * TILE_SIZE) },
       uSize: { value: new THREE.Vector2(sizeX, sizeZ) },
       uColor: { value: new THREE.Color(0.16, 0.6, 0.85) },
-      uGain: { value: 1 },
+      // Starts dark; HoloCity fades it in once the asset arrives.
+      uGain: { value: 0 },
     },
     vertexShader: /* glsl */ `
       varying vec3 vWorld;
@@ -467,7 +415,7 @@ function buildGround(): { ground: THREE.Mesh } {
     0,
     (g.tileMinZ + g.height / 2) * TILE_SIZE,
   );
-  return { ground: mesh };
+  return { ground: mesh, groundMat: mat };
 }
 
 /** The actual city blockout building meshes as one additive-glow draw call. */
@@ -482,7 +430,8 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
     uniforms: {
       uColor: { value: new THREE.Color(0.2, 0.66, 0.95) },
       uTime: { value: 0 },
-      uGain: { value: 1 },
+      // Starts dark; HoloCity fades it in once the asset arrives.
+      uGain: { value: 0 },
     },
     vertexShader: /* glsl */ `
       attribute float aRelH;
@@ -545,6 +494,8 @@ function buildStreets(city: CityGeo): THREE.Mesh {
     depthWrite: false,
     transparent: true,
     side: THREE.DoubleSide,
+    // Starts invisible; HoloCity fades it in once the asset arrives.
+    opacity: 0,
   });
   const mesh = new THREE.Mesh(geo, mat);
   // Lift a touch above the ground plane so streets never z-fight with it.
@@ -553,24 +504,47 @@ function buildStreets(city: CityGeo): THREE.Mesh {
   return mesh;
 }
 
+/** City fabric, rendered progressively: each piece (ground texture, building
+ * + street meshes) mounts as soon as its own load resolves and fades in, so
+ * the map overlay and markers are usable immediately even on a cold start. */
 function HoloCity() {
-  const [assets, setAssets] = useState<CityAssets | null>(null);
+  const [ground, setGround] = useState<GroundAsset | null>(null);
+  const [geoAssets, setGeoAssets] = useState<GeoAssets | null>(null);
   useEffect(() => {
     let alive = true;
-    void loadCityAssets().then((a) => alive && setAssets(a));
+    void loadGroundAsset()
+      .then((a) => alive && setGround(a))
+      .catch((e) => console.error("holo map ground failed", e));
+    void loadGeoAssets()
+      .then((a) => alive && setGeoAssets(a))
+      .catch((e) => console.error("holo map geo failed", e));
     return () => {
       alive = false;
     };
   }, []);
-  useFrame(({ clock }) => {
-    if (assets) assets.buildingMat.uniforms.uTime.value = clock.elapsedTime;
+  useFrame(({ clock }, dt) => {
+    // ~0.4s fade-in per piece from the moment it shows up.
+    const step = Math.min(dt, 0.1) * 2.5;
+    if (ground) {
+      const u = ground.groundMat.uniforms.uGain;
+      u.value = Math.min(1, u.value + step);
+    }
+    if (geoAssets) {
+      const u = geoAssets.buildingMat.uniforms.uGain;
+      u.value = Math.min(1, u.value + step);
+      geoAssets.streetMat.opacity = u.value;
+      geoAssets.buildingMat.uniforms.uTime.value = clock.elapsedTime;
+    }
   });
-  if (!assets) return null;
   return (
     <>
-      <primitive object={assets.ground} dispose={null} />
-      <primitive object={assets.streets} dispose={null} />
-      <primitive object={assets.buildings} dispose={null} />
+      {ground && <primitive object={ground.ground} dispose={null} />}
+      {geoAssets && (
+        <>
+          <primitive object={geoAssets.streets} dispose={null} />
+          <primitive object={geoAssets.buildings} dispose={null} />
+        </>
+      )}
     </>
   );
 }

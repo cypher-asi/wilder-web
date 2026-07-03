@@ -7,6 +7,7 @@ import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { perf } from "../perf/perf";
 import { CombatFxEvent, game } from "../state/game";
 import { groundHeightAt } from "./Ground";
 
@@ -36,10 +37,12 @@ export function CombatFx() {
 
   useFrame(() => {
     if (game.fx.length === 0) return;
+    perf.begin("combatFx");
     const drained = game.fx.splice(0, game.fx.length);
     setEffects((prev) =>
       [...prev, ...drained.map((ev) => ({ id: nextFxId++, ev }))].slice(-48),
     );
+    perf.end("combatFx");
   });
 
   // Prune expired effects (component animations end well before this).

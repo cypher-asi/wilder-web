@@ -23,23 +23,24 @@ import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
 
 /** Canvas size in CSS px (square panel with notched corners). */
-const SIZE = 192;
+const SIZE = 230;
 /** Screen px per world meter. */
 const SCALE = 1.35;
 /** Extra px margin around the view in the cached base layer. */
 const PAD = 28;
 const BSIZE = SIZE + PAD * 2;
 
-/** Ground fills: streets and open ground stay dark, buildings barely lighter. */
+/** Ground fills: streets and open ground stay dark and slightly transparent so
+ *  the world shows through faintly; buildings stay fully opaque. */
 const TILE_FILL: Record<number, string> = {
-  [CITY_ROAD]: "#030710",
-  [CITY_ROAD_LINE]: "#071022",
-  [CITY_SIDEWALK]: "#050d1a",
-  [CITY_PLAZA]: "#061020",
-  [CITY_PARK]: "#04101a",
+  [CITY_ROAD]: "rgba(3, 7, 16, 0.62)",
+  [CITY_ROAD_LINE]: "rgba(7, 16, 34, 0.62)",
+  [CITY_SIDEWALK]: "rgba(5, 13, 26, 0.62)",
+  [CITY_PLAZA]: "rgba(6, 16, 32, 0.62)",
+  [CITY_PARK]: "rgba(4, 16, 26, 0.62)",
   [CITY_BUILDING]: "#0a1830",
 };
-const WATER_FILL = "#01040a";
+const WATER_FILL = "rgba(1, 4, 10, 0.62)";
 
 export function Minimap() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -70,8 +71,7 @@ export function Minimap() {
         base.height = BSIZE * dpr;
       }
       bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      bctx.fillStyle = WATER_FILL;
-      bctx.fillRect(0, 0, BSIZE, BSIZE);
+      bctx.clearRect(0, 0, BSIZE, BSIZE);
       if (!gridReady) return;
 
       const toBase = (wx: number, wz: number): [number, number] => [
@@ -143,8 +143,7 @@ export function Minimap() {
         canvas.height = SIZE * dpr;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = WATER_FILL;
-      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.clearRect(0, 0, SIZE, SIZE);
 
       const px = game.predicted.x;
       const pz = game.predicted.z;
@@ -194,10 +193,14 @@ export function Minimap() {
           ctx.closePath();
           ctx.fill();
         } else if (entity.kind === "Npc") {
-          ctx.fillStyle = "#ff4d5e";
+          ctx.save();
+          ctx.shadowColor = "rgba(255, 26, 46, 0.9)";
+          ctx.shadowBlur = 6;
+          ctx.fillStyle = "#ff1a2e";
           ctx.beginPath();
-          ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+          ctx.arc(sx, sy, 3.4, 0, Math.PI * 2);
           ctx.fill();
+          ctx.restore();
         } else if (entity.kind === "Player") {
           ctx.fillStyle = "#29d98c";
           ctx.beginPath();
@@ -210,25 +213,38 @@ export function Minimap() {
         }
       }
 
-      // Player marker: pulsing dot + facing wedge, always centered.
+      // Player marker: a wide FOV cone opening in the facing direction with a
+      // bright dot at the player's position, always centered.
       {
         const sx = SIZE / 2;
         const sy = SIZE / 2;
-        const pulse = 5 + Math.sin(now / 260) * 1.2;
-        ctx.fillStyle = "rgba(234, 247, 255, 0.25)";
-        ctx.beginPath();
-        ctx.arc(sx, sy, pulse + 5, 0, Math.PI * 2);
-        ctx.fill();
+        const halfFov = (80 * Math.PI) / 180 / 2; // ~80 deg field of view
+        const range = 34; // cone reach in px
         ctx.save();
         ctx.translate(sx, sy);
         ctx.rotate(game.predicted.yaw);
-        ctx.fillStyle = "#eaf7ff";
+
+        // FOV cone: filled translucent wedge + soft edge lines.
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, range);
+        grad.addColorStop(0, "rgba(140, 210, 255, 0.34)");
+        grad.addColorStop(1, "rgba(140, 210, 255, 0)");
+        ctx.fillStyle = grad;
         ctx.beginPath();
-        ctx.moveTo(pulse + 2, 0);
-        ctx.lineTo(-pulse * 0.6, pulse * 0.62);
-        ctx.lineTo(-pulse * 0.25, 0);
-        ctx.lineTo(-pulse * 0.6, -pulse * 0.62);
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, range, -halfFov, halfFov);
         ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "rgba(180, 230, 255, 0.5)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Center dot.
+        const pulse = 2.8 + Math.sin(now / 260) * 0.5;
+        ctx.fillStyle = "#eaf7ff";
+        ctx.shadowColor = "rgba(180, 230, 255, 0.9)";
+        ctx.shadowBlur = 6;
+        ctx.beginPath();
+        ctx.arc(0, 0, pulse, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }

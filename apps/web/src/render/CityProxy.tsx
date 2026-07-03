@@ -33,6 +33,7 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { game } from "../state/game";
 import { proxyCovers, revealedChunks, REVEAL_FADE_MS } from "./chunkBuilder";
 import { styleUniforms, TRON_BLUE, tronifyMaterial } from "./styles";
@@ -718,9 +719,13 @@ export function CityProxy() {
   }, [gl, camera, scene]);
 
   useFrame((_, dt) => {
+    perf.begin("cityProxy");
     tickOccupancy(Math.min(dt, 0.1));
     tickTileWindow();
-    if (!assets) return;
+    if (!assets) {
+      perf.end("cityProxy");
+      return;
+    }
 
     const tronOn = styleUniforms.uTron.value > 0.5;
     // First frame in tron mode: kick off the one-time edge-line build in the
@@ -743,6 +748,7 @@ export function CityProxy() {
         (!cell.tronOnly || tronOn) &&
         cell.center.distanceTo(camera.position) - cell.radius < cutoff;
     }
+    perf.end("cityProxy");
   });
 
   if (!assets) return null;

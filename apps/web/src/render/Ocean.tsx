@@ -17,6 +17,7 @@ import * as THREE from "three";
 import { Water } from "three/examples/jsm/objects/Water.js";
 import { CITY_WATER, cityTileAt } from "../game/citymap";
 import { TILE_SIZE } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { game, useGame } from "../state/game";
 import { DISPLAY_TO_SCENE, envSkyMaterial, SUN_DIR } from "./Atmosphere";
 import { CAMERA_FAR } from "./CameraRig";
@@ -202,6 +203,7 @@ export function Ocean() {
   }, [tron, waters]);
 
   useFrame((_, delta) => {
+    perf.begin("ocean.tick");
     frame.current++;
 
     if (frame.current % CHECK_INTERVAL === 0) {
@@ -232,6 +234,7 @@ export function Ocean() {
     time.value += delta * 0.6;
     // Keep the tiers in sync so swapping doesn't jump the wave phase.
     (idle.material.uniforms.time as THREE.IUniform<number>).value = time.value;
+    perf.end("ocean.tick");
   });
 
   return (

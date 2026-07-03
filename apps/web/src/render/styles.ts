@@ -348,7 +348,9 @@ export const STYLES: Record<VisualStyleId, VisualStyle> = {
       ambientIntensity: 0.4,
     },
     post: {
-      // Low threshold + hot intensity: every emissive line halos wide.
+      // Low threshold + hot intensity: emissive lines bloom bright. Line
+      // *width* is kept thin in the shader, so this glow reads as crisp
+      // neon rather than fat lines.
       bloom: 2.1,
       bloomThreshold: 0.24,
       saturation: 0.12,

@@ -225,15 +225,29 @@ if (uTron > 0.5) {
       vec2 tD16 = (0.5 - abs(fract(wp.xz / 16.0) - 0.5)) * 16.0;
       float tMajor = min(tD16.x, tD16.y);
       float tAA = fwidth(tMinor);
-      // Thin cores (~a few cm): the AA term carries the width at distance so
-      // up close the lines read as crisp hairlines.
-      float tLine = (1.0 - smoothstep(0.008, 0.02 + tAA, tMinor)) * 0.5
-                  + (1.0 - smoothstep(0.015, 0.035 + tAA, tMajor)) * 0.9;
-      // Narrow, dim halo hugging each line: a faint light bleed onto the
-      // roadbed (kept subtle so the grid reads as crisp lines, not glow).
-      float tHalo = (1.0 - smoothstep(0.0, 0.9, tMajor)) * 0.06
-                  + (1.0 - smoothstep(0.0, 0.3, tMinor)) * 0.03;
+      // Thin hairline cores: the AA term carries the width at distance so
+      // up close the lines stay crisp. Kept deliberately narrow (~half the
+      // previous width) so the grid doesn't read as thick.
+      float tLine = (1.0 - smoothstep(0.004, 0.011 + tAA, tMinor)) * 0.5
+                  + (1.0 - smoothstep(0.008, 0.02 + tAA, tMajor)) * 0.9;
+      // Tight halo hugging each thin core: full-strength bleed for the bright
+      // neon look, but narrow so the brightness comes from bloom, not girth.
+      float tHalo = (1.0 - smoothstep(0.0, 0.45, tMajor)) * 0.06
+                  + (1.0 - smoothstep(0.0, 0.16, tMinor)) * 0.03;
       gEmissive += TRON_BLUE * (tLine * 1.4 + tHalo) * (gW.y * tFade);
+      // Holographic echo: a faint transparent white twin of the grid hugging
+      // each cyan line, nudged toward the camera so it reads as a layer
+      // sitting just under the grid (lower on screen, but still visible).
+      vec2 tToCam = cameraPosition.xz - wp.xz;
+      vec2 tDir = length(tToCam) > 0.001 ? normalize(tToCam) : vec2(0.0, 1.0);
+      vec2 tGhost = wp.xz - tDir * 0.06;
+      vec2 tG4 = (0.5 - abs(fract(tGhost / 4.0) - 0.5)) * 4.0;
+      float tGMinor = min(tG4.x, tG4.y);
+      vec2 tG16 = (0.5 - abs(fract(tGhost / 16.0) - 0.5)) * 16.0;
+      float tGMajor = min(tG16.x, tG16.y);
+      float tGLine = (1.0 - smoothstep(0.004, 0.011 + tAA, tGMinor)) * 0.5
+                   + (1.0 - smoothstep(0.008, 0.02 + tAA, tGMajor)) * 0.9;
+      gEmissive += TRON_WHITE * (tGLine * 0.22) * (gW.y * tFade);
     }
   }
   // Curb circuit: a hot hairline tracing every road edge, with its own bleed.

@@ -9,6 +9,7 @@
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
+import { perf } from "../perf/perf";
 import { game } from "../state/game";
 import { styleRuntime } from "./styles";
 
@@ -143,6 +144,7 @@ export function CameraRig() {
         return;
       }
     }
+    perf.begin("camera");
     if (keys.current.q) cameraState.yaw += dt * 1.8;
     if (keys.current.e) cameraState.yaw -= dt * 1.8;
 
@@ -198,6 +200,7 @@ export function CameraRig() {
       const spread = Math.max(1, (cameraState.distance / FOG_BASE_DISTANCE) ** 1.35);
       scene.fog.density = styleRuntime.fogBaseDensity / spread;
     }
+    perf.end("camera");
   });
 
   return null;

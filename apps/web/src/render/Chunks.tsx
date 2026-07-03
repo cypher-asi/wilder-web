@@ -10,6 +10,7 @@
 import { useMemo, useReducer } from "react";
 import { useFrame } from "@react-three/fiber";
 import { CHUNK_SIZE, ChunkData } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { game } from "../state/game";
 import { collectBuildingKit } from "./building";
 import { Building } from "./Buildings";
@@ -56,8 +57,10 @@ export function Chunks() {
   const [mountVersion, bumpMounted] = useReducer((n: number) => n + 1, 0);
 
   useFrame(({ gl, scene, camera }) => {
+    perf.begin("chunks.build");
     const p = game.rendered;
     if (processChunkBuilds(p.x, p.z, BUILD_BUDGET_MS, gl, scene, camera)) bumpMounted();
+    perf.end("chunks.build");
   });
 
   const chunks = useMemo(() => mountedChunks(), [mountVersion]);

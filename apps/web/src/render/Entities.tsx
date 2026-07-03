@@ -269,6 +269,23 @@ function applyMannequinPalette(
 ): void {
   for (const f of flashables) {
     const m = f.mat;
+    if (tron && hostile) {
+      // Flat, light red silhouette: kill all shading/detail so the whole
+      // body reads as one translucent shape (the border does the rest).
+      m.color.set(0x000000);
+      m.emissive.set(0xff5566);
+      m.emissiveIntensity = 0.8;
+      m.roughness = 1;
+      m.metalness = 0;
+      m.transparent = true;
+      m.opacity = 0.55;
+      f.baseEmissive.copy(m.emissive);
+      f.baseIntensity = m.emissiveIntensity;
+      continue;
+    }
+    // Reset opacity in case we're switching back from the tron silhouette.
+    m.transparent = false;
+    m.opacity = 1;
     if (f.joints) {
       if (tron) {
         m.color.set(0x04080c);
@@ -342,7 +359,7 @@ function restyleMannequin(
 /** Warning red for the enemy silhouette border (matches reticle/hpbar). */
 const ENEMY_OUTLINE_COLOR = new THREE.Color("#ff3040");
 /** World-space border half-width, in metres. */
-const ENEMY_OUTLINE_THICKNESS = 0.028;
+const ENEMY_OUTLINE_THICKNESS = 0.015;
 
 const ENEMY_OUTLINE_VERT = /* glsl */ `
   #include <common>
@@ -374,7 +391,7 @@ function makeEnemyOutlineMaterial(): THREE.ShaderMaterial {
     depthWrite: false,
     uniforms: {
       color: { value: ENEMY_OUTLINE_COLOR.clone() },
-      opacity: { value: 0.85 },
+      opacity: { value: 0.55 },
       thickness: { value: ENEMY_OUTLINE_THICKNESS },
     },
     vertexShader: ENEMY_OUTLINE_VERT,
@@ -621,7 +638,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     }
     if (outlineMats.current.length > 0) {
       // Gentle breathing glow; fade the border out as the enemy dies.
-      const pulse = 0.7 + Math.sin(now * 0.005) * 0.18;
+      const pulse = 0.5 + Math.sin(now * 0.005) * 0.12;
       const alpha = dying ? 0 : pulse;
       for (const mat of outlineMats.current) mat.uniforms.opacity.value = alpha;
     }
@@ -819,6 +836,9 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
       <mesh position={[0, 0.85, 0]} castShadow>
         <capsuleGeometry args={[0.32, 0.85, 6, 12]} />
         <meshStandardMaterial color={bodyColor} roughness={0.55} metalness={0.2} />
+        {isNpc && (
+          <Outlines color="#ff3040" thickness={3.5} transparent opacity={0.85} screenspace />
+        )}
       </mesh>
       {/* shoulder tint band */}
       <mesh position={[0, 1.25, 0]}>
@@ -828,6 +848,9 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
       <mesh position={[0, 1.66, 0]} castShadow>
         <sphereGeometry args={[0.21, 12, 12]} />
         <meshStandardMaterial color="#14161c" roughness={0.3} metalness={0.6} />
+        {isNpc && (
+          <Outlines color="#ff3040" thickness={3.5} transparent opacity={0.85} screenspace />
+        )}
       </mesh>
       {/* visor faces +X (yaw 0 looks along +X) */}
       <mesh position={[0.14, 1.68, 0]} rotation={[0, 0, -Math.PI / 2]}>

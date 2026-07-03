@@ -1,6 +1,6 @@
 // Input: WASD (camera-relative) with client prediction at the server tick
-// rate, twin-stick mouse aim (character faces the cursor), hold-LMB to fire
-// at the aim point, and right-click-to-move via ground raycast.
+// rate, twin-stick mouse aim (character faces the cursor), and hold-LMB to
+// fire at the aim point. Movement is WASD only (no click-to-move).
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -218,12 +218,6 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       window.removeEventListener("blur", onBlur);
     };
   }, [gl, connection]);
-
-  function onGroundClick(x: number, z: number) {
-    const seq = game.nextSeq++;
-    connection.send({ t: "MoveTo", d: { seq, x, z } });
-    game.moveMarker = { x, z, at: performance.now() };
-  }
 
   /** Current WASD direction in world space, or null when no key is held. */
   function moveDirection(): [number, number] | null {
@@ -583,58 +577,8 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
 
   return (
     <>
-      <GroundClickPlane onGroundClick={onGroundClick} />
-      <MoveMarker />
       <AimRing />
     </>
-  );
-}
-
-/** Invisible plane that follows the player and receives click-to-move. */
-function GroundClickPlane({
-  onGroundClick,
-}: {
-  onGroundClick: (x: number, z: number) => void;
-}) {
-  const ref = useRef<THREE.Mesh>(null);
-  useFrame(() => {
-    ref.current?.position.set(game.rendered.x, 0, game.rendered.z);
-  });
-  return (
-    <mesh
-      ref={ref}
-      rotation={[-Math.PI / 2, 0, 0]}
-      // Right-click to move (context menu is suppressed on the canvas).
-      onContextMenu={(e) => {
-        if (e.delta > 4) return; // ignore drags
-        onGroundClick(e.point.x, e.point.z);
-      }}
-    >
-      <planeGeometry args={[400, 400]} />
-      <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
-    </mesh>
-  );
-}
-
-function MoveMarker() {
-  const ref = useRef<THREE.Mesh>(null);
-  useFrame(({ clock }) => {
-    if (!ref.current) return;
-    const marker = game.moveMarker;
-    if (!marker || performance.now() - marker.at > 4000) {
-      ref.current.visible = false;
-      return;
-    }
-    ref.current.visible = true;
-    ref.current.position.set(marker.x, 0.05, marker.z);
-    const pulse = 0.8 + Math.sin(clock.elapsedTime * 6) * 0.2;
-    ref.current.scale.setScalar(pulse);
-  });
-  return (
-    <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} visible={false}>
-      <ringGeometry args={[0.35, 0.5, 24]} />
-      <meshBasicMaterial color="#40e8ff" transparent opacity={0.85} depthWrite={false} />
-    </mesh>
   );
 }
 

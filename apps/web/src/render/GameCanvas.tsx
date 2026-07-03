@@ -1,5 +1,6 @@
 import { Canvas } from "@react-three/fiber";
 import { GameConnection } from "../net/connection";
+import { PerfTracker } from "../perf/PerfTracker";
 import { useGame } from "../state/game";
 import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
 import { CAMERA_FAR, CameraRig } from "./CameraRig";
@@ -38,6 +39,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         }
       }}
     >
+      <PerfTracker />
       <SunsetAtmosphere>
         <SceneSetup />
         <Lighting />

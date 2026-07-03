@@ -35,6 +35,7 @@ import { Clouds } from "@takram/three-clouds/r3f";
 import { Ellipsoid, Geodetic, radians } from "@takram/three-geospatial";
 import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import * as THREE from "three";
+import { perf } from "../perf/perf";
 import { game, useGame } from "../state/game";
 import { tickFacades } from "./facade";
 import {
@@ -646,6 +647,10 @@ export function SceneSetup() {
   }, [scene, gl, camera]);
 
   // Drive time-varying facade shaders (window flicker/toggles).
-  useFrame(({ clock }) => tickFacades(clock.elapsedTime));
+  useFrame(({ clock }) => {
+    perf.begin("facades");
+    tickFacades(clock.elapsedTime);
+    perf.end("facades");
+  });
   return null;
 }

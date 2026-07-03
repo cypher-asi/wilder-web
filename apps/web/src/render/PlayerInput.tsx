@@ -32,6 +32,15 @@ const WEAPON_COOLDOWN: Record<string, number> = {
 };
 const FIST_COOLDOWN = 0.8;
 
+/** Client mirror of server weapon ranges (m) for fire-time aim assist. */
+const WEAPON_RANGE: Record<string, number> = {
+  Pistol: 18,
+  Smg: 15,
+};
+const FIST_RANGE = 1.5;
+/** Perpendicular slack (m) for snapping a shot onto a nearby enemy. */
+const AIM_ASSIST_RADIUS = 1.2;
+
 /** Seconds LMB takes to draw the gun before the first shot can fire. */
 const DRAW_TIME = 0.25;
 /** Seconds without shooting before the gun is holstered again. */
@@ -42,6 +51,11 @@ const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
 export function equippedCooldown(): number {
   const weapon = useGame.getState().inventory?.equipped_weapon;
   return (weapon && WEAPON_COOLDOWN[weapon]) || FIST_COOLDOWN;
+}
+
+function equippedRange(): number {
+  const weapon = useGame.getState().inventory?.equipped_weapon;
+  return (weapon && WEAPON_RANGE[weapon]) || FIST_RANGE;
 }
 
 function hasRangedWeapon(): boolean {
@@ -277,6 +291,38 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     return target;
   }
 
+  /**
+   * Ground point the shot should actually be sent at. A hovered enemy wins;
+   * otherwise, if the aim ray passes close to a live enemy within weapon range,
+   * snap onto it so the server hitscan lands even without a pixel-perfect
+   * hover. Falls back to the raw cursor point.
+   */
+  function fireTarget(): { x: number; z: number } {
+    const hovered = hoverTarget();
+    if (hovered) return { x: hovered.x, z: hovered.z };
+    if (!hasRangedWeapon()) return { x: game.aim.x, z: game.aim.z };
+    const px = game.rendered.x;
+    const pz = game.rendered.z;
+    const dirX = Math.cos(game.aim.yaw);
+    const dirZ = Math.sin(game.aim.yaw);
+    const range = equippedRange();
+    let best: GameEntity | null = null;
+    let bestAlong = Infinity;
+    for (const e of game.entities.values()) {
+      if (e.kind !== "Npc" || e.healthPct <= 0 || e.anim === "Death") continue;
+      const rx = e.x - px;
+      const rz = e.z - pz;
+      const along = rx * dirX + rz * dirZ;
+      if (along < 0.3 || along > range) continue;
+      const perp = Math.abs(rx * dirZ - rz * dirX);
+      if (perp <= AIM_ASSIST_RADIUS && along < bestAlong) {
+        bestAlong = along;
+        best = e;
+      }
+    }
+    return best ? { x: best.x, z: best.z } : { x: game.aim.x, z: game.aim.z };
+  }
+
   /** Project the cursor onto the ground plane at the player's elevation. */
   function updateAim() {
     if (!pointer.current.inside) {
@@ -331,13 +377,19 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     game.gun.lastShotAt = now;
     game.gun.shotSeq++;
     const seq = game.nextSeq++;
-    connection.send({ t: "Attack", d: { seq, tx: game.aim.x, tz: game.aim.z } });
+    const target = fireTarget();
+    connection.send({ t: "Attack", d: { seq, tx: target.x, tz: target.z } });
 
     // Instant local feedback: muzzle flash, shell, recoil, sfx. The server's
     // MuzzleFlash event only adds the tracer for our own shots.
     if (hasRangedWeapon()) {
       void playSfx("sfx_shoot", 0.3);
-      const yaw = game.aim.yaw;
+      // Orient the FX toward the resolved target so the flash/tracer follow the
+      // shot even when aim assist snapped it onto a nearby enemy.
+      const yaw = Math.atan2(
+        target.z - game.rendered.z,
+        target.x - game.rendered.x,
+      );
       const mount = game.gunMounts.get(game.localEntityId);
       const muzzle = mount
         ? mount.muzzle.getWorldPosition(new THREE.Vector3())

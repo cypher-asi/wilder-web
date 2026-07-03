@@ -92,6 +92,17 @@ const UPPER_CLIPS = ["Pistol_Shoot", "Hit_Chest"];
 
 /** How long the gun mesh bucks after a shot, ms. */
 const GUN_KICK_MS = 130;
+// --- Sidearm hold / aim tuning (see attachPistol + the per-frame aim) -------
+/** Uniform scale applied to the pistol GLB in the hand. */
+const GUN_SCALE = 0.35;
+/** Distance from the grip to the muzzle empty, holder-local +X (barrel). */
+const GUN_BARREL_LEN = 0.28;
+/** Roll about the barrel axis; nudge if the gun reads rotated in-hand. */
+const GUN_ROLL = 0;
+/** Recoil kick angle (rad) the muzzle rises right after a shot. */
+const GUN_RECOIL_KICK = 0.45;
+/** Constant downward tilt of the barrel (rad); keeps it a touch below level. */
+const GUN_AIM_PITCH = 0.05;
 /** Duration of the red damage flash, ms. */
 const HIT_FLASH_MS = 200;
 const HIT_FLASH_COLOR = new THREE.Color(0xff2822);
@@ -184,7 +195,16 @@ function wrapAngle(a: number): number {
 }
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 const spineTwistQ = new THREE.Quaternion();
+// Scratch objects reused every frame while aiming the gun (no per-frame alloc).
+const gunAimDir = new THREE.Vector3();
+const gunSide = new THREE.Vector3();
+const gunUp = new THREE.Vector3();
+const gunBasis = new THREE.Matrix4();
+const gunWorldQ = new THREE.Quaternion();
+const gunParentQ = new THREE.Quaternion();
+const gunRecoilQ = new THREE.Quaternion();
 
 /**
  * Map a replicated anim state to a single base-layer clip: full-body
@@ -269,20 +289,25 @@ function restyleMannequin(
   return flashables;
 }
 
-/** Sidearm mesh parented to the right hand bone, with a muzzle empty. */
+/**
+ * Sidearm mesh parented to the right hand bone, with a muzzle empty. The
+ * holder is re-oriented every frame (see the useFrame aim block) so its local
+ * +X points at the aim target, so here we only line the pistol's barrel up
+ * with that +X axis and drop the muzzle empty at the barrel tip. The pistol
+ * GLB's barrel is its native +X; keeping it on the holder's +X means the aim
+ * rotation drives the gun exactly where the player is pointing.
+ */
 function attachPistol(rig: THREE.Group, pistol: THREE.Group): GunMount | null {
   const hand = rig.getObjectByName("DEF-handR") ?? rig.getObjectByName("DEF-hand.R");
   if (!hand) return null;
   const holder = new THREE.Group();
+  pistol.scale.setScalar(GUN_SCALE);
+  pistol.position.set(0, 0, 0);
+  pistol.rotation.set(GUN_ROLL, 0, 0);
   holder.add(pistol);
-  // Tuned for the UAL hand bone (Y along the fingers): grip in the palm,
-  // barrel out past the knuckles.
-  pistol.scale.setScalar(0.35);
-  pistol.position.set(0, 0.06, 0.02);
-  pistol.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
   // Muzzle empty just past the barrel; world position anchors flash/tracer FX.
   const muzzle = new THREE.Object3D();
-  muzzle.position.set(0, 0.34, 0.06);
+  muzzle.position.set(GUN_BARREL_LEN, 0, 0);
   holder.add(muzzle);
   hand.add(holder);
   return { holder, muzzle };
@@ -437,13 +462,6 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       }
       flashActive.current = flash > 0;
     }
-    // Gun mesh recoil: quick barrel buck after each shot.
-    const mount = game.gunMounts.get(entity.id);
-    if (mount) {
-      const t = (now - gunKickAt.current) / GUN_KICK_MS;
-      mount.holder.rotation.x = t < 1 ? -0.45 * (1 - t) : 0;
-    }
-
     let anim = entity.anim;
     if (isLocal) {
       // Instant local feedback; the server confirms a tick later.
@@ -567,6 +585,33 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     if (turn !== 0 && spineBones.current.length > 0) {
       spineTwistQ.setFromAxisAngle(Y_AXIS, turn / spineBones.current.length);
       for (const bone of spineBones.current) bone.quaternion.multiply(spineTwistQ);
+    }
+
+    // Procedurally aim the gun: point the holder's +X (the barrel) at the
+    // aim direction in world space, independent of the arm animation, so the
+    // muzzle always lines up with where shots actually go. Runs after the
+    // spine twist above so the hand bone reflects this frame's pose.
+    const mount = game.gunMounts.get(entity.id);
+    if (mount?.holder.parent) {
+      const yaw = isLocal && game.aim.active ? game.aim.yaw : entity.yaw;
+      const cp = Math.cos(GUN_AIM_PITCH);
+      gunAimDir.set(Math.cos(yaw) * cp, -Math.sin(GUN_AIM_PITCH), Math.sin(yaw) * cp);
+      gunSide.copy(gunAimDir).cross(Y_AXIS);
+      if (gunSide.lengthSq() < 1e-6) gunSide.copy(Z_AXIS);
+      else gunSide.normalize();
+      gunUp.copy(gunSide).cross(gunAimDir).normalize();
+      // Columns map holder-local X->barrel, Y->up, Z->side.
+      gunBasis.makeBasis(gunAimDir, gunUp, gunSide);
+      gunWorldQ.setFromRotationMatrix(gunBasis);
+      // Convert the desired world orientation into the hand bone's local frame.
+      mount.holder.parent.getWorldQuaternion(gunParentQ);
+      mount.holder.quaternion.copy(gunParentQ.invert()).multiply(gunWorldQ);
+      // Recoil: the muzzle rises briefly after each shot (about the side axis).
+      const kick = (now - gunKickAt.current) / GUN_KICK_MS;
+      if (kick < 1) {
+        gunRecoilQ.setFromAxisAngle(Z_AXIS, GUN_RECOIL_KICK * (1 - kick));
+        mount.holder.quaternion.multiply(gunRecoilQ);
+      }
     }
   });
 

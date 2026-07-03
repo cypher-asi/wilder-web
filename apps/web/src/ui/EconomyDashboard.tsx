@@ -99,9 +99,9 @@ function Party({ party }: { party: TxParty }) {
     case "Agent":
       return <span className="econ-party econ-party-agent">{party.d.name}</span>;
     case "Mint":
-      return <span className="econ-party econ-party-mint">MINT</span>;
+      return <span className="econ-party econ-party-kernel">KERNEL</span>;
     case "Burn":
-      return <span className="econ-party econ-party-burn">BURN</span>;
+      return <span className="econ-party econ-party-kernel">KERNEL</span>;
   }
 }
 

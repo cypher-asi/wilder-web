@@ -5,7 +5,7 @@
 
 import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { CombatFxEvent, game } from "../state/game";
 import { groundHeightAt } from "./Ground";
@@ -313,6 +313,8 @@ function ShellCasing({ ev }: { ev: Extract<CombatFxEvent, { type: "shell" }> }) 
 /** Impact spark + floating damage number. */
 function HitFx({ ev }: { ev: Extract<CombatFxEvent, { type: "hit" }> }) {
   const spark = useRef<THREE.Mesh>(null);
+  // Random horizontal drift so rapid hits scatter up and around.
+  const drift = useMemo(() => `${(Math.random() - 0.5) * 64}px`, []);
 
   useFrame(() => {
     if (!spark.current) return;
@@ -338,7 +340,12 @@ function HitFx({ ev }: { ev: Extract<CombatFxEvent, { type: "hit" }> }) {
         />
       </mesh>
       <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
-        <div className="dmg-float">{Math.round(ev.damage)}</div>
+        <div
+          className="dmg-float"
+          style={{ "--dx": drift } as CSSProperties}
+        >
+          {Math.round(ev.damage)}
+        </div>
       </Html>
     </group>
   );
@@ -391,15 +398,30 @@ function DeathPulse({ ev }: { ev: Extract<CombatFxEvent, { type: "death" }> }) {
   });
 
   return (
-    <mesh ref={ring} position={[ev.x, 0.06, ev.z]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.7, 0.85, 32]} />
-      <meshBasicMaterial
-        color="#ff5d5d"
-        transparent
-        opacity={0.7}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-      />
-    </mesh>
+    <group>
+      <mesh ref={ring} position={[ev.x, 0.06, ev.z]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.7, 0.85, 32]} />
+        <meshBasicMaterial
+          color="#ff5d5d"
+          transparent
+          opacity={0.7}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Red skull that floats up over the corpse. */}
+      <group position={[ev.x, ev.y + 1.2, ev.z]}>
+        <Html center zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
+          <div className="death-skull">
+            <svg viewBox="0 0 32 32" width={30} height={30} aria-hidden="true">
+              <path
+                fill="#ff2a3a"
+                d="M16 2C9.4 2 4 7 4 13.3c0 3.6 1.8 6.4 4.4 8.3.5.4.8 1 .8 1.6v1.5c0 .9.7 1.6 1.6 1.6h1.1v-2.3c0-.5.4-.9.9-.9s.9.4.9.9V26h2.6v-2.3c0-.5.4-.9.9-.9s.9.4.9.9V26h1.1c.9 0 1.6-.7 1.6-1.6v-1.5c0-.6.3-1.2.8-1.6 2.6-1.9 4.4-4.7 4.4-8.3C28 7 22.6 2 16 2zm-5.6 13.3a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2zm11.2 0a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2zM16 16.6c.7 0 1.2.7 1 1.4l-.5 2.2c-.1.5-.9.5-1 0l-.5-2.2c-.2-.7.3-1.4 1-1.4z"
+              />
+            </svg>
+          </div>
+        </Html>
+      </group>
+    </group>
   );
 }

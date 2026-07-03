@@ -2,6 +2,7 @@
 // uses the predicted transform for the local player, and animates a rigged
 // GLB character when available (procedural runner otherwise).
 
+import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
@@ -1106,46 +1107,44 @@ function EntityView({ entity }: { entity: GameEntity }) {
   return <group ref={group}>{body}</group>;
 }
 
-/** Show the bar this long after taking a hit even at full health, ms. */
-const HEALTH_BAR_LINGER = 4000;
-const HEALTH_BAR_WIDTH = 1.1;
+/** Keep the bar up briefly after a hit even once you look away, ms. */
+const HEALTH_BAR_LINGER = 1500;
 
 /**
- * Ascent-style floating health bar: camera-facing dark backing with a red
- * fill, hovering above the enemy's head. Appears once damaged.
+ * React health bar: a dark rectangle with a red fill sized to the enemy's
+ * remaining health, rendered via drei Html above their head. Shown while you
+ * are pointed at that enemy (soft target lock), plus a short post-hit linger.
  */
 function HealthBar({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
-  const fill = useRef<THREE.Mesh>(null);
+  const fill = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const lastVisible = useRef(false);
 
-  useFrame(({ camera }) => {
+  useFrame(() => {
     if (!group.current) return;
-    const damaged = entity.healthPct < 0.999;
+    const aimed = game.hoverTargetId === entity.id;
     const recent = performance.now() - entity.lastHitAt < HEALTH_BAR_LINGER;
-    const visible = (damaged || recent) && entity.anim !== "Death" && entity.healthPct > 0;
-    group.current.visible = visible;
-    if (!visible) return;
-    group.current.quaternion.copy(camera.quaternion);
-    if (fill.current) {
-      const pct = Math.max(entity.healthPct, 0.02);
-      fill.current.scale.x = pct;
-      // Keep the fill anchored to the left edge as it shrinks.
-      fill.current.position.x = (-(1 - pct) * HEALTH_BAR_WIDTH) / 2;
+    const show =
+      (aimed || recent) && entity.anim !== "Death" && entity.healthPct > 0;
+    if (show !== lastVisible.current) {
+      lastVisible.current = show;
+      setVisible(show);
+    }
+    if (show && fill.current) {
+      fill.current.style.width = `${Math.max(entity.healthPct, 0.02) * 100}%`;
     }
   });
 
   return (
-    <group ref={group} position={[0, 2.25, 0]} visible={false}>
-      {/* backing */}
-      <mesh>
-        <planeGeometry args={[HEALTH_BAR_WIDTH + 0.08, 0.16]} />
-        <meshBasicMaterial color="#0a0508" transparent opacity={0.85} depthWrite={false} />
-      </mesh>
-      {/* fill */}
-      <mesh ref={fill} position={[0, 0, 0.001]}>
-        <planeGeometry args={[HEALTH_BAR_WIDTH, 0.09]} />
-        <meshBasicMaterial color="#ff3040" depthWrite={false} />
-      </mesh>
+    <group ref={group} position={[0, 2.25, 0]}>
+      {visible && (
+        <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
+          <div className="enemy-hpbar">
+            <div ref={fill} className="enemy-hpbar-fill" />
+          </div>
+        </Html>
+      )}
     </group>
   );
 }

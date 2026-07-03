@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { ROLL_COOLDOWN } from "../game/collision";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
@@ -20,6 +20,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
       {!connected && <div className="disconnect-banner">RECONNECTING…</div>}
       {joined && (
         <>
+          <Crosshair />
           <VitalsPanel />
           <div className="minimap-panel">
             <Minimap />
@@ -40,6 +41,59 @@ export function Hud({ connection }: { connection: GameConnection }) {
       )}
       {/* Outside the joined gate so exit/logout stay reachable mid-reconnect. */}
       <GameMenu />
+    </div>
+  );
+}
+
+/**
+ * Aiming crosshair that follows the mouse whenever the gun is drawn. Reads the
+ * non-reactive `game.gun.drawn` on a rAF loop and tracks the raw cursor so it
+ * sits exactly on the aim point in this top-down twin-stick view.
+ */
+function Crosshair() {
+  const el = useRef<HTMLDivElement>(null);
+  const inside = useRef(false);
+
+  useEffect(() => {
+    let raf = 0;
+    const pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    const onMove = (e: PointerEvent) => {
+      pos.x = e.clientX;
+      pos.y = e.clientY;
+      inside.current = true;
+    };
+    const onLeave = () => (inside.current = false);
+    window.addEventListener("pointermove", onMove);
+    document.documentElement.addEventListener("pointerleave", onLeave);
+    const tick = () => {
+      const node = el.current;
+      if (node) {
+        const show = game.gun.drawn && inside.current;
+        node.style.opacity = show ? "1" : "0";
+        if (show)
+          node.style.transform = `translate(${pos.x - 16}px, ${pos.y - 16}px)`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("pointermove", onMove);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+    };
+  }, []);
+
+  return (
+    <div ref={el} className="crosshair" style={{ opacity: 0 }}>
+      <svg viewBox="-16 -16 32 32" width={32} height={32}>
+        <g fill="none" stroke="#ff3040" strokeWidth={1.5} strokeLinecap="round">
+          <line x1={0} y1={-14} x2={0} y2={-5} />
+          <line x1={0} y1={5} x2={0} y2={14} />
+          <line x1={-14} y1={0} x2={-5} y2={0} />
+          <line x1={5} y1={0} x2={14} y2={0} />
+        </g>
+        <circle cx={0} cy={0} r={1.4} fill="#ff3040" />
+      </svg>
     </div>
   );
 }

@@ -1098,32 +1098,133 @@ body {
   transition: width 0.3s;
 }
 
+/* Aiming crosshair that follows the mouse while the gun is drawn. */
+.crosshair {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+  z-index: 15;
+  filter: drop-shadow(0 0 3px rgba(255, 48, 64, 0.7));
+  transition: opacity 0.12s ease-out;
+  will-change: transform, opacity;
+}
+
+/* On-enemy target reticle: a thin diamond with a smaller diamond inside,
+   rendered via drei Html (screen-space, always camera-facing). */
+.target-reticle {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  pointer-events: none;
+  animation: target-acquire 0.14s ease-out;
+}
+
+.target-reticle-outer,
+.target-reticle-inner {
+  position: absolute;
+  border: 1.5px solid #ff3040;
+  transform: translate(-50%, -50%) rotate(45deg);
+  box-shadow: 0 0 4px rgba(255, 48, 64, 0.7);
+  left: 50%;
+  top: 50%;
+}
+
+.target-reticle-outer {
+  width: 22px;
+  height: 22px;
+}
+
+.target-reticle-inner {
+  width: 7px;
+  height: 7px;
+  background: rgba(255, 48, 64, 0.5);
+}
+
+@keyframes target-acquire {
+  0% {
+    transform: scale(1.8);
+    opacity: 0.2;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Enemy health bar (drei Html, above the target's head). */
+.enemy-hpbar {
+  width: 66px;
+  height: 6px;
+  padding: 1px;
+  background: rgba(10, 5, 8, 0.85);
+  border: 1px solid rgba(255, 48, 64, 0.5);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.enemy-hpbar-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ff2a3a, #ff6070);
+  box-shadow: 0 0 4px rgba(255, 48, 64, 0.7);
+}
+
+/* Red skull that pops up when an enemy dies. */
+.death-skull {
+  pointer-events: none;
+  filter: drop-shadow(0 0 6px rgba(255, 42, 58, 0.85));
+  animation: death-skull-rise 0.6s ease-out forwards;
+}
+
+@keyframes death-skull-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.4);
+  }
+  25% {
+    opacity: 1;
+    transform: translateY(0) scale(1.15);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(-6px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) scale(1);
+  }
+}
+
 /* Floating damage numbers (rendered via drei Html inside the canvas). */
 .dmg-float {
   font-family: var(--font-display);
   font-size: 15px;
   font-weight: 800;
-  color: var(--accent-bright);
+  color: #ff4646;
   text-shadow:
-    0 0 6px rgba(79, 195, 255, 0.9),
+    0 0 6px rgba(255, 40, 40, 0.95),
     0 1px 2px #000;
   animation: dmg-rise 0.8s ease-out forwards;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
+  --dx: 0px;
 }
 
 @keyframes dmg-rise {
   0% {
     opacity: 0;
-    transform: translateY(4px) scale(0.7);
+    transform: translate(0, 4px) scale(0.7);
   }
   15% {
     opacity: 1;
-    transform: translateY(-2px) scale(1.15);
+    transform: translate(calc(var(--dx) * 0.3), -4px) scale(1.2);
   }
   100% {
     opacity: 0;
-    transform: translateY(-30px) scale(0.95);
+    transform: translate(var(--dx), -34px) scale(0.95);
   }
 }
 

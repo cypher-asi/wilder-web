@@ -141,6 +141,24 @@ vec2 gTriRG(sampler2D t, vec3 wp, vec3 w, float sTop, float sSide) {
        + texture2D(t, wp.xz / sTop).rg * w.y
        + texture2D(t, vec2(wp.x, -wp.y) / sSide).rg * w.z;
 }
+// Slab field for concrete paving: slab pitch varies per 8 m zone (double,
+// base, or half the base pitch), and each slab gets its own texture offset
+// and tone so no two slabs read identical. joint = recessed groove mask
+// (slab borders + zone borders where the pour pattern changes).
+void gSlabField(vec2 p, float basePitch,
+                out float pitch, out vec2 jitter, out float tone, out float joint) {
+  vec2 zone = floor(p / 8.0);
+  float zr = gHash12(zone + 21.0);
+  pitch = zr < 0.3 ? basePitch * 2.0 : (zr < 0.78 ? basePitch : basePitch * 0.5);
+  vec2 slab = floor(p / pitch);
+  jitter = (gHash22(slab + 13.0) - 0.5) * 2.6;
+  tone = 0.72 + 0.52 * gHash12(slab + 3.3);
+  vec2 cell = abs(fract(p / pitch) - 0.5) * 2.0;
+  float lineD = (1.0 - max(cell.x, cell.y)) * pitch * 0.5;
+  vec2 zcell = abs(fract(p / 8.0) - 0.5) * 2.0;
+  float zoneD = (1.0 - max(zcell.x, zcell.y)) * 4.0;
+  joint = 1.0 - smoothstep(0.015, 0.055, min(lineD, zoneD));
+}
 // Sparse round spots (drips, gum): 1 inside a spot, 0 outside. cellW meters
 // per cell, chance of a spot per cell, radius as a fraction of the cell.
 float gSpots(vec2 wp, float cellW, float chance, float radius) {
@@ -183,20 +201,26 @@ if (gKind == 0) {
   gNrm2 = gTriRG(uAsphaltNormal, wp, gW, 3.6, 3.6) * 2.0 - 1.0;
   gNStr = 0.45;
 } else if (gKind == 1) {
-  // Sidewalk: smooth concrete slabs (pavers alias into speckle at this
-  // scale). Curb faces sample at a ~0.9 m repeat: they are 0.14 m tall and
-  // the slab-scale repeat smears into an untextured band.
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 3.5, 0.9) * 1.25;
-  // Per-slab value variation on the 2 m joint grid so slabs read individually.
-  gAlb *= 0.92 + 0.16 * gHash12(floor(wp.xz / 2.0));
-  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.5, 0.9) * 0.6 + 0.12, 0.25, 0.85);
-  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 3.5, 0.9) * 2.0 - 1.0;
-  gNStr = 0.25;
+  // Sidewalk: dark-gray concrete slabs with varied pour sizes (big 4 m
+  // pours, standard 2 m slabs, or 1 m tile strips per zone) and per-slab
+  // texture offset + tone so no two slabs read identical.
+  float pitch; vec2 jit; float tone; float joint;
+  gSlabField(wp.xz, 2.0, pitch, jit, tone, joint);
+  vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
+  gAlb = gTriRGB(uConcreteMap, wps, gW, 3.5, 0.9) * 0.82 * vec3(0.94, 0.96, 1.0);
+  gAlb *= tone;
+  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 3.5, 0.9) * 0.6 + 0.18, 0.3, 0.9);
+  gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 7.7) - 0.5);
+  gNrm2 = gTriRG(uConcreteNormal, wps, gW, 3.5, 0.9) * 2.0 - 1.0;
+  gNStr = 0.3;
+  // Recessed joint grooves between slabs.
+  gAlb *= 1.0 - 0.45 * joint;
+  gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
 } else if (gKind >= 6) {
-  // Curbstone band (kind 6 runs along Z, 7 along X): slightly lighter
-  // granite-toned concrete at a fine repeat so the curb reads as its own
-  // element, with per-segment value shifts and joints every 1.8 m.
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * vec3(1.28, 1.30, 1.34);
+  // Curbstone band (kind 6 runs along Z, 7 along X): granite-toned concrete
+  // at a fine repeat so the curb reads as its own element, a touch lighter
+  // than the dark sidewalk, with per-segment shifts and joints every 1.8 m.
+  gAlb = gTriRGB(uConcreteMap, wp, gW, 1.2, 0.9) * vec3(0.92, 0.94, 0.98);
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 1.2, 0.9) * 0.55 + 0.18, 0.3, 0.9);
   gNrm2 = gTriRG(uConcreteNormal, wp, gW, 1.2, 0.9) * 2.0 - 1.0;
   gNStr = 0.3;
@@ -207,13 +231,19 @@ if (gKind == 0) {
   gAlb *= 1.0 - 0.5 * joint;
   gRgh = mix(gRgh, min(gRgh + 0.2, 1.0), joint);
 } else if (gKind == 2) {
-  // Plaza: large concrete slabs on the 4 m joint grid, a shade darker than
-  // sidewalks. (Photo pavers alias into pixel speckle at this camera.)
-  gAlb = gTriRGB(uConcreteMap, wp, gW, 4.2, 0.9) * 0.95;
-  gAlb *= 0.9 + 0.2 * gHash12(floor(wp.xz / 4.0) + 11.0);
-  gRgh = clamp(gTriR(uConcreteRough, wp, gW, 4.2, 0.9) * 0.6 + 0.12, 0.25, 0.85);
-  gNrm2 = gTriRG(uConcreteNormal, wp, gW, 4.2, 0.9) * 2.0 - 1.0;
-  gNStr = 0.25;
+  // Plaza: big dark stone slabs (8/4/2 m per zone) with per-slab texture
+  // offset and tone; darker and cooler than sidewalks like the reference.
+  float pitch; vec2 jit; float tone; float joint;
+  gSlabField(wp.xz + 37.0, 4.0, pitch, jit, tone, joint);
+  vec3 wps = wp + vec3(jit.x, 0.0, jit.y);
+  gAlb = gTriRGB(uConcreteMap, wps, gW, 4.2, 0.9) * 0.68 * vec3(0.92, 0.95, 1.0);
+  gAlb *= tone;
+  gRgh = clamp(gTriR(uConcreteRough, wps, gW, 4.2, 0.9) * 0.6 + 0.16, 0.3, 0.9);
+  gRgh += 0.2 * (gHash12(floor(wp.xz / pitch) + 9.1) - 0.5);
+  gNrm2 = gTriRG(uConcreteNormal, wps, gW, 4.2, 0.9) * 2.0 - 1.0;
+  gNStr = 0.3;
+  gAlb *= 1.0 - 0.45 * joint;
+  gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
 } else if (gKind == 3) {
   gAlb = gTriRGB(uConcreteMap, wp, gW, 3.0, 0.9) * 0.55;
   gRgh = clamp(gTriR(uConcreteRough, wp, gW, 3.0, 0.9) * 0.55 + 0.12, 0.2, 0.8);
@@ -232,20 +262,14 @@ if (gKind == 0) {
 // Large-scale mottle so big surfaces don't read flat in low sun.
 gAlb *= 0.85 + 0.35 * gFbm(wp.xz * 0.06 + 7.7);
 
-// Dirt blotches on walkable concrete (boot traffic, weathering).
+// Dirt blotches + broad weathering patches on walkable concrete: small-scale
+// boot-traffic grime plus large irregular darkened regions like the
+// reference plaza (water staining, sun-bleached vs shaded pours).
 if (gKind == 1 || gKind == 2 || gKind == 3) {
   float dirt = smoothstep(0.45, 0.75, gFbm(wp.xz * 0.22 + 61.3));
-  gAlb *= 1.0 - 0.3 * dirt;
-}
-
-// Sidewalk expansion joints on the 2 m tile grid; plaza slabs every 4 m.
-if (gUp > 0.5 && (gKind == 1 || gKind == 2)) {
-  float pitch = gKind == 1 ? 2.0 : 4.0;
-  vec2 cell = abs(fract(wp.xz / pitch) - 0.5) * 2.0;
-  float lineD = (1.0 - max(cell.x, cell.y)) * pitch * 0.5; // meters to joint
-  float joint = 1.0 - smoothstep(0.015, 0.05, lineD);
-  gAlb *= 1.0 - 0.5 * joint;
-  gRgh = mix(gRgh, min(gRgh + 0.25, 1.0), joint);
+  float wea = smoothstep(0.48, 0.85, gFbm(wp.xz * 0.045 + 151.0));
+  gAlb *= (1.0 - 0.3 * dirt) * (1.0 - 0.32 * wea);
+  gRgh = min(gRgh + 0.12 * wea, 1.0);
 }
 
 // Cracks: voronoi edges gated by a sparse density mask, denser near curbs.
@@ -325,12 +349,12 @@ if (gKind >= 6) {
   float topScuff = gW.y * 0.14 * smoothstep(0.4, 0.75, gFbm(wp.xz * 0.7 + 47.0));
   gAlb *= 1.0 - clamp(faceGrime + topScuff, 0.0, 0.7);
   gRgh = min(gRgh + 0.12 * gVert, 1.0);
-  // Chipped painted curb sections (fire lanes, loading zones), hashed per
-  // 16 m stretch of street; paint covers the whole curbstone and flakes
-  // off with fine noise.
+  // Chipped painted curb sections (mostly worn safety yellow, some fire-lane
+  // red), hashed per 16 m stretch; paint covers the whole curbstone and
+  // flakes off with fine noise.
   float sect = gHash12(vec2(floor(alongC / 16.0), 8.5));
-  if (sect < 0.2) {
-    vec3 paint = sect < 0.13 ? vec3(0.40, 0.07, 0.05) : vec3(0.55, 0.42, 0.08);
+  if (sect < 0.32) {
+    vec3 paint = sect < 0.07 ? vec3(0.40, 0.07, 0.05) : vec3(0.62, 0.47, 0.10);
     float chip = smoothstep(0.45, 0.68,
       gNoise(vec2(alongC * 7.0, wp.y * 30.0 + acrossC * 11.0)));
     float pMask = (1.0 - chip) * 0.85;

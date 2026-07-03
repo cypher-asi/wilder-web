@@ -4,11 +4,16 @@
 
 import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { game } from "../state/game";
 
-const CHEST_HEIGHT = 1.15;
+/** Center of mass used as the fallback / plane anchor, m above the feet. */
+const CHEST_HEIGHT = 1.0;
+/** Character silhouette half-extents the reticle is clamped within (m). */
+const BODY_HALF_WIDTH = 0.4;
+const BODY_FOOT = 0.25;
+const BODY_HEAD = 1.85;
 
 export function TargetReticle() {
   const group = useRef<THREE.Group>(null);
@@ -17,7 +22,14 @@ export function TargetReticle() {
   const [acquireKey, setAcquireKey] = useState(0);
   const lastTarget = useRef<number | null>(null);
 
-  useFrame(() => {
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const ndc = useMemo(() => new THREE.Vector2(), []);
+  const plane = useMemo(() => new THREE.Plane(), []);
+  const normal = useMemo(() => new THREE.Vector3(), []);
+  const anchor = useMemo(() => new THREE.Vector3(), []);
+  const hit = useMemo(() => new THREE.Vector3(), []);
+
+  useFrame(({ camera }) => {
     if (!group.current) return;
     const id = game.hoverTargetId;
     const target = id != null ? game.entities.get(id) : undefined;
@@ -36,7 +48,26 @@ export function TargetReticle() {
       lastTarget.current = id ?? null;
       setAcquireKey((k) => k + 1);
     }
-    group.current.position.set(target.x, target.y + CHEST_HEIGHT, target.z);
+
+    // Place the diamond where the cursor lands on the enemy: intersect the
+    // mouse ray with a camera-facing plane through the target, then clamp the
+    // point to the character's silhouette so it slides over the body/head
+    // instead of sitting at a fixed chest point.
+    anchor.set(target.x, target.y + CHEST_HEIGHT, target.z);
+    if (game.pointer.inside) {
+      camera.getWorldDirection(normal);
+      plane.setFromNormalAndCoplanarPoint(normal, anchor);
+      ndc.set(game.pointer.ndcX, game.pointer.ndcY);
+      raycaster.setFromCamera(ndc, camera);
+      if (raycaster.ray.intersectPlane(plane, hit)) {
+        const ox = THREE.MathUtils.clamp(hit.x - target.x, -BODY_HALF_WIDTH, BODY_HALF_WIDTH);
+        const oz = THREE.MathUtils.clamp(hit.z - target.z, -BODY_HALF_WIDTH, BODY_HALF_WIDTH);
+        const oy = THREE.MathUtils.clamp(hit.y - target.y, BODY_FOOT, BODY_HEAD);
+        group.current.position.set(target.x + ox, target.y + oy, target.z + oz);
+        return;
+      }
+    }
+    group.current.position.copy(anchor);
   });
 
   return (

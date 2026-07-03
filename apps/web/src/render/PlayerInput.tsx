@@ -17,6 +17,7 @@ import {
 import { playSfx } from "../assets/audio";
 import { GameConnection } from "../net/connection";
 import { AbilityKind } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { consumableHotbar, game, GameEntity, useGame } from "../state/game";
 import { cameraKick, cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
@@ -172,8 +173,16 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       pointer.current.x = (event.clientX / window.innerWidth) * 2 - 1;
       pointer.current.y = -(event.clientY / window.innerHeight) * 2 + 1;
       pointer.current.inside = true;
+      // Mirror the raw cursor so the on-target reticle can follow where the
+      // aim lands on the enemy silhouette (not a fixed chest point).
+      game.pointer.ndcX = pointer.current.x;
+      game.pointer.ndcY = pointer.current.y;
+      game.pointer.inside = true;
     };
-    const onPointerLeave = () => (pointer.current.inside = false);
+    const onPointerLeave = () => {
+      pointer.current.inside = false;
+      game.pointer.inside = false;
+    };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
       const now = performance.now();
@@ -280,6 +289,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   }
 
   useFrame((_, rawDt) => {
+    perf.begin("input");
     // Clamp dt: resuming from the paused map frameloop reports one huge delta,
     // which would otherwise burst-fire dozens of catch-up move ticks.
     const dt = Math.min(rawDt, 0.1);
@@ -298,6 +308,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     game.input.dz = liveDir ? liveDir[1] : 0;
     game.input.run = running.current;
     updateRendered(dt);
+    perf.end("input");
   });
 
   /**

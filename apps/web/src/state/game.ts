@@ -132,6 +132,8 @@ export const game = {
   moveMarker: null as { x: number; z: number; at: number } | null,
   /** Mouse aim: cursor projected onto the ground plane (twin-stick facing). */
   aim: { x: 0, z: 0, yaw: 0, active: false },
+  /** Raw cursor in normalized device coords (drives on-target reticle placement). */
+  pointer: { ndcX: 0, ndcY: 0, inside: false },
   /** Entity id of the enemy currently under the cursor (soft target lock). */
   hoverTargetId: null as number | null,
   /** Gun mounts (muzzle + recoil holder) keyed by character entity id. */
@@ -161,6 +163,7 @@ export const game = {
     this.nextSeq = 1;
     this.moveMarker = null;
     this.aim.active = false;
+    this.pointer.inside = false;
     this.hoverTargetId = null;
     this.gunMounts.clear();
     this.crouching = false;

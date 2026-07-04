@@ -35,6 +35,29 @@ import { C2S, decode, encode, S2C } from "./protocol";
 const recentLocalHits = new Map<number, number>();
 const KILL_CREDIT_MS = 2500;
 
+/**
+ * EconomyTxs batcher: the server pushes transactions up to every tick
+ * (20 Hz) during agent activity bursts, and each push used to rebuild the
+ * feed array and re-render every economy subscriber. Batch arrivals and
+ * flush to Zustand at most twice a second — the dashboard is a human-read
+ * ticker, not a frame-accurate display.
+ */
+const ECON_FLUSH_MS = 500;
+let econBatch: { txs: S2C_EconTxs["txs"]; stats: S2C_EconTxs["stats"] } | null = null;
+let econFlushTimer: number | null = null;
+type S2C_EconTxs = Extract<S2C, { t: "EconomyTxs" }>["d"];
+
+function flushEconomyBatch(): void {
+  econFlushTimer = null;
+  const batch = econBatch;
+  econBatch = null;
+  if (!batch) return;
+  const cur = useGame.getState().economy;
+  // Feed is newest-first; batch arrivals are oldest-first.
+  const feed = batch.txs.reverse().concat(cur?.feed ?? []).slice(0, 300);
+  useGame.getState().set({ economy: { stats: batch.stats, feed } });
+}
+
 /** Random uppercase hex string of `n` digits, for the fake STOP code. */
 function randHex(n: number): string {
   let out = "";
@@ -626,7 +649,11 @@ export class GameConnection {
         break;
       }
       case "MapIntel": {
-        ui.set({ mapIntel: msg.d.blips });
+        // Module cache, not Zustand: only the holo map's BlipLayer consumes
+        // blips, from useFrame, and a reactive set at the ~5 Hz stream rate
+        // re-rendered React for no reason.
+        game.mapIntel.blips = msg.d.blips;
+        game.mapIntel.version++;
         break;
       }
       case "LeaderboardState": {
@@ -649,9 +676,17 @@ export class GameConnection {
         break;
       }
       case "EconomyTxs": {
-        const cur = useGame.getState().economy;
-        const feed = [...msg.d.txs].reverse().concat(cur?.feed ?? []).slice(0, 300);
-        ui.set({ economy: { stats: msg.d.stats, feed } });
+        // Batched: heavy agent activity pushes txs at up to tick rate;
+        // Zustand only hears about them every ECON_FLUSH_MS.
+        if (econBatch) {
+          econBatch.txs.push(...msg.d.txs);
+          econBatch.stats = msg.d.stats;
+        } else {
+          econBatch = { txs: [...msg.d.txs], stats: msg.d.stats };
+        }
+        if (econFlushTimer === null) {
+          econFlushTimer = window.setTimeout(flushEconomyBatch, ECON_FLUSH_MS);
+        }
         break;
       }
       case "Error": {

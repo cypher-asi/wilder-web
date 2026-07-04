@@ -27,7 +27,14 @@ import {
 import { POI_STYLES } from "../game/poi";
 import { allRegions, REGION_SIZE } from "../game/territory";
 import { GameConnection } from "../net/connection";
-import { CHUNK_SIZE, DangerLevel, FactionId, FactionInfo, TILE_SIZE } from "../net/protocol";
+import {
+  AgentBlip,
+  CHUNK_SIZE,
+  DangerLevel,
+  FactionId,
+  FactionInfo,
+  TILE_SIZE,
+} from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
 
@@ -771,6 +778,9 @@ function factionCss(factions: FactionInfo[], id: FactionId): string {
   return `#${(f?.color ?? 0xffffff).toString(16).padStart(6, "0")}`;
 }
 
+/** Players on the intel map: bright cyan-white (bloomed past 1.0). */
+const PLAYER_BLIP_COLOR = new THREE.Color(0.7, 2.2, 2.6);
+
 /** One tracked actor between intel snapshots: interpolate from (sx,sz) at t0
  * toward the latest target (tx,tz) over `dur` ms so the blip glides instead of
  * teleporting once a second. */
@@ -789,18 +799,33 @@ interface BlipTrack {
 /** Whole-map actor blips from the MapIntel stream, as one point cloud.
  * Players read bright cyan-white, agents their faction color, and wild Wapes
  * their faction color dimmed. Positions are interpolated between the ~1 Hz
- * intel snapshots (matched by stable blip id) so the dots visibly move. */
+ * intel snapshots (matched by stable blip id) so the dots visibly move.
+ * Snapshots arrive through the `game.mapIntel` module cache (not Zustand):
+ * ingest happens inside useFrame when the version bumps, so the ~5 Hz
+ * stream never re-renders React. */
 function BlipLayer({ filters }: { filters: MapFilters }) {
-  const blips = useGame((s) => s.mapIntel);
   const factions = useGame((s) => s.factions);
 
   const tracks = useRef<Map<number, BlipTrack>>(new Map());
   const lastSnapshot = useRef(0);
-  // Read the latest filters/factions inside useFrame without re-subscribing.
+  const seenIntelVersion = useRef(-1);
+  // Read the latest filters inside useFrame without re-subscribing.
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
-  const factionsRef = useRef(factions);
-  factionsRef.current = factions;
+  // Per-kind blip colors, precomputed per faction registry (looking up and
+  // parsing a CSS hex per blip per frame burned CPU on big populations).
+  const palette = useMemo(() => {
+    const agents = new Map<FactionId, THREE.Color>();
+    const wild = new Map<FactionId, THREE.Color>();
+    for (const f of factions) {
+      const base = new THREE.Color(f.color);
+      agents.set(f.id, base.clone().multiplyScalar(1.4));
+      wild.set(f.id, base.clone().multiplyScalar(0.45));
+    }
+    return { agents, wild, fallback: new THREE.Color(0xffffff) };
+  }, [factions]);
+  const paletteRef = useRef(palette);
+  paletteRef.current = palette;
 
   // Persistent buffers, grown as the actor count climbs.
   const capacity = useRef(0);
@@ -828,9 +853,9 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
   // Seed a base buffer so the first render has a valid (empty) position attr.
   if (capacity.current === 0) ensureCapacity(64);
 
-  // Ingest each snapshot: retarget every tracked blip from where it currently
+  // Ingest a snapshot: retarget every tracked blip from where it currently
   // sits, spawn new ones, and drop any that vanished.
-  useEffect(() => {
+  const ingest = (blips: AgentBlip[]) => {
     const now = performance.now();
     const dur = lastSnapshot.current
       ? THREE.MathUtils.clamp(now - lastSnapshot.current, 100, 2000)
@@ -867,15 +892,18 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
     for (const [id, t] of m) {
       if (t.lastSeen !== now) m.delete(id);
     }
-  }, [blips]);
+  };
 
   useFrame(() => {
+    if (game.mapIntel.version !== seenIntelVersion.current) {
+      seenIntelVersion.current = game.mapIntel.version;
+      ingest(game.mapIntel.blips);
+    }
     const p = posAttr.current;
     const co = colAttr.current;
     const f = filtersRef.current;
-    const facs = factionsRef.current;
+    const pal = paletteRef.current;
     const now = performance.now();
-    const c = new THREE.Color();
     let i = 0;
     // Pre-size for the worst case (all tracks visible) so the buffer never
     // reallocates mid-write.
@@ -889,13 +917,10 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
       const x = t.sx + (t.tx - t.sx) * k;
       const z = t.sz + (t.tz - t.sz) * k;
       p!.setXYZ(i, x, 12, z);
-      if (t.kind === 0) {
-        c.setRGB(0.7, 2.2, 2.6); // players: bright cyan-white
-      } else {
-        c.set(factionCss(facs, t.faction));
-        if (t.kind === 2) c.multiplyScalar(0.45); // wild Wapes: dim
-        else c.multiplyScalar(1.4); // agents: bloom a touch
-      }
+      const c =
+        t.kind === 0
+          ? PLAYER_BLIP_COLOR
+          : ((t.kind === 2 ? pal.wild : pal.agents).get(t.faction) ?? pal.fallback);
       co!.setXYZ(i, c.r, c.g, c.b);
       i++;
     }

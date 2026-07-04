@@ -409,6 +409,32 @@ const entityGlowGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
 /** Keep the glow disc out of interact/aim raycasts (it sits in clickable groups). */
 const noRaycast = () => null;
 
+/** Glow materials are keyed by color+opacity and shared across every entity
+ * using that combination (there are ~a dozen distinct looks but hundreds of
+ * glow discs once loot/pickups/nodes stream in). Never disposed: the set of
+ * distinct keys is small and stable. */
+const glowMatCache = new Map<string, THREE.MeshBasicMaterial>();
+
+function glowMaterial(color: string, opacity: number): THREE.MeshBasicMaterial {
+  const key = `${color}|${opacity}`;
+  let mat = glowMatCache.get(key);
+  if (!mat) {
+    mat = new THREE.MeshBasicMaterial({
+      color,
+      map: entityGlowTexture,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    glowMatCache.set(key, mat);
+  }
+  return mat;
+}
+
 function GroundGlow({
   color,
   radius,
@@ -420,26 +446,10 @@ function GroundGlow({
   opacity?: number;
   y?: number;
 }) {
-  const material = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        color,
-        map: entityGlowTexture,
-        transparent: true,
-        opacity,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -2,
-      }),
-    [color, opacity],
-  );
-  useEffect(() => () => material.dispose(), [material]);
   return (
     <mesh
       geometry={entityGlowGeo}
-      material={material}
+      material={glowMaterial(color, opacity)}
       scale={[radius, 1, radius]}
       position={[0, y, 0]}
       raycast={noRaycast}
@@ -1272,6 +1282,36 @@ function ExtractionBeacon({ entity }: { entity: GameEntity }) {
   );
 }
 
+// Resource-node pieces shared across every node: one shard material per
+// resource color (5 total), one geometry per shard slot, one base. Inline
+// <meshStandardMaterial>/<octahedronGeometry> here created 6 materials and
+// 6 geometries per streamed node.
+const NODE_SHARDS: [number, number, number, number][] = [
+  [0, 0.4, 0, 0.5],
+  [0.35, 0.28, 0.15, 0.34],
+  [-0.3, 0.24, -0.2, 0.3],
+  [0.1, 0.2, -0.35, 0.26],
+  [-0.2, 0.3, 0.3, 0.28],
+];
+const nodeShardGeos = NODE_SHARDS.map(([, , , s]) => new THREE.OctahedronGeometry(s, 0));
+const nodeBaseGeo = new THREE.CylinderGeometry(0.7, 0.85, 0.12, 8);
+const nodeBaseMat = new THREE.MeshStandardMaterial({ color: "#20242e", roughness: 0.9 });
+const nodeShardMatCache = new Map<string, THREE.MeshStandardMaterial>();
+function nodeShardMaterial(color: string): THREE.MeshStandardMaterial {
+  let mat = nodeShardMatCache.get(color);
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 1.4,
+      roughness: 0.25,
+      metalness: 0.3,
+    });
+    nodeShardMatCache.set(color, mat);
+  }
+  return mat;
+}
+
 /** Crystal cluster resource node, colored by resource variant. */
 function ResourceNodeView({ entity }: { entity: GameEntity }) {
   const color = RESOURCE_COLORS[NODE_RESOURCES[entity.variant % 5]] ?? "#ffffff";
@@ -1281,13 +1321,6 @@ function ResourceNodeView({ entity }: { entity: GameEntity }) {
     const pulse = 0.9 + Math.sin(clock.elapsedTime * 2 + entity.id) * 0.25;
     glow.current.scale.setScalar(pulse * (0.6 + 0.4 * entity.healthPct));
   });
-  const shards: [number, number, number, number][] = [
-    [0, 0.4, 0, 0.5],
-    [0.35, 0.28, 0.15, 0.34],
-    [-0.3, 0.24, -0.2, 0.3],
-    [0.1, 0.2, -0.35, 0.26],
-    [-0.2, 0.3, 0.3, 0.28],
-  ];
   return (
     <group
       onClick={(e) => {
@@ -1298,23 +1331,18 @@ function ResourceNodeView({ entity }: { entity: GameEntity }) {
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
       <group ref={glow}>
-        {shards.map(([x, y, z, s], i) => (
-          <mesh key={i} position={[x, y, z]} rotation={[x, i * 1.3, z]} castShadow>
-            <octahedronGeometry args={[s, 0]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={1.4}
-              roughness={0.25}
-              metalness={0.3}
-            />
-          </mesh>
+        {NODE_SHARDS.map(([x, y, z], i) => (
+          <mesh
+            key={i}
+            position={[x, y, z]}
+            rotation={[x, i * 1.3, z]}
+            geometry={nodeShardGeos[i]}
+            material={nodeShardMaterial(color)}
+            castShadow
+          />
         ))}
       </group>
-      <mesh position={[0, 0.05, 0]}>
-        <cylinderGeometry args={[0.7, 0.85, 0.12, 8]} />
-        <meshStandardMaterial color="#20242e" roughness={0.9} />
-      </mesh>
+      <mesh position={[0, 0.05, 0]} geometry={nodeBaseGeo} material={nodeBaseMat} />
       <GroundGlow color={color} radius={2.4} y={0.13} />
     </group>
   );

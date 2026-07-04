@@ -192,6 +192,13 @@ export const game = {
   gun: { drawn: false, readyAt: 0, lastShotAt: 0, shotSeq: 0 },
   /** Pending combat FX events (drained each frame by CombatFx). */
   fx: [] as CombatFxEvent[],
+  /**
+   * Latest whole-map intel blips (~5 Hz while the map is open). Module cache
+   * rather than Zustand: the only consumer (the holo map's BlipLayer) reads
+   * it from useFrame, and a reactive set at stream rate re-rendered React
+   * five times a second for data no component tree depends on.
+   */
+  mapIntel: { blips: [] as AgentBlip[], version: 0 },
   /** Active connection sender (set by GameConnection.connect). */
   send: null as ((msg: import("../net/protocol").C2S) => void) | null,
 
@@ -216,6 +223,8 @@ export const game = {
     this.rollReadyAt = 0;
     this.gun = { drawn: false, readyAt: 0, lastShotAt: 0, shotSeq: 0 };
     this.fx = [];
+    this.mapIntel.blips = [];
+    this.mapIntel.version++;
     // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },
 };
@@ -452,8 +461,6 @@ interface UiState {
   factions: FactionInfo[];
   /** Named neighborhoods with danger level + home faction (Phase 2 fills). */
   districts: DistrictInfo[];
-  /** Whole-map actor blips from the MapIntel subscription (Phase 5 streams). */
-  mapIntel: AgentBlip[];
   /** Latest leaderboard snapshot (Phase 4 emits). */
   leaderboard: LeaderboardData | null;
   /** Latest vendor snapshot (offers + wallet) from the server. */
@@ -563,7 +570,6 @@ export const useGame: import("zustand").UseBoundStore<
   zones: [],
   factions: [],
   districts: [],
-  mapIntel: [],
   leaderboard: null,
   vendor: null,
   nearVendor: null,

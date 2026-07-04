@@ -53,8 +53,9 @@ pub const GATHER_PULL_SECONDS: f32 = 4.0;
 /// A* is only requested for targets within this range; farther destinations
 /// use straight-line steering (hot: with collision slide, cold: unimpeded).
 pub const PATH_RANGE: f32 = 150.0;
-/// Attackers stay "retaliation-flagged" for their victims this long.
-pub const RETALIATION_SECONDS: f32 = 10.0;
+/// Post-respawn grace: a just-respawned actor neither takes nor deals damage
+/// for this long, so nobody gets farmed on their spawn spot.
+pub const SPAWN_PROTECT_SECONDS: f32 = 5.0;
 /// Health regained per second while resting in a sanctuary.
 pub const SANCTUARY_HEAL_RATE: f32 = 6.0;
 /// Seconds after a wealth-retreat before wealth triggers another one.
@@ -111,6 +112,18 @@ pub const ACTIVITIES: [Activity; 6] = [
     Activity::Capture,
     Activity::Haul,
 ];
+
+/// Human label for an activity class (trait rows in `AgentDetail`).
+pub fn activity_name(a: Activity) -> &'static str {
+    match a {
+        Activity::Gather => "Gather",
+        Activity::Trade => "Trade",
+        Activity::Craft => "Craft",
+        Activity::Fight => "Fight",
+        Activity::Capture => "Capture",
+        Activity::Haul => "Haul",
+    }
+}
 
 impl Activity {
     pub fn index(self) -> usize {
@@ -241,6 +254,24 @@ impl Traits {
         }
         t
     }
+
+    /// Priors for seeded Wapes: mostly scav-like packs (gather + fight +
+    /// loot-haul lean), with a raider-like minority (fight + haul heavy)
+    /// that hits harder and hauls the spoils. Experience still reshapes
+    /// them like any other agent.
+    pub fn wape_seeded<R: rand::Rng>(rng: &mut R) -> Self {
+        let mut t = Traits::default();
+        let raider = rng.random_bool(0.35);
+        t.payoff[Activity::Fight.index()] =
+            if raider { rng.random_range(25.0..45.0) } else { rng.random_range(10.0..22.0) };
+        t.payoff[Activity::Gather.index()] =
+            if raider { rng.random_range(0.0..8.0) } else { rng.random_range(14.0..30.0) };
+        t.payoff[Activity::Haul.index()] = rng.random_range(10.0..24.0);
+        t.payoff[Activity::Capture.index()] = rng.random_range(0.0..10.0);
+        t.payoff[Activity::Trade.index()] = rng.random_range(0.0..5.0);
+        t.payoff[Activity::Craft.index()] = rng.random_range(0.0..5.0);
+        t
+    }
 }
 
 /// Activity class a goal's outcome (or death during it) attributes to.
@@ -256,6 +287,29 @@ pub fn activity_of(goal: Goal) -> Activity {
         Goal::Sell { .. } | Goal::Loot { .. } | Goal::Bank { .. } | Goal::Extract { .. } => {
             Activity::Haul
         }
+    }
+}
+
+/// Short human label of a goal for roster/feed UI ("Gathering",
+/// "Selling", ...). Wire text for `AgentSummary::activity`.
+pub fn goal_activity_label(goal: Goal) -> &'static str {
+    match goal {
+        Goal::Idle => "Idle",
+        Goal::Gather { .. } => "Gathering",
+        Goal::Sell { .. } => "Selling",
+        Goal::Buy { .. } | Goal::BuyMarket { .. } => "Buying",
+        Goal::Trade { .. } => "Trading",
+        Goal::Craft { .. } => "Crafting",
+        Goal::Research { .. } => "Researching",
+        Goal::Collect { .. } => "Collecting",
+        Goal::Patrol { .. } => "Patrolling",
+        Goal::Capture { .. } => "Capturing",
+        Goal::Defend { .. } => "Defending",
+        Goal::Hunt { .. } => "Fighting",
+        Goal::Retreat { .. } => "Retreating",
+        Goal::Loot { .. } => "Looting",
+        Goal::Bank { .. } => "Banking",
+        Goal::Extract { .. } => "Storing",
     }
 }
 
@@ -390,19 +444,28 @@ pub struct AgentSave {
     /// queued and hasn't collected yet.
     #[serde(default)]
     pub pending_jobs: Vec<(EntityId, u64)>,
+    /// Character that hired this agent, if any. Like traits and the banked
+    /// purse, ownership survives death/respawn (older saves default to
+    /// unowned).
+    #[serde(default)]
+    pub owner: Option<CharacterId>,
+    /// Total MILD paid to the owner via the bank-deposit share.
+    #[serde(default)]
+    pub lifetime_owner_earnings: u64,
     pub position: Vec3,
     pub health: f32,
     pub max_health: f32,
 }
 
 /// Mint a fresh agent identity: uuid + a feed-friendly display name like
-/// "REBEL-3F2A" / "FORUM-9C01" (same pattern as `npc::mint_agent_identity`).
+/// "REBEL-3F2A" / "FORUM-9C01" / "WAPE-77B3".
 pub fn mint_agent_name(faction: FactionId) -> (AgentId, String) {
     let id = uuid::Uuid::new_v4();
     let short = id.simple().to_string()[..4].to_uppercase();
     let prefix = match faction {
         FACTION_REBELS => "REBEL",
         FACTION_FORUM => "FORUM",
+        FACTION_WAPES => "WAPE",
         _ => "AGENT",
     };
     (id, format!("{prefix}-{short}"))
@@ -412,7 +475,12 @@ pub fn mint_agent_name(faction: FactionId) -> (AgentId, String) {
 pub fn guild_for(faction: FactionId, home_district: usize) -> String {
     const REBEL_GUILDS: &[&str] = &["Dead Signal", "Static Choir", "Neon Fangs"];
     const FORUM_GUILDS: &[&str] = &["The Moderators", "Silent Sysops", "Archive Wardens"];
-    let table = if faction == FACTION_FORUM { FORUM_GUILDS } else { REBEL_GUILDS };
+    const WAPE_PACKS: &[&str] = &["Rustmaw Pack", "Glasstooth Pack", "Ashheap Pack"];
+    let table = match faction {
+        FACTION_FORUM => FORUM_GUILDS,
+        FACTION_WAPES => WAPE_PACKS,
+        _ => REBEL_GUILDS,
+    };
     table[home_district % table.len()].to_string()
 }
 
@@ -513,6 +581,11 @@ pub struct FactionAgent {
     /// (building, job id) of queued production batches awaiting a Collect.
     /// Cleared on death (the dead identity's jobs and buffers are purged).
     pub pending_jobs: Vec<(EntityId, u64)>,
+    /// Character that hired this agent, if any. Survives death/respawn
+    /// (the fresh identity stays on the owner's roster).
+    pub owner: Option<CharacterId>,
+    /// Total MILD paid to the owner via the bank-deposit share.
+    pub lifetime_owner_earnings: u64,
     pub position: Vec3,
     pub yaw: f32,
     pub health: f32,
@@ -537,6 +610,9 @@ pub struct FactionAgent {
     pub attack_cooldown: f32,
     /// Suppresses wealth-triggered retreats right after one completed.
     pub retreat_cooldown: f32,
+    /// Seconds of post-respawn invulnerability left (no damage taken or
+    /// dealt while > 0). Runtime only, never persisted.
+    pub spawn_protection: f32,
     pub anim: AnimState,
     /// Seconds left holding the Attack pose after a swing. A single-tick
     /// (50 ms) Attack blip would be dropped between replication snapshots,
@@ -736,6 +812,8 @@ impl FactionAgent {
             blueprints: self.blueprints.iter().cloned().collect(),
             stash: self.stash.clone(),
             pending_jobs: self.pending_jobs.clone(),
+            owner: self.owner,
+            lifetime_owner_earnings: self.lifetime_owner_earnings,
             position: self.position,
             health: self.health,
             max_health: self.max_health,
@@ -773,6 +851,8 @@ impl FactionAgent {
                 stash
             },
             pending_jobs: save.pending_jobs,
+            owner: save.owner,
+            lifetime_owner_earnings: save.lifetime_owner_earnings,
             position: save.position,
             yaw: 0.0,
             health: save.health.max(1.0),
@@ -788,6 +868,7 @@ impl FactionAgent {
             decision_queued: false,
             attack_cooldown: 0.0,
             retreat_cooldown: 0.0,
+            spawn_protection: 0.0,
             anim: AnimState::Idle,
             anim_hold: 0.0,
             run_hold: 0.0,
@@ -947,6 +1028,7 @@ impl FactionAgent {
         self.anim = AnimState::Idle;
         self.attack_cooldown = (self.attack_cooldown - dt).max(0.0);
         self.retreat_cooldown = (self.retreat_cooldown - dt).max(0.0);
+        self.spawn_protection = (self.spawn_protection - dt).max(0.0);
         self.anim_hold = (self.anim_hold - dt).max(0.0);
         self.run_hold = (self.run_hold - dt).max(0.0);
         self.decision_timer -= dt;
@@ -1133,6 +1215,8 @@ mod tests {
                 blueprints: Vec::new(),
                 stash: Vec::new(),
                 pending_jobs: Vec::new(),
+                owner: None,
+                lifetime_owner_earnings: 0,
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,
                 max_health: 100.0,
@@ -1208,6 +1292,8 @@ mod tests {
         a.blueprints.insert("polymer".to_string());
         inv::add_items(&mut a.stash, ItemKind::SteelPlate, 4);
         a.pending_jobs.push((42, 7));
+        a.owner = Some(uuid::Uuid::new_v4());
+        a.lifetime_owner_earnings = 1234;
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
         let b = FactionAgent::from_save(99, back);
@@ -1224,6 +1310,8 @@ mod tests {
         assert_eq!(b.stash_count(ItemKind::SteelPlate), 4, "stashed goods must survive");
         assert_eq!(b.stash.len(), STASH_SLOTS);
         assert_eq!(b.pending_jobs, vec![(42, 7)], "queued work notes must survive");
+        assert_eq!(b.owner, a.owner, "ownership must survive the save");
+        assert_eq!(b.lifetime_owner_earnings, 1234);
         assert_eq!(b.entity, 99);
     }
 

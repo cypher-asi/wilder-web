@@ -95,7 +95,7 @@ fn mock_hash(seq: u64) -> String {
     format!("0x{z:016x}")
 }
 
-fn unix_ms() -> u64 {
+pub(crate) fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

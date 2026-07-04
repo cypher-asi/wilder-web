@@ -79,6 +79,8 @@ export interface CharacterSummary {
   name: string;
   appearance: Appearance;
   level: number;
+  /** Chosen faction (optional for older gateways; treat missing as Rebels). */
+  faction?: FactionId;
 }
 
 export interface Character {
@@ -294,6 +296,11 @@ export type C2S =
   | Tagged<"EconomySub", { on: boolean }>
   | Tagged<"ItemMarketSub", { kind: ItemKind | null }>
   | Tagged<"MapIntelSub", { on: boolean }>
+  | Tagged<"HireAgent", { agent_id: string }>
+  | Tagged<"DismissAgent", { agent_id: string }>
+  | TaggedUnit<"AgentHireList">
+  | Tagged<"AgentSub", { on: boolean }>
+  | Tagged<"AgentDetailSub", { agent_id: string | null }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -459,7 +466,9 @@ export type TxKind =
   | "CraftConsume"
   | "CraftProduce"
   | "Fee"
-  | "Extract";
+  | "Extract"
+  | "AgentHire"
+  | "OwnerShare";
 
 /** A ledger entry. hash/block are mock values until the chain is real. */
 export interface EconTx {
@@ -557,6 +566,72 @@ export interface EconomyStats {
   trades: number;
 }
 
+// ---------------------------------------------------------------------------
+// Owned agents (hire/dismiss + roster/detail subscriptions)
+// ---------------------------------------------------------------------------
+
+/**
+ * One agent's roster line (mirror of wilder-protocol AgentSummary).
+ * hire_cost is only filled on AgentHireOffers candidates.
+ */
+export interface AgentSummary {
+  agent_id: string;
+  name: string;
+  faction: FactionId;
+  guild: string;
+  /** Label of the dominant learned activity ("Trader", "Scavenger", ...). */
+  archetype: string;
+  /** Short human label of the current goal ("Gathering", "Banking", ...). */
+  activity: string;
+  health: number;
+  max_health: number;
+  x: number;
+  z: number;
+  carried_wild: number;
+  banked_wild: number;
+  /** Total MILD this agent has paid its owner (15% bank-deposit share). */
+  lifetime_owner_earnings: number;
+  /** MILD to hire this agent (only set on AgentHireOffers candidates). */
+  hire_cost?: number | null;
+}
+
+/** Per-identity competition counters surfaced in AgentDetail. */
+export interface AgentStats {
+  kills: number;
+  deaths: number;
+  resources: number;
+  trades: number;
+  crafted: number;
+}
+
+/** One line of an owned agent's live activity log. */
+export interface AgentLogEntry {
+  /** Unix milliseconds when the event happened. */
+  at_ms: number;
+  text: string;
+}
+
+/** Full drill-in view of one owned agent (AgentDetailSub). */
+export interface AgentDetail {
+  summary: AgentSummary;
+  /** Fuller description of the current goal, including its target. */
+  goal: string;
+  /** Learned payoff EMA per activity, as [activity name, MILD/min] pairs. */
+  traits: [string, number][];
+  stats: AgentStats;
+  inventory: Inventory;
+  /** Known blueprint recipe ids, sorted. */
+  blueprints: string[];
+  /** Carried balances indexed [MILD, Shards, Energy]. */
+  carried: [number, number, number];
+  /** Banked balances indexed [MILD, Shards, Energy]. */
+  banked: [number, number, number];
+  /** Recent activity log, oldest first (ring of the last ~64 events). */
+  activity_log: AgentLogEntry[];
+  /** Recent ledger transactions touching this agent, newest first. */
+  recent_txs: EconTx[];
+}
+
 export type CombatEvent =
   | Tagged<
       "Hit",
@@ -652,6 +727,11 @@ export type S2C =
   | Tagged<"ItemMarketState", ItemMarketState>
   | Tagged<"MapIntel", { blips: AgentBlip[] }>
   | Tagged<"MapCensus", { blips: AgentBlip[] }>
+  | Tagged<"AgentDots", { blips: AgentBlip[] }>
+  | Tagged<"AgentRoster", { agents: AgentSummary[] }>
+  | Tagged<"AgentDetail", AgentDetail>
+  | Tagged<"AgentHireOffers", { offers: AgentSummary[] }>
+  | Tagged<"AgentResult", { ok: boolean; error: string | null }>
   | Tagged<"LeaderboardState", LeaderboardData>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>
@@ -767,6 +847,24 @@ export function decodeBinary(buf: ArrayBuffer): S2C | null {
       o += CENSUS_BLIP_BYTES;
     }
     return { t: "MapCensus", d: { blips } };
+  }
+  if (tag === 4) {
+    // AgentDots: same compact static layout as MapCensus (no id/count).
+    const count = view.getUint32(1, true);
+    const blips: AgentBlip[] = new Array(count);
+    let o = 5;
+    for (let i = 0; i < count; i++) {
+      blips[i] = {
+        id: 0,
+        faction: view.getUint8(o),
+        kind: view.getUint8(o + 1),
+        x: view.getInt16(o + 2, true),
+        z: view.getInt16(o + 4, true),
+        count: 1,
+      };
+      o += CENSUS_BLIP_BYTES;
+    }
+    return { t: "AgentDots", d: { blips } };
   }
   return null;
 }

@@ -119,6 +119,14 @@ pub struct CharacterSummary {
     pub name: String,
     pub appearance: Appearance,
     pub level: u32,
+    /// Chosen faction; defaults to Rebels for summaries minted before the
+    /// faction picker existed.
+    #[serde(default = "default_player_faction")]
+    pub faction: FactionId,
+}
+
+fn default_player_faction() -> FactionId {
+    FACTION_REBELS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +160,7 @@ impl Character {
             name: self.name.clone(),
             appearance: self.appearance.clone(),
             level: self.level,
+            faction: self.faction,
         }
     }
 }
@@ -605,6 +614,10 @@ pub enum TxKind {
     Fee,
     /// Extraction: backpack banked into the stash (self transfer).
     Extract,
+    /// A player hired an agent (the hire fee is burned).
+    AgentHire,
+    /// Owner's cut of an owned agent's bank deposit (agent -> player).
+    OwnerShare,
 }
 
 /// A single ledger entry. `hash` and `block` are mock values for now (derived

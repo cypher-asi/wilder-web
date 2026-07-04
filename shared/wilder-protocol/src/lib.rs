@@ -64,6 +64,23 @@ pub enum C2S {
     /// Subscribe/unsubscribe to whole-map agent blips (map filters). While
     /// on, the server streams `MapIntel` at ~1 Hz.
     MapIntelSub { on: bool },
+    /// Hire an unowned, living, same-faction agent. The first hire per
+    /// character is free (starter grant); later hires cost MILD (see
+    /// `AgentSummary::hire_cost`). Answered with `AgentResult`.
+    HireAgent { agent_id: AgentId },
+    /// Release an owned agent back to its faction. No refund.
+    DismissAgent { agent_id: AgentId },
+    /// Request hire candidates: answered with `AgentHireOffers` (unowned,
+    /// living, same-faction agents, cheapest first).
+    AgentHireList,
+    /// Subscribe/unsubscribe to the roster of agents this character OWNS.
+    /// Subscribing answers immediately with `AgentRoster`, then re-sends
+    /// every ~2 s (and on hire/dismiss) while on.
+    AgentSub { on: bool },
+    /// Watch one OWNED agent's full detail. `Some` answers immediately with
+    /// `AgentDetail` and re-pushes ~1 Hz; `None` unsubscribes. Watching an
+    /// agent you don't own answers with an `AgentResult` error.
+    AgentDetailSub { agent_id: Option<AgentId> },
     Chat { text: String },
     Pong { nonce: u32 },
 }
@@ -241,9 +258,26 @@ pub enum S2C {
     /// One-time full census of every living faction agent, sent when the map
     /// opens. Static (no interpolation), so the wire form drops `id`/`count`.
     MapCensus { blips: Vec<AgentBlip> },
+    /// Always-on ~5 Hz feed of faction agents in the ring just beyond a
+    /// player's replicated entity view, out to the dot-render radius. Drives
+    /// the live-map "glowing dot" LOD tier (the third fidelity level below
+    /// full rigs and capsule impostors). Static wire form (no id/count); the
+    /// client re-places these each update rather than interpolating.
+    AgentDots { blips: Vec<AgentBlip> },
     /// Leaderboards + faction/guild standings, refreshed for economy
     /// dashboard subscribers.
     LeaderboardState(LeaderboardData),
+    /// The receiving character's OWNED agents (subscribe via `AgentSub`;
+    /// re-sent every ~2 s and on hire/dismiss while subscribed).
+    AgentRoster { agents: Vec<AgentSummary> },
+    /// Full detail of one owned agent (subscribe via `AgentDetailSub`,
+    /// re-pushed ~1 Hz while watched).
+    AgentDetail(AgentDetail),
+    /// Hire candidates (unowned, living, same-faction), cheapest first,
+    /// with `hire_cost` filled on every summary.
+    AgentHireOffers { offers: Vec<AgentSummary> },
+    /// Outcome of a hire/dismiss/agent-subscription request.
+    AgentResult { ok: bool, error: Option<String> },
     Chat { from: String, text: String },
     Ping { nonce: u32 },
     Error { message: String },
@@ -370,6 +404,78 @@ fn is_one_u16(v: &u16) -> bool {
     *v == 1
 }
 
+/// One agent's roster line: identity, learned specialization, current
+/// activity, vitals, position and wealth. `hire_cost` is only filled on
+/// `AgentHireOffers` candidates (None on owned-roster entries).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub agent_id: AgentId,
+    pub name: String,
+    pub faction: FactionId,
+    pub guild: String,
+    /// Label of the dominant learned activity ("Trader", "Scavenger", ...).
+    pub archetype: String,
+    /// Short human label of the current goal ("Gathering", "Banking", ...).
+    pub activity: String,
+    pub health: f32,
+    pub max_health: f32,
+    pub x: f32,
+    pub z: f32,
+    /// At-risk carried MILD.
+    pub carried_wild: u32,
+    /// Death-safe banked MILD.
+    pub banked_wild: u32,
+    /// Total MILD this agent has paid its owner (15% bank-deposit share).
+    #[serde(default)]
+    pub lifetime_owner_earnings: u64,
+    /// MILD to hire this agent (only set on `AgentHireOffers` candidates).
+    #[serde(default)]
+    pub hire_cost: Option<u32>,
+}
+
+/// Per-identity competition counters surfaced in `AgentDetail`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct AgentStats {
+    pub kills: u64,
+    pub deaths: u64,
+    pub resources: u64,
+    pub trades: u64,
+    pub crafted: u64,
+}
+
+/// One line of an owned agent's live activity log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLogEntry {
+    /// Unix milliseconds when the event happened.
+    pub at_ms: u64,
+    pub text: String,
+}
+
+/// Full drill-in view of one owned agent (`AgentDetailSub`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDetail {
+    pub summary: AgentSummary,
+    /// Fuller description of the current goal, including its target
+    /// (e.g. "Gathering resources (3 pulls left)", "Selling at Bodega").
+    pub goal: String,
+    /// Learned payoff EMA per activity, as (activity name, MILD/min) pairs
+    /// in canonical activity order.
+    pub traits: Vec<(String, f32)>,
+    pub stats: AgentStats,
+    /// Backpack + equip slots (same wire type `WorldJoined` uses).
+    pub inventory: Inventory,
+    /// Known blueprint recipe ids, sorted.
+    pub blueprints: Vec<String>,
+    /// Carried balances indexed [MILD, Shards, Energy].
+    pub carried: [u32; 3],
+    /// Banked balances indexed [MILD, Shards, Energy].
+    pub banked: [u32; 3],
+    /// Recent activity log, oldest first (ring of the last ~64 events).
+    pub activity_log: Vec<AgentLogEntry>,
+    /// Recent ledger transactions touching this agent, newest first.
+    pub recent_txs: Vec<EconTx>,
+}
+
 /// Leaderboards payload: per-category top-N boards plus rolled-up faction and
 /// guild standings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +582,7 @@ pub fn decode<'a, T: Deserialize<'a>>(text: &'a str) -> Result<T, serde_json::Er
 const BIN_SNAPSHOT: u8 = 1;
 const BIN_MAP_INTEL: u8 = 2;
 const BIN_MAP_CENSUS: u8 = 3;
+const BIN_AGENT_DOTS: u8 = 4;
 
 /// Bytes per entity in a binary Snapshot: u64 id, i32 cm x/y/z, i16 centirad
 /// yaw, u8 anim, u8 health, u8 shield.
@@ -562,6 +669,19 @@ pub fn encode_binary(msg: &S2C) -> Option<Vec<u8>> {
         S2C::MapCensus { blips } => {
             let mut buf = Vec::with_capacity(1 + 4 + blips.len() * CENSUS_BLIP_BYTES);
             buf.push(BIN_MAP_CENSUS);
+            buf.extend_from_slice(&(blips.len() as u32).to_le_bytes());
+            for b in blips {
+                buf.push(b.faction);
+                buf.push(b.kind);
+                buf.extend_from_slice(&b.x.to_le_bytes());
+                buf.extend_from_slice(&b.z.to_le_bytes());
+            }
+            Some(buf)
+        }
+        // Same compact static layout as MapCensus (no id/count on the wire).
+        S2C::AgentDots { blips } => {
+            let mut buf = Vec::with_capacity(1 + 4 + blips.len() * CENSUS_BLIP_BYTES);
+            buf.push(BIN_AGENT_DOTS);
             buf.extend_from_slice(&(blips.len() as u32).to_le_bytes());
             for b in blips {
                 buf.push(b.faction);
@@ -659,6 +779,29 @@ pub fn decode_binary(buf: &[u8]) -> Option<S2C> {
                 });
             }
             Some(S2C::MapCensus { blips })
+        }
+        BIN_AGENT_DOTS => {
+            if rest.len() < 4 {
+                return None;
+            }
+            let count = rd_u32(rest, 0) as usize;
+            let body = &rest[4..];
+            if body.len() != count * CENSUS_BLIP_BYTES {
+                return None;
+            }
+            let mut blips = Vec::with_capacity(count);
+            for i in 0..count {
+                let o = i * CENSUS_BLIP_BYTES;
+                blips.push(AgentBlip {
+                    id: 0,
+                    faction: body[o],
+                    kind: body[o + 1],
+                    x: rd_i16(body, o + 2),
+                    z: rd_i16(body, o + 4),
+                    count: 1,
+                });
+            }
+            Some(S2C::AgentDots { blips })
         }
         _ => None,
     }
@@ -787,6 +930,31 @@ mod tests {
                 assert_eq!(blips[1].faction, FACTION_FORUM);
                 assert_eq!(blips[1].x, -32000);
                 assert_eq!(blips[1].z, 14000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn binary_agent_dots_roundtrip() {
+        let dots = S2C::AgentDots {
+            blips: vec![
+                AgentBlip { id: 0, faction: FACTION_REBELS, kind: 1, x: 300, z: -280, count: 1 },
+                AgentBlip { id: 0, faction: FACTION_WAPES, kind: 1, x: -1200, z: 640, count: 1 },
+            ],
+        };
+        let buf = encode_binary(&dots).expect("agent dots is a hot message");
+        // Compact 6 bytes per blip, matching MapCensus.
+        assert_eq!(buf.len(), 1 + 4 + 2 * CENSUS_BLIP_BYTES);
+        match decode_binary(&buf).unwrap() {
+            S2C::AgentDots { blips } => {
+                assert_eq!(blips.len(), 2);
+                assert_eq!(blips[0].faction, FACTION_REBELS);
+                assert_eq!(blips[0].x, 300);
+                assert_eq!(blips[0].z, -280);
+                assert_eq!(blips[1].faction, FACTION_WAPES);
+                assert_eq!(blips[1].x, -1200);
+                assert_eq!(blips[1].z, 640);
             }
             _ => panic!("wrong variant"),
         }

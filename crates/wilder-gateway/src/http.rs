@@ -65,7 +65,8 @@ pub async fn dev_login(State(state): State<SharedState>) -> ApiResult<AuthRespon
         .map(|c| !c.is_empty())
         .unwrap_or(false);
     if !has_chars {
-        let character = new_character(account.id, "Dev".into(), Appearance::default());
+        let character =
+            new_character(account.id, "Dev".into(), Appearance::default(), FACTION_REBELS);
         let _ = state.store.create_character(&character);
         let _ = state.store.save_inventory(character.id, &starter_inventory());
     }
@@ -96,6 +97,9 @@ pub struct CreateCharacter {
     pub name: String,
     #[serde(default)]
     pub appearance: Option<Appearance>,
+    /// Chosen faction id (1..=3); older clients omit it and get Rebels.
+    #[serde(default)]
+    pub faction: Option<FactionId>,
 }
 
 pub async fn create_character(
@@ -119,7 +123,12 @@ pub async fn create_character(
     if existing.len() >= 5 {
         return err(StatusCode::BAD_REQUEST, "character limit reached");
     }
-    let character = new_character(account, name.to_string(), req.appearance.unwrap_or_default());
+    let faction = req.faction.unwrap_or(FACTION_REBELS);
+    if !(1..=3).contains(&faction) {
+        return err(StatusCode::BAD_REQUEST, "unknown faction");
+    }
+    let character =
+        new_character(account, name.to_string(), req.appearance.unwrap_or_default(), faction);
     match state.store.create_character(&character) {
         Ok(()) => {
             let _ = state
@@ -141,7 +150,12 @@ fn starter_inventory() -> Inventory {
     inv
 }
 
-fn new_character(account: AccountId, name: String, appearance: Appearance) -> Character {
+fn new_character(
+    account: AccountId,
+    name: String,
+    appearance: Appearance,
+    faction: FactionId,
+) -> Character {
     Character {
         id: uuid::Uuid::new_v4(),
         account_id: account,
@@ -155,7 +169,6 @@ fn new_character(account: AccountId, name: String, appearance: Appearance) -> Ch
         max_health: 100.0,
         shield: 0.0,
         max_shield: 0.0,
-        // All players fight for the Rebels for now.
-        faction: FACTION_REBELS,
+        faction,
     }
 }

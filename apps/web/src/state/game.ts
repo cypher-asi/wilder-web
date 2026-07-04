@@ -12,6 +12,8 @@ import { VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import {
   AbilityKind,
   AgentBlip,
+  AgentDetail,
+  AgentSummary,
   AnimState,
   DistrictInfo,
   EconTx,
@@ -214,6 +216,16 @@ export const game = {
     /** One-time full census of faction agents (static dots), set on map open. */
     census: [] as AgentBlip[],
     censusVersion: 0,
+  },
+  /**
+   * Always-on ~5 Hz feed of faction agents just beyond the replicated entity
+   * view, driving the live-map "glowing dot" LOD tier (below full rigs and
+   * capsule impostors). Module cache like `mapIntel`: consumed only by the
+   * `AgentDots` renderer from useFrame, so the stream never re-renders React.
+   */
+  agentDots: {
+    blips: [] as AgentBlip[],
+    version: 0,
   },
   /** Active connection sender (set by GameConnection.connect). */
   send: null as ((msg: import("../net/protocol").C2S) => void) | null,
@@ -505,6 +517,14 @@ interface UiState {
   economy: { stats: EconomyStats; feed: EconTx[] } | null;
   /** Watched item's market detail (economy dashboard drill-in). */
   itemMarket: ItemMarketState | null;
+  /** Owned-agent roster (AgentSub stream; re-sent ~2 s while subscribed). */
+  agentRoster: AgentSummary[] | null;
+  /** Watched owned agent's full detail (AgentDetailSub stream, ~1 Hz). */
+  agentDetail: AgentDetail | null;
+  /** Hire candidates (AgentHireList response), cheapest first. */
+  agentHireOffers: AgentSummary[] | null;
+  /** Last hire/dismiss/detail-sub result (at = receive time, ms). */
+  agentResult: { ok: boolean; error: string | null; at: number } | null;
   /** Central full-screen game menu (Escape). Hosts every full-screen section
    * (map, leaderboard, economy, inventory, settings, exit) as a tab. */
   menuOpen: boolean;
@@ -625,6 +645,10 @@ export const useGame: import("zustand").UseBoundStore<
   vendorOpen: false,
   economy: null,
   itemMarket: null,
+  agentRoster: null,
+  agentDetail: null,
+  agentHireOffers: null,
+  agentResult: null,
   menuOpen: false,
   menuTab: "map",
   mobileTab: "agents",

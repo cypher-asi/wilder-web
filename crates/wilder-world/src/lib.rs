@@ -11,10 +11,9 @@ pub mod factions;
 pub mod interiors;
 mod ledger;
 pub mod market_stats;
-mod npc;
 pub mod stats;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,21 +34,22 @@ use wilder_physics::{
     PLAYER_RADIUS, ROLL_COOLDOWN, ROLL_DURATION, ROLL_SPEED, RUN_SPEED,
 };
 use wilder_protocol::*;
-use wilder_replication::{diff_view, view_set};
+use wilder_replication::{diff_view, view_set, VIEW_RADIUS};
 use wilder_terrain::TerrainGenerator;
 use wilder_types::*;
 
 pub use chunks::ChunkCache;
 use agents::{
-    activity_of, base_value, guild_for, mint_agent_name, Activity, AgentEvent, AgentSave,
-    FactionAgent, Goal, TargetInfo, Tier, Traits, AGENT_RESPAWN_SECONDS, COLD_BUCKETS,
-    COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS, RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
+    activity_name, activity_of, base_value, goal_activity_label, guild_for, mint_agent_name,
+    Activity,
+    AgentEvent, AgentSave, FactionAgent, Goal, TargetInfo, Tier, Traits,
+    AGENT_RESPAWN_SECONDS, COLD_BUCKETS, COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS,
+    RETREAT_HEALTH_PCT, SPAWN_PROTECT_SECONDS, WEALTH_RETREAT, ACTIVITIES,
 };
 use econ::{Currency, EconActor, OwnerId, Purse};
 use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
 use market_stats::{MarketStats, MarketStatsSave};
-use npc::{mint_agent_identity, npc_spawns_for_chunk, Npc};
 use stats::{build_leaderboard, ActorRef, LiveActor, StatsBook};
 use smallvec::SmallVec;
 
@@ -62,6 +62,49 @@ const SAVE_INTERVAL_TICKS: u64 = 200;
 /// (a 50k-agent JSON blob is a multi-ms spike); the full population still
 /// cycles through roughly every `SAVE_INTERVAL_TICKS`.
 const AGENT_SAVE_SHARD: usize = 1024;
+
+/// Check disk pressure (and maybe purge) this often (20 Hz -> ~60 s).
+const PURGE_CHECK_TICKS: u64 = TICK_HZ as u64 * 60;
+/// Username prefix that marks a throwaway per-tab guest identity (see the web
+/// client's `bootstrap`). Only these are ever auto-purged.
+const GUEST_PREFIX: &str = "runner_";
+/// Cap guest deletions per purge pass so a large backlog drains over several
+/// 60 s passes instead of stalling one sim tick with a huge write batch.
+const MAX_PURGE_PER_PASS: usize = 5000;
+const GIB: f64 = (1024 * 1024 * 1024) as f64;
+
+/// Serializes the off-thread post-purge compaction so we never launch a second
+/// compaction while one is still running.
+static PURGE_COMPACTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Reclaim disk once the store passes this many bytes (env
+/// `WILDER_DISK_HIGH_WATER_GB`, default 40 GB — matches the 50 GB disk).
+fn disk_high_water_bytes() -> u64 {
+    let gb = std::env::var("WILDER_DISK_HIGH_WATER_GB")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|g| *g > 0.0)
+        .unwrap_or(40.0);
+    (gb * GIB) as u64
+}
+
+/// Minimum age a guest account must reach before it's eligible for purge (env
+/// `WILDER_GUEST_MIN_AGE_SECS`, default 24 h). Guards against nuking a guest
+/// that just registered but hasn't connected yet.
+fn guest_min_age_secs() -> u64 {
+    std::env::var("WILDER_GUEST_MIN_AGE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24 * 60 * 60)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Default spawn: on the road corner of chunk (0,0), always walkable.
 const SPAWN: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 /// Combat-patrol staging spot in the hub's contested combat ring: outside the
@@ -76,7 +119,7 @@ const HUB_STAGE_REBELS: Vec3 = Vec3::new(180.0, 0.0, 180.0);
 const HUB_STAGE_FORUM: Vec3 = Vec3::new(-180.0, 0.0, -180.0);
 /// Version stamp for the seeded agent distribution. Bump when the seeding
 /// layout changes so persisted worlds discard the old population and reseed.
-const AGENT_SEED_LAYOUT: u32 = 5;
+const AGENT_SEED_LAYOUT: u32 = 6;
 /// Chunks with |x|<=SAFE_RADIUS and |z|<=SAFE_RADIUS are the safe hub.
 const SAFE_RADIUS: i32 = 1;
 /// Congestion model for service routing (Bodega/Armory/craft stations).
@@ -88,8 +131,6 @@ const SERVICE_CAPACITY: f32 = 5.0;
 /// Travel distance (m) at which a service's appeal halves. Agents prefer a
 /// near service but will detour to a much emptier one farther away.
 const SERVICE_TRAVEL_HALF: f32 = 120.0;
-/// NPC respawn delay after death, seconds.
-const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
 const LOOT_TTL_SECONDS: f32 = 120.0;
 /// Loose currency pickups (coins/shards/energy) despawn after this long.
@@ -101,7 +142,7 @@ const CURRENCY_PICKUP_RADIUS: f32 = 1.6;
 /// findable but not everywhere; count per chunk and rounds per cache.
 const AMMO_CACHE_COUNT: usize = 3;
 const AMMO_CACHE_ROUNDS: u32 = 12;
-/// Loot (ammo caches, NPC/player drops) is grabbed automatically when a
+/// Loot (ammo caches, agent/player drops) is grabbed automatically when a
 /// player walks within this distance (metres) - no click required. Click
 /// pickup only works with a free cursor, which mouse-look play never has.
 const LOOT_PICKUP_RADIUS: f32 = 2.0;
@@ -123,7 +164,7 @@ const NODE_SEARCH_CHUNKS: i32 = 2;
 /// Max agents claiming one node at a time, so a cohort spreads across the
 /// local deposits instead of queueing on whichever looked closest.
 const NODE_CLAIM_CAP: u32 = 2;
-/// Chance for a blueprint fragment to drop from NPC kills / node gathers.
+/// Chance for a blueprint fragment to drop from node gathers.
 const FRAGMENT_CHANCE: f64 = 0.10;
 /// Max jobs queued at one production building (all owners combined), so
 /// agents can't pile a queue up infinitely.
@@ -142,6 +183,26 @@ const MARKET_BOOK_CAP: usize = 200;
 const MARKET_DECAY_TICKS: u64 = 300;
 /// MILD granted to every account once.
 const WALLET_GRANT: u32 = 200;
+/// Max agents one character can own at a time.
+const MAX_OWNED_AGENTS: usize = 5;
+/// Percent of an owned agent's bank deposits routed to the owner's banked
+/// MILD (the "earnings share").
+const OWNER_SHARE_PCT: u32 = 15;
+/// Hire pricing: `base + wealth/2 + trait_rate * strongest payoff EMA`.
+/// Wealth is the agent's total MILD (carried + banked) — buying an agent's
+/// savings costs half their face value; the trait term prices proven skill
+/// (payoff EMAs are MILD/min, so a 40 MILD/min specialist adds 10,000).
+/// A character's FIRST hire is free (starter grant).
+const AGENT_HIRE_BASE: u32 = 500;
+const AGENT_HIRE_TRAIT_RATE: f32 = 250.0;
+/// Candidates returned by an `AgentHireList` request.
+const AGENT_HIRE_OFFERS: usize = 20;
+/// Ring capacity of one owned agent's live activity log.
+const AGENT_LOG_CAP: usize = 64;
+/// Re-send `AgentRoster` to subscribers every N ticks (~2 s).
+const AGENT_ROSTER_TICK_INTERVAL: u64 = 40;
+/// Re-push `AgentDetail` to watchers every N ticks (~1 s).
+const AGENT_DETAIL_TICK_INTERVAL: u64 = 20;
 /// Safehouse bubble radius (metres): hostiles ignore players inside and
 /// health regen applies as if in the safe hub.
 const SAFEHOUSE_RADIUS: f32 = 10.0;
@@ -156,8 +217,7 @@ const RESEARCH_FRAGMENTS: u32 = 2;
 const RESEARCH_RESOURCES: &[(ItemKind, u32)] =
     &[(ItemKind::Electronics, 5), (ItemKind::Chemicals, 5)];
 const RESEARCH_ENERGY: u32 = wilder_crafting::RESEARCH_ENERGY;
-/// XP granted per NPC kill.
-const XP_SCAV_KILL: u32 = 25;
+/// XP granted per agent kill.
 const XP_RAIDER_KILL: u32 = 50;
 
 /// Territory control is a `FactionId` per region (`FACTION_NEUTRAL` = free).
@@ -176,8 +236,6 @@ const TERRITORY_TICK_INTERVAL: u64 = 20;
 /// Field-intel strength attributed to a connected player (agents read this
 /// when weighing local force balance; roughly a pistol-armed fighter).
 const PLAYER_INTEL_STRENGTH: f32 = 20.0;
-/// Field-intel strength of one Wape NPC.
-const NPC_INTEL_STRENGTH: f32 = 6.0;
 /// Per-intel-tick (~1 s) decay of a region's observed commerce income.
 const INTEL_INCOME_DECAY: f32 = 0.99;
 /// Per-intel-tick decay of a region's recent-casualty signal.
@@ -209,7 +267,6 @@ const TIMING_LOG_TICKS: u64 = 600;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TickPhase {
     Movement,
-    Npcs,
     Agents,
     Separation,
     Loot,
@@ -224,11 +281,10 @@ enum TickPhase {
 }
 
 impl TickPhase {
-    const COUNT: usize = 13;
+    const COUNT: usize = 12;
 
     const ALL: [TickPhase; TickPhase::COUNT] = [
         TickPhase::Movement,
-        TickPhase::Npcs,
         TickPhase::Agents,
         TickPhase::Separation,
         TickPhase::Loot,
@@ -245,7 +301,6 @@ impl TickPhase {
     fn name(self) -> &'static str {
         match self {
             TickPhase::Movement => "movement",
-            TickPhase::Npcs => "npcs",
             TickPhase::Agents => "agents",
             TickPhase::Separation => "separation",
             TickPhase::Loot => "loot",
@@ -347,7 +402,7 @@ fn region_center(r: (i32, i32)) -> Vec3 {
 struct RegionIntel {
     /// Current controller after this tick (FACTION_NEUTRAL = unheld).
     controller: FactionId,
-    /// Alive bodies per side (players count as Rebel bodies).
+    /// Alive bodies per side (players count under their own faction).
     rebels: u32,
     forum: u32,
     wapes: u32,
@@ -364,8 +419,8 @@ struct RegionIntel {
 
 impl RegionIntel {
     /// (friendly bodies, hostile bodies, friendly strength, hostile
-    /// strength) from `faction`'s point of view. Wapes are hostile to both
-    /// organized factions.
+    /// strength) from `faction`'s point of view. All three factions are
+    /// mutually hostile, so everyone else counts as the enemy side.
     fn sides(&self, faction: FactionId) -> (u32, u32, f32, f32) {
         match faction {
             FACTION_REBELS => (
@@ -379,6 +434,12 @@ impl RegionIntel {
                 self.rebels + self.wapes,
                 self.forum_strength,
                 self.rebel_strength + self.wape_strength,
+            ),
+            FACTION_WAPES => (
+                self.wapes,
+                self.rebels + self.forum,
+                self.wape_strength,
+                self.rebel_strength + self.forum_strength,
             ),
             _ => (0, 0, 0.0, 0.0),
         }
@@ -512,12 +573,12 @@ fn ensure_starting_weapon(inventory: &mut Inventory) {
     }
 }
 
-/// Ledger party for a player character (players are Rebels for now).
+/// Ledger party for a player character.
 fn player_party(p: &Player) -> TxParty {
     TxParty::Player {
         id: p.character.id,
         name: p.character.name.clone(),
-        faction: FACTION_REBELS,
+        faction: p.character.faction,
     }
 }
 
@@ -527,7 +588,7 @@ fn player_actor(p: &Player) -> ActorRef {
     ActorRef {
         id: p.character.id,
         name: p.character.name.clone(),
-        faction: FACTION_REBELS,
+        faction: p.character.faction,
         guild: None,
         is_player: true,
     }
@@ -555,11 +616,6 @@ fn party_actor(p: &TxParty) -> Option<ActorRef> {
     }
 }
 
-/// Ledger party for an NPC agent (wild NPCs are the Wapes faction).
-fn npc_party(n: &Npc) -> TxParty {
-    TxParty::Agent { id: n.agent_id, name: n.agent_name.clone(), faction: FACTION_WAPES }
-}
-
 /// Ledger party for a service building (vendor / bank / market terminal).
 /// Services trade with everyone, so they stay neutral.
 fn static_party(s: &StaticEntity) -> TxParty {
@@ -573,25 +629,12 @@ fn static_agent_id(seed: u64, entity: EntityId) -> AgentId {
     uuid::Uuid::from_u64_pair(seed ^ 0xA6E7_7A6E_7A6E_77AA, entity)
 }
 
-/// Roll the loot an NPC agent carries. Called at spawn (and respawn) so the
-/// agent owns its inventory while alive; the same items drop on death.
-fn roll_npc_loot(rng: &mut SmallRng, zone: ZoneKind, is_raider: bool) -> Vec<ItemStack> {
+/// Street Cash a seeded/respawned Wape carries, zone-scaled off the retired
+/// NPC drop tables (blast-zone rubble hides more). Keeps the Cash -> Bank
+/// conversion loop fed now that wild Wapes are full faction agents.
+fn wape_grubstake_cash(rng: &mut SmallRng, zone: ZoneKind, raider_like: bool) -> u32 {
     use rand::Rng;
-    let mut items: Vec<ItemStack> = Vec::new();
-    // Resources drop biased by the zone the NPC lives in. Pull count is
-    // randomized (raiders carry a bit more) so pile size varies kill-to-kill.
-    let pulls = if is_raider {
-        rng.random_range(2..=3)
-    } else {
-        rng.random_range(1..=2)
-    };
-    for _ in 0..pulls {
-        let idx = wilder_economy::zone_resource_index(zone, rng.random());
-        let kind = wilder_economy::RESOURCES[idx];
-        items.push(ItemStack { kind, count: rng.random_range(1..=5) });
-    }
-    // Cash feeds the Bank loop; blast-zone rubble hides more.
-    let (lo, hi) = if is_raider {
+    let (lo, hi) = if raider_like {
         wilder_economy::CASH_DROP_RAIDER
     } else {
         wilder_economy::CASH_DROP_SCAV
@@ -600,22 +643,7 @@ fn roll_npc_loot(rng: &mut SmallRng, zone: ZoneKind, is_raider: bool) -> Vec<Ite
     if zone == ZoneKind::BlownUp {
         cash *= 2;
     }
-    items.push(ItemStack { kind: ItemKind::Cash, count: cash });
-    if rng.random_bool(0.7) {
-        items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(10..25) });
-    }
-    if rng.random_bool(0.15) {
-        items.push(ItemStack { kind: ItemKind::Medkit, count: 1 });
-    }
-    if is_raider && rng.random_bool(0.25) {
-        let weapon = if rng.random_bool(0.3) { ItemKind::Pistol } else { ItemKind::Pipe };
-        items.push(ItemStack { kind: weapon, count: 1 });
-    }
-    // Rare blueprint fragments feed Laboratory research (Phase 3).
-    if rng.random_bool(FRAGMENT_CHANCE) {
-        items.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
-    }
-    items
+    cash
 }
 
 /// Reduce a yield count by the territory tax when `enemy` is true.
@@ -955,6 +983,8 @@ struct Player {
     roll_cooldown: f32,
     /// Seconds until shield regen resumes (reset on damage taken).
     shield_delay: f32,
+    /// Post-respawn invulnerability left (no damage taken or dealt while > 0).
+    spawn_protection: f32,
     /// Ability cooldowns, indexed by `AbilityKind::index()`.
     ability_cooldowns: [f32; 3],
     /// Stim: healing left to apply + speed boost seconds left.
@@ -978,6 +1008,12 @@ struct Player {
     /// MapIntel stream itself ships in Phase 5.
     #[allow(dead_code)]
     map_intel: bool,
+    /// Subscribed to the owned-agent roster (`AgentSub`): re-sent every
+    /// `AGENT_ROSTER_TICK_INTERVAL` ticks and on hire/dismiss.
+    agent_sub: bool,
+    /// Owned agent being watched in detail (`AgentDetailSub`), as an index
+    /// into `World::agents`. Validated against ownership on every push.
+    agent_detail: Option<usize>,
     /// World-clock seconds of the last "backpack full" deny sent for
     /// auto-pickup. Rate-limits the toast so standing on loot with a full
     /// pack doesn't spam it every tick.
@@ -993,6 +1029,15 @@ const REPLICATED_AGENT_CAP: usize = 192;
 /// replicated up to this softer cap, so the nearest-K boundary doesn't
 /// strobe spawn/despawn as relative distances jitter tick to tick.
 const REPLICATED_AGENT_KEEP: usize = 240;
+
+/// Chunk radius (Chebyshev) of the always-on "agent dot" feed around each
+/// player. Must be greater than `wilder_replication::VIEW_RADIUS` (the inner
+/// replicated entity ring is skipped) and stay within the client's main
+/// camera far plane (~1000 m). 12 chunks ≈ 384 m of glowing dots.
+const DOT_RADIUS_CHUNKS: i32 = 12;
+/// Nearest-first cap on dots shipped to one player per update; caps the wire
+/// cost and the client point cloud in a dense city.
+const DOT_MAX: usize = 1500;
 
 /// Quantized replication state: centimetre positions, centiradian yaw and
 /// 8-bit health/shield fractions. Two jobs: change detection for delta
@@ -1166,7 +1211,7 @@ impl Player {
             health_pct: 1.0,
             variant: 0,
             item: None,
-            faction: FACTION_REBELS,
+            faction: self.character.faction,
         }
     }
 }
@@ -1178,7 +1223,7 @@ struct LootContainer {
     ttl: f32,
     /// 0 = generic drop, 1 = ammo cache (persistent, highlighted client-side).
     variant: u32,
-    /// Ledger party the contents still belong to (dead NPC, dropping player).
+    /// Ledger party the contents still belong to (dead agent, dropping player).
     /// Pickups are attributed as transfers from this owner.
     owner: Option<TxParty>,
     /// Whether the contents still count toward circulating supply. False for
@@ -1289,9 +1334,6 @@ pub struct World {
     store: Arc<RocksStore>,
     chunks: ChunkCache,
     players: HashMap<EntityId, Player>,
-    npcs: HashMap<EntityId, Npc>,
-    /// Hostile chunks whose NPCs have already been spawned this session.
-    npc_seeded_chunks: HashSet<ChunkCoord>,
     loot: HashMap<EntityId, LootContainer>,
     /// Loose currency dropped on death, auto-collected on walk-over.
     pickups: HashMap<EntityId, CurrencyPickup>,
@@ -1396,12 +1438,17 @@ pub struct World {
     /// cohort self-distributes across storefronts instead of funneling to the
     /// nearest one. Rebuilt each tick, then mutated as agents re-decide.
     service_load: HashMap<EntityId, u32>,
-    /// (attacker, victim) pairs from recent damage; grants the victim's side
-    /// retaliation rights in Guarded districts. Values are seconds remaining.
-    recent_attacks: HashMap<(EntityId, EntityId), f32>,
     /// One staging position per district (a walkable spot near the district's
     /// service cluster), filled by `seed_neighborhood_stores`.
     district_spots: Vec<Vec3>,
+    /// Owner -> owned agent indices (fast roster lookups). Rebuilt on load,
+    /// kept correct on hire/dismiss (agent indices are stable — respawn
+    /// reuses the slot — so this never needs per-tick maintenance).
+    owned_agents: HashMap<CharacterId, Vec<usize>>,
+    /// Live activity log per OWNED agent (ring of `AGENT_LOG_CAP` entries).
+    /// Only owned agents have an entry: created on hire, dropped on dismiss,
+    /// carried across respawn (re-keyed to the fresh identity).
+    agent_logs: HashMap<AgentId, VecDeque<AgentLogEntry>>,
     /// Per-system wall-time accounting for `step()`.
     timings: TickTimings,
 }
@@ -1498,8 +1545,6 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         production_outputs,
         production_dirty: false,
         players: HashMap::new(),
-        npcs: HashMap::new(),
-        npc_seeded_chunks: HashSet::new(),
         loot: HashMap::new(),
         pickups: HashMap::new(),
         statics: HashMap::new(),
@@ -1535,8 +1580,9 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         agent_decision_queue: std::collections::VecDeque::new(),
         agent_save_cursor: 0,
         service_load: HashMap::new(),
-        recent_attacks: HashMap::new(),
         district_spots: Vec::new(),
+        owned_agents: HashMap::new(),
+        agent_logs: HashMap::new(),
         timings: TickTimings::default(),
     };
     // Seed the spawn district up front so PoiList is complete on every join.
@@ -1548,6 +1594,8 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
     world.register_interiors();
     // Faction agents: restore the persisted population or seed a fresh one.
     world.load_or_seed_agents();
+    // Ownership index: restored saves carry owners; hires maintain it live.
+    world.rebuild_owned_agents();
     world
 }
 
@@ -1675,7 +1723,7 @@ impl World {
                 TxParty::Player {
                     id: character.id,
                     name: character.name.clone(),
-                    faction: FACTION_REBELS,
+                    faction: character.faction,
                 },
                 TxAmount::Wild { amount: WALLET_GRANT },
                 0,
@@ -1708,6 +1756,7 @@ impl World {
             roll_dir: (1.0, 0.0),
             roll_cooldown: 0.0,
             shield_delay: 0.0,
+            spawn_protection: 0.0,
             ability_cooldowns: [0.0; 3],
             stim_heal_left: 0.0,
             stim_speed_time: 0.0,
@@ -1717,6 +1766,8 @@ impl World {
             wallet_sent: None,
             sent_snaps: HashMap::new(),
             map_intel: false,
+            agent_sub: false,
+            agent_detail: None,
             last_full_deny: f64::NEG_INFINITY,
             dirty: true,
         };
@@ -1857,6 +1908,11 @@ impl World {
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::EconomySub { on } => self.economy_sub(entity, on),
             C2S::ItemMarketSub { kind } => self.item_market_sub(entity, kind),
+            C2S::HireAgent { agent_id } => self.hire_agent(entity, agent_id),
+            C2S::DismissAgent { agent_id } => self.dismiss_agent(entity, agent_id),
+            C2S::AgentHireList => self.agent_hire_list(entity),
+            C2S::AgentSub { on } => self.agent_sub(entity, on),
+            C2S::AgentDetailSub { agent_id } => self.agent_detail_sub(entity, agent_id),
             C2S::MapIntelSub { on } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.map_intel = on;
@@ -1998,19 +2054,21 @@ impl World {
 
         let broadcast_flash = stats.ranged;
 
-        // Attackable targets: NPCs plus embodied (hot) faction agents (from
-        // the maintained hot list, not a population scan).
+        // Attackable targets: embodied (hot) faction agents (from the
+        // maintained hot list, not a population scan) plus other players
+        // (PvP). Whether the hit actually lands is `deal_damage`'s call —
+        // faction hostility, safe zones and spawn protection gate there.
         let candidates: Vec<(EntityId, Vec3)> = self
-            .npcs
-            .values()
-            .filter(|n| n.alive())
-            .map(|n| (n.entity, n.position))
+            .hot_agents
+            .iter()
+            .map(|&i| &self.agents[i as usize])
+            .filter(|a| a.tier == Tier::Hot && a.alive())
+            .map(|a| (a.entity, a.position))
             .chain(
-                self.hot_agents
-                    .iter()
-                    .map(|&i| &self.agents[i as usize])
-                    .filter(|a| a.tier == Tier::Hot && a.alive())
-                    .map(|a| (a.entity, a.position)),
+                self.players
+                    .values()
+                    .filter(|p| p.entity != entity && p.character.health > 0.0)
+                    .map(|p| (p.entity, p.character.position)),
             )
             .collect();
 
@@ -2102,31 +2160,8 @@ impl World {
         match ability {
             AbilityKind::Shockwave => {
                 self.broadcast_combat(CombatEvent::Shockwave { source: entity });
-                // Knock nearby NPCs and hot agents back, then apply damage.
+                // Knock nearby hot agents back, then apply damage.
                 let mut targets: Vec<EntityId> = Vec::new();
-                for npc in self.npcs.values_mut() {
-                    if !npc.alive() {
-                        continue;
-                    }
-                    let to = npc.position - origin;
-                    if to.length() > SHOCKWAVE_RADIUS {
-                        continue;
-                    }
-                    let dir = if to.length_squared() > 1e-6 {
-                        to.normalize()
-                    } else {
-                        Vec3::new(1.0, 0.0, 0.0)
-                    };
-                    npc.position = step_move_speed(
-                        &self.chunks,
-                        npc.position,
-                        dir.x,
-                        dir.z,
-                        SHOCKWAVE_KNOCKBACK,
-                        1.0,
-                    );
-                    targets.push(npc.entity);
-                }
                 for i in 0..self.agents.len() {
                     let agent = &self.agents[i];
                     if agent.tier != Tier::Hot || !agent.alive() {
@@ -2179,75 +2214,7 @@ impl World {
         }
     }
 
-    fn damage_npc(&mut self, attacker: EntityId, target: EntityId, damage: f32, impact: Vec3) {
-        let died_info = {
-            let Some(npc) = self.npcs.get_mut(&target) else { return };
-            npc.health -= damage;
-            if npc.health <= 0.0 && npc.alive() {
-                npc.state = wilder_ai::NpcState::Dead;
-                npc.respawn_in = NPC_RESPAWN_SECONDS;
-                npc.anim = AnimState::Death;
-                // The dead agent's inventory becomes its loot drop; every
-                // pickup is then a ledger transfer from this agent.
-                let items = std::mem::take(&mut npc.inventory);
-                Some((npc.position, npc.archetype.variant == 2, items, npc_party(npc)))
-            } else {
-                // Getting shot provokes the NPC even from beyond its passive
-                // aggro radius, so sniping draws retaliation.
-                if self.players.contains_key(&attacker) {
-                    npc.provoke(attacker);
-                }
-                // Brief hit-stun: the NPC flinches in place before resuming.
-                npc.stun_timer = crate::npc::HIT_STUN_SECONDS;
-                npc.anim = AnimState::Hit;
-                None
-            }
-        };
-        self.broadcast_combat(CombatEvent::Hit {
-            attacker,
-            target,
-            damage,
-            x: impact.x,
-            y: impact.y,
-            z: impact.z,
-        });
-        if let Some((drop_pos, is_raider, items, agent)) = died_info {
-            self.broadcast_combat(CombatEvent::EntityDied { id: target });
-            self.grant_xp(attacker, if is_raider { XP_RAIDER_KILL } else { XP_SCAV_KILL });
-            self.ledger.npc_kills += 1;
-            // Leaderboards: credit the killer, debit the Wape's faction.
-            let killer = self.actor_ref(attacker);
-            if let Some(victim) = party_actor(&agent) {
-                self.stats.record_kill(killer.as_ref(), &victim);
-            }
-            // The agent's spawn-minted inventory scatters where it fell as
-            // separate pickups; items stay owned by (attributed to) the dead
-            // agent until picked up or the containers expire.
-            self.spawn_loot_scattered(drop_pos, items, Some(agent), true);
-            // Loose currency spills out alongside the crate: a random handful
-            // of MILD coins (raiders carry more), plus an occasional shard and
-            // energy cell. These are walk-over collectibles (minted faucet).
-            use rand::Rng;
-            let coins = if is_raider {
-                self.rng.random_range(2..=3)
-            } else {
-                self.rng.random_range(1..=2)
-            };
-            for _ in 0..coins {
-                let amount = self.rng.random_range(1..=3);
-                self.spawn_currency_pickup(drop_pos, Currency::Wild, amount);
-            }
-            if self.rng.random_bool(if is_raider { 0.5 } else { 0.25 }) {
-                let shards = self.rng.random_range(1..=2);
-                self.spawn_currency_pickup(drop_pos, Currency::Shards, shards);
-            }
-            if self.rng.random_bool(0.1) {
-                self.spawn_currency_pickup(drop_pos, Currency::Energy, 1);
-            }
-        }
-    }
-
-    /// Grant XP to a player (no-op for NPC attackers) and handle level-ups.
+    /// Grant XP to a player (no-op for agent attackers) and handle level-ups.
     /// `Character.xp` is progress into the current level; level-ups roll the
     /// remainder over, bump max health, and fully heal.
     fn grant_xp(&mut self, entity: EntityId, amount: u32) {
@@ -2486,10 +2453,12 @@ impl World {
         }
     }
 
-    /// Faction an actor trades/fights under (players are Rebels for now).
+    /// Faction an actor trades/fights under.
     fn actor_faction(&self, actor: EconActor) -> FactionId {
         match actor {
-            EconActor::Player(_) => FACTION_REBELS,
+            EconActor::Player(id) => {
+                self.players.get(&id).map_or(FACTION_NEUTRAL, |p| p.character.faction)
+            }
             EconActor::Agent(idx) => self.agents.get(idx).map_or(FACTION_NEUTRAL, |a| a.faction),
         }
     }
@@ -3346,7 +3315,7 @@ impl World {
                     return player_party(p);
                 }
                 match self.store.character(id) {
-                    Ok(ch) => TxParty::Player { id, name: ch.name, faction: FACTION_REBELS },
+                    Ok(ch) => TxParty::Player { id, name: ch.name, faction: ch.faction },
                     Err(_) => TxParty::Burn,
                 }
             }
@@ -3471,12 +3440,7 @@ impl World {
         };
         for p in self.players.values() {
             if p.character.health > 0.0 {
-                add(p.character.position, FACTION_REBELS, true, PLAYER_INTEL_STRENGTH);
-            }
-        }
-        for npc in self.npcs.values() {
-            if npc.alive() {
-                add(npc.position, FACTION_WAPES, false, NPC_INTEL_STRENGTH);
+                add(p.character.position, p.character.faction, true, PLAYER_INTEL_STRENGTH);
             }
         }
         // Agents come off the maintained spatial grid: only living agents,
@@ -3957,7 +3921,7 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
-    // NPC vendors & bank
+    // Vendors & bank
     // -----------------------------------------------------------------------
 
     /// Units of `kind` a vendor currently holds on its shelves.
@@ -4457,7 +4421,7 @@ impl World {
                 .players
                 .values()
                 .filter(|p| {
-                    controller == FACTION_REBELS
+                    controller == p.character.faction
                         && p.character.health > 0.0
                         && region_of(p.character.position) == region
                 })
@@ -4661,7 +4625,6 @@ impl World {
         let step_start = Instant::now();
 
         self.timed(TickPhase::Movement, |w| w.apply_movement());
-        self.timed(TickPhase::Npcs, |w| w.tick_npcs());
         self.timed(TickPhase::Agents, |w| w.tick_agents());
         self.timed(TickPhase::Separation, |w| w.separate_characters());
         self.timed(TickPhase::Loot, |w| w.tick_loot());
@@ -4682,6 +4645,10 @@ impl World {
             if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
                 w.broadcast_map_intel();
             }
+            // Far-agent dot LOD feed for the live map, ~5 Hz (always on).
+            if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
+                w.broadcast_agent_dots();
+            }
             // Unsold agent asks decay toward their floor every ~15 s.
             if w.tick % MARKET_DECAY_TICKS == 0 {
                 w.tick_market_decay();
@@ -4689,6 +4656,13 @@ impl World {
             // Item market drill-in: re-push watched kinds that traded, ~1 Hz.
             if w.tick % ITEM_MARKET_TICK_INTERVAL == 0 {
                 w.broadcast_item_markets();
+            }
+            // Owned-agent roster (~2 s) and drill-in detail (~1 Hz).
+            if w.tick % AGENT_ROSTER_TICK_INTERVAL == 0 {
+                w.broadcast_agent_rosters();
+            }
+            if w.tick % AGENT_DETAIL_TICK_INTERVAL == 0 {
+                w.broadcast_agent_details();
             }
         });
 
@@ -4706,6 +4680,12 @@ impl World {
         // stride (the early return is a couple of integer ops on off-ticks).
         self.timed(TickPhase::Save, |w| w.tick_agent_saves());
 
+        // Disk-pressure guard: reclaim space by purging stale guest data once
+        // the store crosses the high-water mark (~1/min, off-ticks are free).
+        if self.tick % PURGE_CHECK_TICKS == 0 {
+            self.timed(TickPhase::Save, |w| w.tick_disk_guard());
+        }
+
         self.timings.finish_tick(step_start.elapsed());
     }
 
@@ -4714,6 +4694,7 @@ impl World {
             player.moved_this_tick = false;
             player.ran_this_tick = false;
             player.attack_cooldown = (player.attack_cooldown - TICK_DT).max(0.0);
+            player.spawn_protection = (player.spawn_protection - TICK_DT).max(0.0);
             if player.character.health <= 0.0 {
                 continue;
             }
@@ -4792,8 +4773,8 @@ impl World {
         }
     }
 
-    /// Post-movement crowd separation: embodied characters (hot agents and
-    /// NPCs) are soft discs that push out of each other and out of player
+    /// Post-movement crowd separation: embodied characters (hot agents) are
+    /// soft discs that push out of each other and out of player
     /// discs, so melee piles no longer interpenetrate. Players are never
     /// moved — client prediction owns their position and a server-side shove
     /// would fight reconciliation — and every push respects world collision.
@@ -4817,7 +4798,6 @@ impl World {
 
         enum Body {
             Agent(usize),
-            Npc(EntityId),
             Player,
         }
 
@@ -4828,11 +4808,6 @@ impl World {
             let a = &self.agents[i as usize];
             if a.tier == Tier::Hot && a.alive() {
                 bodies.push((Body::Agent(i as usize), a.position));
-            }
-        }
-        for (id, npc) in self.npcs.iter() {
-            if npc.alive() {
-                bodies.push((Body::Npc(*id), npc.position));
             }
         }
         for p in self.players.values() {
@@ -4940,11 +4915,6 @@ impl World {
                         self.regrid_agent(i);
                     }
                 }
-                Body::Npc(id) => {
-                    if let Some(npc) = self.npcs.get_mut(&id) {
-                        npc.position = pos;
-                    }
-                }
                 Body::Player => {}
             }
         }
@@ -4957,73 +4927,6 @@ impl World {
             .filter(|s| s.kind == EntityKind::Safehouse)
             .map(|s| s.position)
             .collect()
-    }
-
-    fn tick_npcs(&mut self) {
-        // Respawns and AI. Players sheltering inside a safehouse bubble are
-        // invisible to hostiles: they can't be targeted or chased.
-        let safehouses = self.safehouse_positions();
-        let player_positions: Vec<(EntityId, Vec3)> = self
-            .players
-            .values()
-            .filter(|p| p.character.health > 0.0)
-            .filter(|p| {
-                !safehouses
-                    .iter()
-                    .any(|s| (*s - p.character.position).length() < SAFEHOUSE_RADIUS)
-            })
-            .map(|p| (p.entity, p.character.position))
-            .collect();
-
-        let mut attacks: Vec<(EntityId, EntityId, f32)> = Vec::new(); // (npc, player, dmg)
-        for npc in self.npcs.values_mut() {
-            if !npc.alive() {
-                npc.respawn_in -= TICK_DT;
-                if npc.respawn_in <= 0.0 {
-                    npc.health = npc.archetype.max_health;
-                    npc.state = wilder_ai::NpcState::Patrol;
-                    npc.position = npc.home;
-                    npc.anim = AnimState::Idle;
-                    // A respawn is a brand-new agent: fresh identity and a
-                    // freshly minted inventory (the old agent's items are
-                    // in its death drop, not carried over).
-                    let (agent_id, agent_name) = mint_agent_identity(npc.archetype);
-                    npc.agent_id = agent_id;
-                    npc.agent_name = agent_name;
-                    let zone = zone_of_chunk(ChunkCoord::from_world(npc.home));
-                    npc.inventory =
-                        roll_npc_loot(&mut self.rng, zone, npc.archetype.variant == 2);
-                    let agent = npc_party(npc);
-                    for stack in &npc.inventory {
-                        self.ledger.record(
-                            TxKind::Mint,
-                            TxParty::Mint,
-                            agent.clone(),
-                            TxAmount::Item { kind: stack.kind, count: stack.count },
-                            0,
-                        );
-                    }
-                }
-                continue;
-            }
-            // Only tick NPCs near any player (cheap interest gating).
-            let near_player = player_positions
-                .iter()
-                .any(|(_, p)| (*p - npc.position).length() < 80.0);
-            if !near_player {
-                continue;
-            }
-            if let Some((target, damage)) = npc.tick(&self.chunks, &player_positions, &mut self.rng)
-            {
-                attacks.push((npc.entity, target, damage));
-            }
-        }
-
-        for (npc_entity, player_entity, damage) in attacks {
-            // Same gated pipeline as every other attacker: Sanctuary ground
-            // shields players from wild Wapes too.
-            self.deal_damage(npc_entity, player_entity, damage, None);
-        }
     }
 
     fn damage_player(&mut self, attacker: EntityId, target: EntityId, damage: f32) {
@@ -5055,10 +4958,9 @@ impl World {
 
     fn kill_player(&mut self, killer: EntityId, target: EntityId) {
         let killer_name = self
-            .npcs
+            .players
             .get(&killer)
-            .map(|n| n.archetype.name.to_string())
-            .or_else(|| self.players.get(&killer).map(|p| p.character.name.clone()))
+            .map(|p| p.character.name.clone())
             .or_else(|| {
                 self.agent_by_entity
                     .get(&killer)
@@ -5079,9 +4981,12 @@ impl World {
                 dropped.push(stack);
             }
         }
-        // Carried currency is at-risk too: MILD, Shards and Energy all burn on
-        // death (only the banked portion is safe). Coin doesn't scatter as
-        // loot — it's simply gone from supply.
+        // Carried currency is at-risk too: MILD, Shards and Energy (only the
+        // banked portion is safe). The ledger burns the FULL carried purse
+        // here; half of each balance then drops as currency pickups, which
+        // re-mint on collection (see `collect_currency_pickup`). Net supply
+        // stays coherent: -carried at death, +spill on pickup, with the
+        // burned half (and any expired pickups) permanently out of supply.
         let account = player.character.account_id;
         let burned = player.purse.burn_carried_on_death();
         let lost_wallet = burned[Currency::Wild.index()];
@@ -5137,6 +5042,7 @@ impl World {
         player.character.health = player.character.max_health;
         player.character.shield = player.character.max_shield;
         player.character.position = SPAWN;
+        player.spawn_protection = SPAWN_PROTECT_SECONDS;
         player.dirty = true;
         let lost = !dropped.is_empty();
         let _ = player.tx.send(S2C::Died { by: killer_name, lost_items: lost });
@@ -5144,6 +5050,10 @@ impl World {
         let entity = player.entity;
         self.broadcast_combat(CombatEvent::EntityDied { id: entity });
         self.spawn_loot(drop_pos, dropped, Some(victim), false);
+        // Half of each carried balance spills at the body (see burn comment).
+        for currency in Currency::ALL {
+            self.spawn_currency_pickup(drop_pos, currency, burned[currency.index()] / 2);
+        }
         self.persist_player_entity(target);
     }
 
@@ -5151,13 +5061,10 @@ impl World {
     // Generalized combat: any attacker -> any victim, danger/hostility gated
     // -----------------------------------------------------------------------
 
-    /// Current position of any combat-capable entity (player/npc/agent).
+    /// Current position of any combat-capable entity (player/agent).
     fn entity_position(&self, id: EntityId) -> Option<Vec3> {
         if let Some(p) = self.players.get(&id) {
             return Some(p.character.position);
-        }
-        if let Some(n) = self.npcs.get(&id) {
-            return Some(n.position);
         }
         self.agent_by_entity.get(&id).map(|&i| self.agents[i].position)
     }
@@ -5165,11 +5072,7 @@ impl World {
     /// (position, faction, alive) of a combat-capable entity.
     fn combatant(&self, id: EntityId) -> Option<(Vec3, FactionId, bool)> {
         if let Some(p) = self.players.get(&id) {
-            return Some((p.character.position, FACTION_REBELS, p.character.health > 0.0));
-        }
-        if let Some(n) = self.npcs.get(&id) {
-            // Wild NPCs fight under the Wapes faction (hostile to everyone).
-            return Some((n.position, FACTION_WAPES, n.alive()));
+            return Some((p.character.position, p.character.faction, p.character.health > 0.0));
         }
         self.agent_by_entity
             .get(&id)
@@ -5177,12 +5080,32 @@ impl World {
             .map(|a| (a.position, a.faction, a.alive()))
     }
 
-    /// Whether `attacker` may damage `target` right now. Gated first by the
-    /// victim's ground (Sanctuary blocks everything; Guarded ground only lets
-    /// the home faction — or a retaliating victim — fight), then by faction
-    /// hostility.
+    /// Whether the actor behind `id` is inside its post-respawn grace window
+    /// (takes no damage AND deals none while the timer runs).
+    fn spawn_protected(&self, id: EntityId) -> bool {
+        if let Some(p) = self.players.get(&id) {
+            return p.spawn_protection > 0.0;
+        }
+        self.agent_by_entity
+            .get(&id)
+            .is_some_and(|&i| self.agents[i].spawn_protection > 0.0)
+    }
+
+    /// Whether `pos` sits inside any Safehouse's protective bubble.
+    fn in_safehouse_bubble(&self, pos: Vec3) -> bool {
+        self.services_by_kind
+            .get(&EntityKind::Safehouse)
+            .is_some_and(|v| v.iter().any(|&(_, p)| (p - pos).length() < SAFEHOUSE_RADIUS))
+    }
+
+    /// Whether `attacker` may damage `target` right now. Everyone is fair
+    /// game everywhere — hostility is the faction matrix (all three factions
+    /// mutually hostile, same-faction never) — except in safe zones:
+    /// Sanctuary ground and safehouse bubbles block all damage, and a
+    /// spawn-protected (just-respawned) actor neither takes nor deals any.
     fn damage_allowed(&self, attacker: EntityId, target: EntityId) -> bool {
-        let Some((_, attacker_faction, attacker_alive)) = self.combatant(attacker) else {
+        let Some((attacker_pos, attacker_faction, attacker_alive)) = self.combatant(attacker)
+        else {
             return false;
         };
         let Some((victim_pos, victim_faction, victim_alive)) = self.combatant(target) else {
@@ -5191,16 +5114,14 @@ impl World {
         if !attacker_alive || !victim_alive {
             return false;
         }
-        match districts::danger_at(victim_pos) {
-            DangerLevel::Sanctuary => return false,
-            DangerLevel::Guarded => {
-                let home = districts::home_faction_at(victim_pos);
-                let retaliating = self.recent_attacks.contains_key(&(target, attacker));
-                if attacker_faction != home && !retaliating {
-                    return false;
-                }
-            }
-            DangerLevel::Contested | DangerLevel::Warzone => {}
+        if self.spawn_protected(attacker) || self.spawn_protected(target) {
+            return false;
+        }
+        if districts::danger_at(victim_pos) == DangerLevel::Sanctuary {
+            return false;
+        }
+        if self.in_safehouse_bubble(victim_pos) || self.in_safehouse_bubble(attacker_pos) {
+            return false;
         }
         are_hostile(attacker_faction, victim_faction)
     }
@@ -5217,15 +5138,10 @@ impl World {
         if !self.damage_allowed(attacker, target) {
             return false;
         }
-        // Grant the victim's side retaliation rights against this attacker.
-        self.recent_attacks.insert((attacker, target), RETALIATION_SECONDS);
         let impact = impact
             .or_else(|| self.entity_position(target).map(|p| Vec3::new(p.x, 1.25, p.z)))
             .unwrap_or_default();
-        if self.npcs.contains_key(&target) {
-            self.damage_npc(attacker, target, damage, impact);
-            true
-        } else if self.players.contains_key(&target) {
+        if self.players.contains_key(&target) {
             self.damage_player(attacker, target, damage);
             true
         } else if let Some(&idx) = self.agent_by_entity.get(&target) {
@@ -5270,6 +5186,11 @@ impl World {
             if let Some(&killer_idx) = self.agent_by_entity.get(&attacker) {
                 self.agents[killer_idx]
                     .learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
+                if self.agents[killer_idx].owner.is_some() {
+                    let victim = self.agents[idx].name.clone();
+                    let aid = self.agents[killer_idx].agent_id;
+                    self.push_agent_log(aid, format!("Killed {victim}"));
+                }
             }
             // Hot-tier death: a real body drops real loot.
             self.kill_agent(idx, true);
@@ -5280,14 +5201,24 @@ impl World {
         }
     }
 
-    /// Kill an agent. Hot deaths (`drop_loot`) leave a loot container and
-    /// coin spill where the body fell; cold statistical deaths burn the
-    /// carried goods outright. Either way every carried currency burns
-    /// (banked balances survive, like players), the ledger hears about
-    /// everything, and a fresh identity respawns at the faction's Guarded
-    /// home district after the timer. Equipped gear stays on the identity,
-    /// exactly like a player's jacket staying on their back.
+    /// Kill an agent. Hot deaths (`drop_loot`) leave a loot container and a
+    /// currency spill where the body fell; cold statistical deaths (no body)
+    /// burn the carried goods outright. Either way every carried currency
+    /// burns on the ledger (banked balances survive, like players); with a
+    /// body, half of each balance then drops as pickups that re-mint on
+    /// collection, so net supply stays coherent (-carried at death, +spill
+    /// on pickup, the rest permanently burned). A fresh identity respawns at
+    /// the faction's home (Guarded district, or the Wape's scattered anchor)
+    /// after the timer. Equipped gear stays on the identity, exactly like a
+    /// player's jacket staying on their back.
     fn kill_agent(&mut self, idx: usize, drop_loot: bool) {
+        if self.agents[idx].owner.is_some() {
+            let aid = self.agents[idx].agent_id;
+            self.push_agent_log(
+                aid,
+                "Died in the field — carried MILD and cargo lost".to_string(),
+            );
+        }
         let (entity, position, items, burned, party, agent_id) = {
             let agent = &mut self.agents[idx];
             agent.health = 0.0;
@@ -5344,11 +5275,9 @@ impl World {
         if drop_loot {
             self.broadcast_combat(CombatEvent::EntityDied { id: entity });
             self.spawn_loot_scattered(position, items, Some(party), false);
-            use rand::Rng;
-            let coins = self.rng.random_range(1..=3);
-            for _ in 0..coins {
-                let amount = self.rng.random_range(1..=3);
-                self.spawn_currency_pickup(position, Currency::Wild, amount);
+            // Half of each carried balance spills at the body (see above).
+            for currency in Currency::ALL {
+                self.spawn_currency_pickup(position, currency, burned[currency.index()] / 2);
             }
         }
     }
@@ -5381,12 +5310,6 @@ impl World {
     }
 
     fn tick_agents(&mut self) {
-        // Retaliation flags decay in real time.
-        self.recent_attacks.retain(|_, t| {
-            *t -= TICK_DT;
-            *t > 0.0
-        });
-
         // Hot/cold classification: every chunk within HOT_RADIUS of any
         // connected player is hot ground. Iterate players, not agents.
         // Hysteresis: an already-hot agent stays hot one ring further out
@@ -5593,15 +5516,17 @@ impl World {
         }
     }
 
-    /// Cold-tier statistical combat: in regions where both factions'
+    /// Cold-tier statistical combat: in regions where two or more factions'
     /// (non-replicated) agents co-occupy contested ground with no player
-    /// nearby, resolve casualties with strength-weighted rolls.
+    /// nearby, resolve casualties with strength-weighted rolls. All three
+    /// factions are mutually hostile, so each side rolls against the
+    /// combined strength of everyone else present.
     fn tick_cold_combat(&mut self, hot_chunks: &HashSet<ChunkCoord>) {
         use rand::Rng;
         // Bucket cold agents by territory region, walking the maintained
         // spatial grid (living agents grouped by chunk, region derived once
         // per bucket) instead of enumerating the whole population.
-        let mut regions: HashMap<(i32, i32), (Vec<usize>, Vec<usize>)> = HashMap::new();
+        let mut regions: HashMap<(i32, i32), [Vec<usize>; 3]> = HashMap::new();
         for (chunk, grid_bucket) in &self.agent_grid {
             if grid_bucket.is_empty() {
                 continue;
@@ -5618,43 +5543,63 @@ impl World {
                 }
                 let bucket = regions.entry(region).or_default();
                 match agent.faction {
-                    FACTION_REBELS => bucket.0.push(i as usize),
-                    FACTION_FORUM => bucket.1.push(i as usize),
+                    FACTION_REBELS => bucket[0].push(i as usize),
+                    FACTION_FORUM => bucket[1].push(i as usize),
+                    FACTION_WAPES => bucket[2].push(i as usize),
                     _ => {}
                 }
             }
         }
         let mut casualties: Vec<(usize, usize)> = Vec::new();
-        for (_, (rebels, forum)) in regions {
-            if rebels.is_empty() || forum.is_empty() {
+        for (_, sides) in regions {
+            if sides.iter().filter(|s| !s.is_empty()).count() < 2 {
                 continue;
             }
             // Skip regions with any player-adjacent (hot) chunk: embodied
             // combat owns those.
-            let any_hot = rebels
+            let any_hot = sides
                 .iter()
-                .chain(forum.iter())
+                .flatten()
                 .any(|&i| hot_chunks.contains(&self.agents[i].chunk()));
             if any_hot {
                 continue;
             }
-            let strength = |side: &[usize]| -> f32 {
-                side.iter().map(|&i| self.agents[i].strength()).sum::<f32>().max(1.0)
-            };
-            let (rs, fs) = (strength(&rebels), strength(&forum));
+            let strengths: Vec<f32> = sides
+                .iter()
+                .map(|side| {
+                    side.iter().map(|&i| self.agents[i].strength()).sum::<f32>().max(1.0)
+                })
+                .collect();
             // Each side risks one casualty per resolution, weighted by how
             // outgunned it is (capped so skirmishes stay slow burns). The
-            // kill is credited to a random fighter on the winning side.
-            let mut roll = |side: &[usize], enemy_side: &[usize], own: f32, enemy: f32, rng: &mut SmallRng| {
+            // kill is credited to a random fighter among everyone else.
+            for s in 0..sides.len() {
+                if sides[s].is_empty() {
+                    continue;
+                }
+                let enemies: Vec<usize> = sides
+                    .iter()
+                    .enumerate()
+                    .filter(|&(e, _)| e != s)
+                    .flat_map(|(_, side)| side.iter().copied())
+                    .collect();
+                if enemies.is_empty() {
+                    continue;
+                }
+                let own = strengths[s];
+                let enemy: f32 = strengths
+                    .iter()
+                    .enumerate()
+                    .filter(|&(e, _)| e != s && !sides[e].is_empty())
+                    .map(|(_, &st)| st)
+                    .sum();
                 let p = (enemy / (own + enemy) * 0.25).min(0.2) as f64;
-                if rng.random_bool(p) {
-                    let victim = side[rng.random_range(0..side.len())];
-                    let killer = enemy_side[rng.random_range(0..enemy_side.len())];
+                if self.rng.random_bool(p) {
+                    let victim = sides[s][self.rng.random_range(0..sides[s].len())];
+                    let killer = enemies[self.rng.random_range(0..enemies.len())];
                     casualties.push((victim, killer));
                 }
-            };
-            roll(&rebels, &forum, rs, fs, &mut self.rng);
-            roll(&forum, &rebels, fs, rs, &mut self.rng);
+            }
         }
         for (idx, killer) in casualties {
             if self.agents[idx].alive() {
@@ -5668,6 +5613,11 @@ impl World {
                 let spoils = self.agents[idx].wallet() + self.agents[idx].carried_value();
                 if self.agents[killer].alive() {
                     self.agents[killer].learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
+                    if self.agents[killer].owner.is_some() {
+                        let victim = self.agents[idx].name.clone();
+                        let aid = self.agents[killer].agent_id;
+                        self.push_agent_log(aid, format!("Killed {victim}"));
+                    }
                 }
                 self.kill_agent(idx, false);
             }
@@ -5676,9 +5626,9 @@ impl World {
 
     fn respawn_agent(&mut self, idx: usize) {
         let faction = self.agents[idx].faction;
-        // Hub-cohort agents respawn at their staging ground so the war over
-        // the starter playfield never drains away; everyone else returns to
-        // the faction's home district.
+        // Anchored agents (hub cohorts, scattered Wapes) respawn at their
+        // staging ground so the war over the starter playfield never drains
+        // away; everyone else returns to the faction's home district.
         let home_spot = self.agents[idx].home_spot;
         let home = match home_spot {
             Some(_) => self.agents[idx].home,
@@ -5689,10 +5639,11 @@ impl World {
         let position = self.walkable_spot_near(spot, 12.0);
         let (agent_id, name) = mint_agent_name(faction);
         let old_entity = self.agents[idx].entity;
+        let old_agent_id = self.agents[idx].agent_id;
         // The dead identity leaves the boards; its faction/guild legacy stays
         // — and so do its learned traits (death already charged the fatal
         // activity in kill_agent), so agents grow and evolve across lives.
-        self.stats.retire(self.agents[idx].agent_id);
+        self.stats.retire(old_agent_id);
         let entity = self.alloc_entity();
         {
             let agent = &mut self.agents[idx];
@@ -5710,9 +5661,26 @@ impl World {
             agent.path.clear();
             agent.path_request = None;
             agent.retreat_cooldown = 0.0;
+            // Fresh spawns get a short grace window (no damage in or out).
+            agent.spawn_protection = SPAWN_PROTECT_SECONDS;
         }
         self.agent_by_entity.remove(&old_entity);
         self.agent_by_entity.insert(entity, idx);
+        // Owned agents carry their activity log across lives, re-keyed to
+        // the fresh identity (ownership itself lives on the slot and was
+        // never cleared).
+        if self.agents[idx].owner.is_some() {
+            let mut log = self.agent_logs.remove(&old_agent_id).unwrap_or_default();
+            if log.len() >= AGENT_LOG_CAP {
+                log.pop_front();
+            }
+            let name = self.agents[idx].name.clone();
+            log.push_back(AgentLogEntry {
+                at_ms: ledger::unix_ms(),
+                text: format!("Respawned as {name}"),
+            });
+            self.agent_logs.insert(agent_id, log);
+        }
         // Alive again at the staging ground: back into the spatial grid.
         self.regrid_agent(idx);
         // Fresh identities start with a modest grubstake and a kit that
@@ -5786,6 +5754,23 @@ impl World {
         // before their first pickup/cache tap; the rest earn it in the field.
         if traits.leans(Activity::Craft) {
             self.grant_currency_actor(EconActor::Agent(idx), Currency::Energy, 5);
+        }
+        // Wapes carry street Cash scaled to their home turf's zone (the drop
+        // tables the retired wild NPCs used), so killing Wapes still feeds
+        // the Cash -> Bank conversion loop.
+        if self.agents[idx].faction == FACTION_WAPES {
+            let anchor = self.agents[idx].home_spot.unwrap_or(self.agents[idx].position);
+            let zone = zone_of_chunk(ChunkCoord::from_world(anchor));
+            let raider_like = traits.leans(Activity::Fight);
+            let cash = wape_grubstake_cash(&mut self.rng, zone, raider_like);
+            self.agents[idx].add_item(ItemKind::Cash, cash);
+            self.ledger.record(
+                TxKind::Mint,
+                TxParty::Mint,
+                party.clone(),
+                TxAmount::Item { kind: ItemKind::Cash, count: cash },
+                0,
+            );
         }
         self.agents[idx].equip_best_gear();
         // Accumulated savings survive death: pull a comeback stake from the
@@ -5951,10 +5936,22 @@ impl World {
     /// Commit `idx` to `goal`, recording its load on any congestible service
     /// so peers deciding later this tick route around it.
     fn commit_goal(&mut self, idx: usize, goal: Goal) {
+        let prev_label = goal_activity_label(self.agents[idx].goal);
         self.agents[idx].goal = goal;
         self.agents[idx].goal_age = 0.0;
         if let Some(e) = goal_service_target(goal) {
             *self.service_load.entry(e).or_insert(0) += 1;
+        }
+        // Owned agents narrate goal changes (label transitions only —
+        // re-committing to another node of the same activity stays quiet,
+        // and returning to Idle between errands isn't news).
+        if self.agents[idx].owner.is_some() {
+            let label = goal_activity_label(goal);
+            if label != prev_label && !matches!(goal, Goal::Idle) {
+                let text = self.agent_goal_description(idx);
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(aid, text);
+            }
         }
     }
 
@@ -6521,8 +6518,8 @@ impl World {
     }
 
     /// Nearest hostile combatant within engagement range that current danger
-    /// rules allow attacking. Players and NPCs are scanned directly (small
-    /// sets); agents come from the spatial hash.
+    /// rules allow attacking. Players are scanned directly (a small set);
+    /// agents come from the spatial hash.
     fn find_hostile_target(&self, me: EntityId, pos: Vec3, faction: FactionId) -> Option<EntityId> {
         const ENGAGE_RANGE: f32 = 48.0;
         let mut best: Option<(f32, EntityId)> = None;
@@ -6543,12 +6540,7 @@ impl World {
         };
         for p in self.players.values() {
             if p.character.health > 0.0 {
-                consider(p.entity, p.character.position, FACTION_REBELS, &mut best);
-            }
-        }
-        for n in self.npcs.values() {
-            if n.alive() {
-                consider(n.entity, n.position, FACTION_WAPES, &mut best);
+                consider(p.entity, p.character.position, p.character.faction, &mut best);
             }
         }
         let center = ChunkCoord::from_world(pos);
@@ -6665,7 +6657,22 @@ impl World {
             .map_or(0, |p| p.carried(Currency::Wild));
         let deposit = carried.saturating_sub(agents::AGENT_BANK_KEEP);
         if deposit > 0 {
-            let _ = self.move_to_bank(EconActor::Agent(idx), Currency::Wild, deposit, true);
+            // Owned agents pay their employer's cut off the top of every
+            // deposit; the rest goes into the agent's own vault.
+            let share = if self.agents[idx].owner.is_some() {
+                deposit * OWNER_SHARE_PCT / 100
+            } else {
+                0
+            };
+            self.pay_owner_share(idx, share);
+            let vaulted = deposit - share;
+            if vaulted > 0 {
+                let _ = self.move_to_bank(EconActor::Agent(idx), Currency::Wild, vaulted, true);
+            }
+            if self.agents[idx].owner.is_some() {
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(aid, format!("Banked {vaulted} MILD ({share} to you)"));
+            }
         }
         // Vaulted: suppress another wealth run for a while, then back to work.
         let agent = &mut self.agents[idx];
@@ -6707,6 +6714,11 @@ impl World {
             self.agents[idx].learn(Activity::Haul, value as f32);
             let picker = self.agents[idx].party();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
+            if self.agents[idx].owner.is_some() {
+                let units: u32 = taken.iter().map(|s| s.count).sum();
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(aid, format!("Picked up loot ({units} items)"));
+            }
             // Ammo caches carry the same small Energy charge players tap.
             if variant == 1 {
                 self.grant_currency_actor(EconActor::Agent(idx), Currency::Energy, 1);
@@ -6781,8 +6793,17 @@ impl World {
                 (have > 0).then_some((o.kind, have))
             })
             .collect();
+        let wallet_before = self.agents[idx].purse.carried(Currency::Wild);
         for (kind, count) in sellables {
             let _ = self.vendor_sell(EconActor::Agent(idx), store, kind, count);
+        }
+        if self.agents[idx].owner.is_some() {
+            let earned =
+                self.agents[idx].purse.carried(Currency::Wild).saturating_sub(wallet_before);
+            if earned > 0 {
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(aid, format!("Sold goods at a vendor for {earned} MILD"));
+            }
         }
         self.agents[idx].goal = Goal::Idle;
     }
@@ -6792,7 +6813,12 @@ impl World {
     /// and ledger legs; failures just drop the errand).
     fn agent_vendor_buy(&mut self, idx: usize, store: EntityId, kind: ItemKind, count: u32) {
         self.agents[idx].goal = Goal::Idle;
-        let _ = self.vendor_buy(EconActor::Agent(idx), store, kind, count);
+        if self.vendor_buy(EconActor::Agent(idx), store, kind, count).is_ok()
+            && self.agents[idx].owner.is_some()
+        {
+            let aid = self.agents[idx].agent_id;
+            self.push_agent_log(aid, format!("Bought {count} {}", kind.display_name()));
+        }
     }
 
     /// Best-margin recipe the agent KNOWS (net of the Energy burn),
@@ -6904,7 +6930,7 @@ impl World {
     }
 
     /// Cheapest live ask for `kind` the agent can afford, when it beats the
-    /// NPC vendor's counter price (at-or-under: same MILD, but the fill keeps
+    /// vendor's counter price (at-or-under: same MILD, but the fill keeps
     /// the floating market alive). No vendor line for the kind → any
     /// affordable ask up to twice the market reference qualifies.
     fn market_bargain(&self, kind: ItemKind, wallet: u32) -> Option<u32> {
@@ -7045,6 +7071,16 @@ impl World {
             };
             self.next_listing_id += 1;
             self.market.push(listing);
+            if self.agents[idx].owner.is_some() {
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(
+                    aid,
+                    format!(
+                        "Listed {removed} {} at {price_each} MILD each",
+                        kind.display_name()
+                    ),
+                );
+            }
         }
         self.save_market();
     }
@@ -7164,7 +7200,7 @@ impl World {
         if let Ok(ch) = self.store.character(seller) {
             if let Ok(account) = self.store.account_by_id(ch.account_id) {
                 let _ = self.store.update_wallet(account.id, account.wallet + proceeds);
-                return TxParty::Player { id: seller, name: ch.name, faction: FACTION_REBELS };
+                return TxParty::Player { id: seller, name: ch.name, faction: ch.faction };
             }
         }
         TxParty::Burn
@@ -7225,6 +7261,10 @@ impl World {
         if let Some(job_id) = self.queue_production(EconActor::Agent(idx), station, recipe, batch)
         {
             self.agents[idx].pending_jobs.push((station, job_id));
+            if self.agents[idx].owner.is_some() {
+                let aid = self.agents[idx].agent_id;
+                self.push_agent_log(aid, format!("Queued {batch}x {recipe} for crafting"));
+            }
         }
     }
 
@@ -7243,6 +7283,11 @@ impl World {
         let Goal::Collect { building, .. } = self.agents[idx].goal else { return };
         self.agents[idx].goal = Goal::Idle;
         let collected = self.collect_production(EconActor::Agent(idx), building);
+        if !collected.is_empty() && self.agents[idx].owner.is_some() {
+            let units: u32 = collected.iter().map(|s| s.count).sum();
+            let aid = self.agents[idx].agent_id;
+            self.push_agent_log(aid, format!("Collected {units} crafted units"));
+        }
         if collected.is_empty() {
             // Nothing here for us (raced a purge or a stale note): drop the
             // note so the brain stops routing back.
@@ -7323,17 +7368,33 @@ impl World {
         tracing::info!(agents = self.agents.len(), layout = AGENT_SEED_LAYOUT, "faction agents seeded");
     }
 
-    /// Seed `total` agents. Half the population is a **hub cohort** staged
-    /// inside the spawn hub's combat ring (Rebels south-east, Forum
-    /// north-west) so the faction war plays out on the starter playfield
-    /// players actually see. The rest split by faction geography (Rebels
-    /// southern districts, Forum northern), with randomized trait priors.
-    /// Deterministic from the world seed.
+    /// Seed `total` agents with the Wape share from `WILDER_WAPE_SHARE`
+    /// (percent, default 20).
     fn seed_agents(&mut self, total: usize) {
+        let wape_share: u32 = std::env::var("WILDER_WAPE_SHARE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20)
+            .min(100);
+        self.seed_agents_with_wape_share(total, wape_share);
+    }
+
+    /// Seed `total` agents. `wape_share` percent seed as wild Wapes on
+    /// scattered anchors across hostile ground (the retired NPC spawns'
+    /// density feel: thinned inside the hub combat ring, denser outside).
+    /// Of the organized remainder (50/50 Rebels/Forum), half is a **hub
+    /// cohort** staged inside the spawn hub's combat ring (Rebels
+    /// south-east, Forum north-west) so the faction war plays out on the
+    /// starter playfield players actually see; the rest split by faction
+    /// geography (Rebels southern districts, Forum northern), with
+    /// randomized trait priors. Deterministic from the world seed.
+    fn seed_agents_with_wape_share(&mut self, total: usize, wape_share: u32) {
         use rand::Rng;
         let mut seed_rng = SmallRng::seed_from_u64(self.seed ^ 0xA6E175);
         let defs = districts::district_defs();
-        let hub_cohort = total / 2;
+        let wape_total = total * wape_share as usize / 100;
+        let org_total = total - wape_total;
+        let hub_cohort = org_total / 2;
         // Home pools by geography: Rebels take the southern half (z >= 0),
         // Forum the northern (z < 0). Guarded homes get extra weight.
         let pool = |faction: FactionId| -> Vec<usize> {
@@ -7356,7 +7417,7 @@ impl World {
         let rebel_pool = pool(FACTION_REBELS);
         let forum_pool = pool(FACTION_FORUM);
 
-        for n in 0..total {
+        for n in 0..org_total {
             let faction = if n % 2 == 0 { FACTION_REBELS } else { FACTION_FORUM };
             let in_hub = n < hub_cohort;
             let home_pool = if faction == FACTION_REBELS { &rebel_pool } else { &forum_pool };
@@ -7416,6 +7477,8 @@ impl World {
                     blueprints: Vec::new(),
                     stash: Vec::new(),
                     pending_jobs: Vec::new(),
+                    owner: None,
+                    lifetime_owner_earnings: 0,
                     position,
                     health: 100.0,
                     max_health: 100.0,
@@ -7429,6 +7492,98 @@ impl World {
             self.regrid_agent(idx);
             self.grubstake_agent(idx);
         }
+
+        // Wild Wapes: no guarded home district — each one anchors to a
+        // scattered spot on hostile ground (`home_spot`) it stages at,
+        // respawns at, and roams from. Scav-like and raider-like trait
+        // priors replace the old fixed archetypes. Anchors come from a
+        // bounded set of pack sites: each site probe generates fresh chunks
+        // (rejection sampling over the whole map), so site count — not
+        // population — bounds the seeding cost; a site hosts a small pack.
+        if wape_total == 0 {
+            return;
+        }
+        let site_count = wape_total.div_ceil(4).min(256);
+        let sites: Vec<Vec3> =
+            (0..site_count).map(|_| self.wape_anchor(&mut seed_rng)).collect();
+        for n in 0..wape_total {
+            let anchor = sites[n % sites.len()];
+            let home = districts::district_of(anchor).map(|(i, _)| i).unwrap_or(0);
+            let traits = Traits::wape_seeded(&mut seed_rng);
+            let (agent_id, name) = mint_agent_name(FACTION_WAPES);
+            let mut position = anchor;
+            for _ in 0..8 {
+                let c = anchor
+                    + Vec3::new(
+                        seed_rng.random_range(-20.0..20.0),
+                        0.0,
+                        seed_rng.random_range(-20.0..20.0),
+                    );
+                if self.chunks.walkable(c.x, c.z) {
+                    position = c;
+                    break;
+                }
+            }
+            let entity = self.alloc_entity();
+            let mut agent = FactionAgent::from_save(
+                entity,
+                AgentSave {
+                    agent_id,
+                    name,
+                    faction: FACTION_WAPES,
+                    guild: guild_for(FACTION_WAPES, home),
+                    traits,
+                    home,
+                    home_spot: Some(anchor),
+                    purse: Purse::default(),
+                    inventory: Inventory::new(),
+                    blueprints: Vec::new(),
+                    stash: Vec::new(),
+                    pending_jobs: Vec::new(),
+                    owner: None,
+                    lifetime_owner_earnings: 0,
+                    position,
+                    health: 100.0,
+                    max_health: 100.0,
+                },
+            );
+            agent.decision_timer = seed_rng.random_range(0.0..2.0);
+            let idx = self.agents.len();
+            self.agent_by_entity.insert(entity, idx);
+            self.agents.push(agent);
+            self.regrid_agent(idx);
+            self.grubstake_agent(idx);
+        }
+    }
+
+    /// Scattered home anchor for one seeded Wape: a walkable spot on hostile
+    /// (Contested/Warzone) ground. Mirrors the retired per-chunk NPC spawn
+    /// density feel — inside the hub combat ring only ~25% of samples are
+    /// accepted, so packs thin out near spawn and thicken beyond it.
+    fn wape_anchor(&mut self, rng: &mut SmallRng) -> Vec3 {
+        use rand::Rng;
+        for _ in 0..48 {
+            let radius = rng.random_range(150.0..1500.0f32);
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
+            let candidate = Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin());
+            if radius < districts::HUB_COMBAT_RING_M && !rng.random_bool(0.25) {
+                continue; // hub-ring thinning
+            }
+            if !matches!(
+                districts::danger_at(candidate),
+                DangerLevel::Contested | DangerLevel::Warzone
+            ) {
+                continue;
+            }
+            let spot = self.nearest_walkable(candidate);
+            if matches!(
+                districts::danger_at(spot),
+                DangerLevel::Contested | DangerLevel::Warzone
+            ) {
+                return spot;
+            }
+        }
+        self.nearest_walkable(HUB_FRONT_SPOT)
     }
 
     /// Place a service cluster in every named district: Bodega, Armory,
@@ -7509,7 +7664,7 @@ impl World {
     fn tick_loot(&mut self) {
         let now = self.world_seconds();
         // Auto-pickup: walking within range of any loot container (ammo
-        // cache, NPC/player drop) grabs it instantly.
+        // cache, agent/player drop) grabs it instantly.
         let mut grabbed: Vec<(EntityId, EntityId)> = Vec::new();
         for player in self.players.values() {
             for container in self.loot.values() {
@@ -7561,7 +7716,7 @@ impl World {
             let grabbed_any = !taken.is_empty();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
             // Only ammo caches carry the small Energy charge; ordinary drops
-            // (NPC/player loot) don't mint currency on pickup.
+            // (agent/player loot) don't mint currency on pickup.
             if grabbed_any && variant == 1 {
                 self.grant_energy(pid, 1);
             }
@@ -7705,33 +7860,23 @@ impl World {
     // -----------------------------------------------------------------------
 
     fn agents_alive(&self) -> u32 {
-        (self.npcs.values().filter(|n| n.alive()).count()
-            + self.agents.iter().filter(|a| a.alive()).count()) as u32
+        self.agents.iter().filter(|a| a.alive()).count() as u32
     }
 
     // -----------------------------------------------------------------------
     // Leaderboards
     // -----------------------------------------------------------------------
 
-    /// Competitor identity behind a live entity id (player, agent or Wape),
-    /// for stat attribution.
+    /// Competitor identity behind a live entity id (player or agent), for
+    /// stat attribution.
     fn actor_ref(&self, entity: EntityId) -> Option<ActorRef> {
         if let Some(p) = self.players.get(&entity) {
             return Some(ActorRef {
                 id: p.character.id,
                 name: p.character.name.clone(),
-                faction: FACTION_REBELS,
+                faction: p.character.faction,
                 guild: None,
                 is_player: true,
-            });
-        }
-        if let Some(n) = self.npcs.get(&entity) {
-            return Some(ActorRef {
-                id: n.agent_id,
-                name: n.agent_name.clone(),
-                faction: FACTION_FORUM,
-                guild: None,
-                is_player: false,
             });
         }
         self.agent_by_entity.get(&entity).map(|&i| {
@@ -7768,7 +7913,7 @@ impl World {
             live.push(LiveActor {
                 id: p.character.id,
                 name: p.character.name.clone(),
-                faction: FACTION_REBELS,
+                faction: p.character.faction,
                 guild: None,
                 wealth: p.purse.carried(Currency::Wild) as i64
                     + p.purse.banked(Currency::Wild) as i64,
@@ -7811,7 +7956,8 @@ impl World {
     // -----------------------------------------------------------------------
 
     /// The live map actors that actually move and stay few in number:
-    /// players (kind 0) and wild Wapes (kind 2). Faction agents are shipped
+    /// players (kind 0) and nearby hot Wape agents (kind 2, the wild
+    /// hostiles worth flagging on the minimap). Faction agents are shipped
     /// once as a static `MapCensus` on subscribe (see `map_census_blips`), so
     /// this ~5 Hz stream stays tiny no matter how big the population is.
     fn map_intel_blips(&self) -> Vec<AgentBlip> {
@@ -7823,23 +7969,24 @@ impl World {
             }
             blips.push(AgentBlip {
                 id: p.entity,
-                faction: FACTION_REBELS,
+                faction: p.character.faction,
                 kind: 0,
                 x: q(p.character.position.x),
                 z: q(p.character.position.z),
                 count: 1,
             });
         }
-        for n in self.npcs.values() {
-            if !n.alive() {
+        for &i in &self.hot_agents {
+            let a = &self.agents[i as usize];
+            if a.tier != Tier::Hot || !a.alive() || a.faction != FACTION_WAPES {
                 continue;
             }
             blips.push(AgentBlip {
-                id: n.entity,
+                id: a.entity,
                 faction: FACTION_WAPES,
                 kind: 2,
-                x: q(n.position.x),
-                z: q(n.position.z),
+                x: q(a.position.x),
+                z: q(a.position.z),
                 count: 1,
             });
         }
@@ -7878,6 +8025,62 @@ impl World {
         let blips = self.map_intel_blips();
         for p in self.players.values().filter(|p| p.map_intel) {
             let _ = p.tx.send(S2C::MapIntel { blips: blips.clone() });
+        }
+    }
+
+    /// Living faction agents in the ring just beyond a player's replicated
+    /// entity view (`VIEW_RADIUS` chunks) out to `DOT_RADIUS_CHUNKS`, as
+    /// compact static blips. These drive the client's third LOD tier: glowing
+    /// dots for agents too far to be full rigs or capsule impostors. The inner
+    /// view ring is skipped so a dot never doubles a replicated entity. Walks
+    /// only the `agent_grid` buckets in the ring, so cost scales with local
+    /// agent density, not the whole population; capped nearest-first.
+    fn nearby_agent_dots(&self, origin: Vec3) -> Vec<AgentBlip> {
+        let q = |v: f32| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let center = ChunkCoord::from_world(origin);
+        let mut ranked: Vec<(f32, AgentBlip)> = Vec::new();
+        for dz in -DOT_RADIUS_CHUNKS..=DOT_RADIUS_CHUNKS {
+            for dx in -DOT_RADIUS_CHUNKS..=DOT_RADIUS_CHUNKS {
+                // Skip the inner replicated ring: those agents already draw as
+                // full rigs / capsule impostors on the client.
+                if dx.abs() <= VIEW_RADIUS && dz.abs() <= VIEW_RADIUS {
+                    continue;
+                }
+                let coord = ChunkCoord::new(center.x + dx, center.z + dz);
+                let Some(bucket) = self.agent_grid.get(&coord) else { continue };
+                for &i in bucket {
+                    let a = &self.agents[i as usize];
+                    if !a.alive() {
+                        continue;
+                    }
+                    let d2 = (a.position - origin).length_squared();
+                    ranked.push((
+                        d2,
+                        AgentBlip {
+                            id: 0,
+                            faction: a.faction,
+                            kind: 1,
+                            x: q(a.position.x),
+                            z: q(a.position.z),
+                            count: 1,
+                        },
+                    ));
+                }
+            }
+        }
+        if ranked.len() > DOT_MAX {
+            ranked.select_nth_unstable_by(DOT_MAX, |a, b| a.0.total_cmp(&b.0));
+            ranked.truncate(DOT_MAX);
+        }
+        ranked.into_iter().map(|(_, b)| b).collect()
+    }
+
+    /// Push the far-agent dot feed to every in-world player (always on, no
+    /// subscription — this is a live-map LOD layer, not a menu overlay).
+    fn broadcast_agent_dots(&self) {
+        for p in self.players.values() {
+            let blips = self.nearby_agent_dots(p.character.position);
+            let _ = p.tx.send(S2C::AgentDots { blips });
         }
     }
 
@@ -8015,6 +8218,449 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // Owned agents: hire / dismiss / roster + detail subscriptions
+    // -----------------------------------------------------------------------
+
+    /// Rebuild the owner → agent-indices index from scratch (startup, after
+    /// `load_or_seed_agents`). Hire/dismiss maintain it incrementally; agent
+    /// indices are stable across respawn (the slot is reused), so nothing
+    /// else ever needs to touch it.
+    fn rebuild_owned_agents(&mut self) {
+        self.owned_agents.clear();
+        for (idx, agent) in self.agents.iter().enumerate() {
+            if let Some(owner) = agent.owner {
+                self.owned_agents.entry(owner).or_default().push(idx);
+            }
+        }
+    }
+
+    /// MILD price to hire this agent: `base + total wealth / 2 + rate *
+    /// strongest trait payoff`. Wealth (carried + banked MILD) prices the
+    /// balance sheet you'd start earning a share of; the strongest payoff
+    /// EMA (MILD/min) prices proven skill. A character's FIRST hire is free
+    /// (starter grant) — that discount is applied at charge time, not here.
+    fn agent_hire_cost(&self, idx: usize) -> u32 {
+        let a = &self.agents[idx];
+        let wealth = a.purse.carried(Currency::Wild) + a.purse.banked(Currency::Wild);
+        let strongest = a.traits.payoff.iter().fold(0.0f32, |m, &p| m.max(p));
+        AGENT_HIRE_BASE + wealth / 2 + (strongest * AGENT_HIRE_TRAIT_RATE) as u32
+    }
+
+    fn send_agent_result(&self, entity: EntityId, ok: bool, error: Option<String>) {
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::AgentResult { ok, error });
+        }
+    }
+
+    /// Roster line for one agent. `hire_cost` is only filled for
+    /// `AgentHireOffers` candidates.
+    fn agent_summary(&self, idx: usize, hire_cost: Option<u32>) -> AgentSummary {
+        let a = &self.agents[idx];
+        AgentSummary {
+            agent_id: a.agent_id,
+            name: a.name.clone(),
+            faction: a.faction,
+            guild: a.guild.clone(),
+            archetype: a.traits.archetype().to_string(),
+            activity: if a.alive() { goal_activity_label(a.goal).to_string() } else { "Dead".to_string() },
+            health: a.health.max(0.0),
+            max_health: a.max_health,
+            x: a.position.x,
+            z: a.position.z,
+            carried_wild: a.purse.carried(Currency::Wild),
+            banked_wild: a.purse.banked(Currency::Wild),
+            lifetime_owner_earnings: a.lifetime_owner_earnings,
+            hire_cost,
+        }
+    }
+
+    /// Immediate `AgentRoster` push of this player's owned agents.
+    fn send_agent_roster(&self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let agents = self
+            .owned_agents
+            .get(&player.character.id)
+            .map(|idxs| idxs.iter().map(|&i| self.agent_summary(i, None)).collect())
+            .unwrap_or_default();
+        let _ = player.tx.send(S2C::AgentRoster { agents });
+    }
+
+    /// Roster refresh on hire/dismiss for players who are subscribed.
+    fn refresh_agent_roster(&self, entity: EntityId) {
+        if self.players.get(&entity).is_some_and(|p| p.agent_sub) {
+            self.send_agent_roster(entity);
+        }
+    }
+
+    /// `C2S::HireAgent`: take ownership of an unowned, living, same-faction
+    /// agent. The first hire per character is free (starter grant); later
+    /// hires charge `agent_hire_cost` MILD from the carried wallet and burn
+    /// the fee (a MILD sink — nobody sold the agent).
+    fn hire_agent(&mut self, entity: EntityId, agent_id: AgentId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let char_id = player.character.id;
+        let faction = player.character.faction;
+        let Some(idx) = self.agents.iter().position(|a| a.agent_id == agent_id) else {
+            self.send_agent_result(entity, false, Some("agent not found".into()));
+            return;
+        };
+        if self.agents[idx].owner.is_some() {
+            self.send_agent_result(entity, false, Some("agent already has an employer".into()));
+            return;
+        }
+        if !self.agents[idx].alive() {
+            self.send_agent_result(entity, false, Some("agent is dead".into()));
+            return;
+        }
+        if self.agents[idx].faction != faction {
+            self.send_agent_result(entity, false, Some("agent serves another faction".into()));
+            return;
+        }
+        let owned = self.owned_agents.get(&char_id).map_or(0, |v| v.len());
+        if owned >= MAX_OWNED_AGENTS {
+            self.send_agent_result(
+                entity,
+                false,
+                Some(format!("roster full ({MAX_OWNED_AGENTS} agents max)")),
+            );
+            return;
+        }
+        // Starter grant: the first agent is free so every character can get
+        // into the management game.
+        let cost = if owned == 0 { 0 } else { self.agent_hire_cost(idx) };
+        if cost > 0 {
+            let Some(p) = self.players.get_mut(&entity) else { return };
+            if !p.purse.debit(Currency::Wild, cost) {
+                self.send_agent_result(entity, false, Some("not enough carried MILD".into()));
+                return;
+            }
+            p.dirty = true;
+            let party = player_party(p);
+            self.persist_actor_purse(EconActor::Player(entity));
+            // The fee leaves supply — hiring is a sink, not a payment to
+            // anyone. WalletUpdate flows on the next replicate pass.
+            self.ledger.record(
+                TxKind::AgentHire,
+                party,
+                TxParty::Burn,
+                TxAmount::Wild { amount: cost },
+                0,
+            );
+        }
+        self.agents[idx].owner = Some(char_id);
+        self.owned_agents.entry(char_id).or_default().push(idx);
+        // Owned agents get a live activity log from the moment of hire.
+        let mut log = VecDeque::with_capacity(AGENT_LOG_CAP);
+        log.push_back(AgentLogEntry {
+            at_ms: ledger::unix_ms(),
+            text: if cost == 0 {
+                "Hired (starter grant — free)".to_string()
+            } else {
+                format!("Hired for {cost} MILD")
+            },
+        });
+        self.agent_logs.insert(agent_id, log);
+        self.send_agent_result(entity, true, None);
+        self.refresh_agent_roster(entity);
+    }
+
+    /// `C2S::DismissAgent`: release an owned agent back to its faction. No
+    /// refund; the agent keeps everything it earned.
+    fn dismiss_agent(&mut self, entity: EntityId, agent_id: AgentId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let char_id = player.character.id;
+        let Some(idx) = self.agents.iter().position(|a| a.agent_id == agent_id) else {
+            self.send_agent_result(entity, false, Some("agent not found".into()));
+            return;
+        };
+        if self.agents[idx].owner != Some(char_id) {
+            self.send_agent_result(entity, false, Some("not your agent".into()));
+            return;
+        }
+        self.agents[idx].owner = None;
+        if let Some(idxs) = self.owned_agents.get_mut(&char_id) {
+            idxs.retain(|&i| i != idx);
+            if idxs.is_empty() {
+                self.owned_agents.remove(&char_id);
+            }
+        }
+        self.agent_logs.remove(&agent_id);
+        // Anyone watching this agent's detail loses access with the dismissal.
+        for p in self.players.values_mut() {
+            if p.agent_detail == Some(idx) {
+                p.agent_detail = None;
+            }
+        }
+        self.send_agent_result(entity, true, None);
+        self.refresh_agent_roster(entity);
+    }
+
+    /// `C2S::AgentHireList`: up to `AGENT_HIRE_OFFERS` unowned, living,
+    /// same-faction candidates, cheapest first, each carrying its computed
+    /// `hire_cost` (the starter grant makes the actual first charge 0
+    /// regardless of the displayed price).
+    fn agent_hire_list(&mut self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let faction = player.character.faction;
+        let mut candidates: Vec<(u32, usize)> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.owner.is_none() && a.alive() && a.faction == faction)
+            .map(|(i, _)| (self.agent_hire_cost(i), i))
+            .collect();
+        candidates.sort_by_key(|&(cost, _)| cost);
+        candidates.truncate(AGENT_HIRE_OFFERS);
+        let offers: Vec<AgentSummary> =
+            candidates.iter().map(|&(cost, i)| self.agent_summary(i, Some(cost))).collect();
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::AgentHireOffers { offers });
+        }
+    }
+
+    /// `C2S::AgentSub`: subscribe answers immediately with the owned-agent
+    /// roster, then `broadcast_agent_rosters` re-sends every
+    /// `AGENT_ROSTER_TICK_INTERVAL` ticks while on.
+    fn agent_sub(&mut self, entity: EntityId, on: bool) {
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.agent_sub = on;
+        if on {
+            self.send_agent_roster(entity);
+        }
+    }
+
+    /// `C2S::AgentDetailSub`: watch one OWNED agent's full detail (immediate
+    /// snapshot + ~1 Hz re-push). `None` unsubscribes.
+    fn agent_detail_sub(&mut self, entity: EntityId, agent_id: Option<AgentId>) {
+        let Some(agent_id) = agent_id else {
+            if let Some(player) = self.players.get_mut(&entity) {
+                player.agent_detail = None;
+            }
+            return;
+        };
+        let Some(player) = self.players.get(&entity) else { return };
+        let char_id = player.character.id;
+        let Some(idx) = self.agents.iter().position(|a| a.agent_id == agent_id) else {
+            self.send_agent_result(entity, false, Some("agent not found".into()));
+            return;
+        };
+        if self.agents[idx].owner != Some(char_id) {
+            self.send_agent_result(entity, false, Some("not your agent".into()));
+            return;
+        }
+        if let Some(player) = self.players.get_mut(&entity) {
+            player.agent_detail = Some(idx);
+        }
+        let detail = self.agent_detail_snapshot(idx);
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::AgentDetail(detail));
+        }
+    }
+
+    /// Full `AgentDetail` payload for one agent: summary + goal prose +
+    /// learned traits + competition stats + full economic state + activity
+    /// log + its slice of the recent ledger.
+    fn agent_detail_snapshot(&self, idx: usize) -> AgentDetail {
+        let a = &self.agents[idx];
+        let stats = self
+            .stats
+            .actors
+            .get(&a.agent_id)
+            .map(|s| AgentStats {
+                kills: s.kills,
+                deaths: s.deaths,
+                resources: s.resources,
+                trades: s.trades,
+                crafted: s.crafted,
+            })
+            .unwrap_or_default();
+        let mut blueprints: Vec<String> = a.blueprints.iter().cloned().collect();
+        blueprints.sort();
+        let me = a.agent_id;
+        let is_me = |p: &TxParty| matches!(p, TxParty::Agent { id, .. } if *id == me);
+        let recent_txs: Vec<EconTx> = self
+            .ledger
+            .recent()
+            .into_iter()
+            .rev()
+            .filter(|tx| is_me(&tx.from) || is_me(&tx.to))
+            .take(20)
+            .collect();
+        AgentDetail {
+            summary: self.agent_summary(idx, None),
+            goal: self.agent_goal_description(idx),
+            traits: ACTIVITIES
+                .iter()
+                .map(|&act| (activity_name(act).to_string(), a.traits.payoff[act.index()]))
+                .collect(),
+            stats,
+            inventory: a.inventory.clone(),
+            blueprints,
+            carried: [
+                a.purse.carried(Currency::Wild),
+                a.purse.carried(Currency::Shards),
+                a.purse.carried(Currency::Energy),
+            ],
+            banked: [
+                a.purse.banked(Currency::Wild),
+                a.purse.banked(Currency::Shards),
+                a.purse.banked(Currency::Energy),
+            ],
+            activity_log: self
+                .agent_logs
+                .get(&a.agent_id)
+                .map(|d| d.iter().cloned().collect())
+                .unwrap_or_default(),
+            recent_txs,
+        }
+    }
+
+    /// Fuller prose description of an agent's current goal, including its
+    /// target where one exists ("Selling goods at the Bodega").
+    fn agent_goal_description(&self, idx: usize) -> String {
+        let a = &self.agents[idx];
+        if !a.alive() {
+            return "Dead — waiting to respawn".to_string();
+        }
+        let building = |e: EntityId| -> String {
+            self.statics
+                .get(&e)
+                .map(|s| format!("{:?}", s.kind))
+                .unwrap_or_else(|| "a building".to_string())
+        };
+        match a.goal {
+            Goal::Idle => "Idle — waiting for the next opportunity".to_string(),
+            Goal::Gather { pulls_left, .. } => {
+                format!("Gathering resources ({pulls_left} pulls left)")
+            }
+            Goal::Sell { store, list_on_market, .. } => {
+                if list_on_market {
+                    "Hauling goods to the market terminal".to_string()
+                } else {
+                    format!("Selling goods at the {}", building(store))
+                }
+            }
+            Goal::Buy { store, kind, count, .. } => {
+                format!("Buying {count} {} at the {}", kind.display_name(), building(store))
+            }
+            Goal::BuyMarket { kind, count, max_each, .. } => format!(
+                "Buying {count} {} on the market (up to {max_each} MILD each)",
+                kind.display_name()
+            ),
+            Goal::Trade { .. } => "Working the market terminal for arbitrage".to_string(),
+            Goal::Craft { recipe, .. } => format!("Crafting {recipe} at a station"),
+            Goal::Research { recipe, .. } => {
+                format!("Researching {recipe} at the Laboratory")
+            }
+            Goal::Collect { building: b, .. } => {
+                format!("Collecting finished goods at the {}", building(b))
+            }
+            Goal::Patrol { .. } => "Patrolling contested ground".to_string(),
+            Goal::Capture { region, .. } => {
+                format!("Capturing region ({}, {})", region.0, region.1)
+            }
+            Goal::Defend { region, .. } => {
+                format!("Defending region ({}, {})", region.0, region.1)
+            }
+            Goal::Hunt { .. } => "Hunting a hostile target".to_string(),
+            Goal::Retreat { .. } => "Retreating to a sanctuary to heal".to_string(),
+            Goal::Loot { .. } => "Grabbing a loot drop".to_string(),
+            Goal::Bank { store, .. } => {
+                format!("Hauling wealth to the {} vault", building(store))
+            }
+            Goal::Extract { store, .. } => {
+                format!("Stashing cargo at the {}", building(store))
+            }
+        }
+    }
+
+    /// Append one line to an OWNED agent's activity ring. No-op for unowned
+    /// agents (only hire creates the map entry), which keeps the map bounded
+    /// by the number of owned agents.
+    fn push_agent_log(&mut self, agent_id: AgentId, text: String) {
+        if let Some(log) = self.agent_logs.get_mut(&agent_id) {
+            if log.len() >= AGENT_LOG_CAP {
+                log.pop_front();
+            }
+            log.push_back(AgentLogEntry { at_ms: ledger::unix_ms(), text });
+        }
+    }
+
+    /// Route the owner's cut of an owned agent's bank deposit: debit the
+    /// agent's carried MILD and land it in the owner's BANKED wild (online
+    /// wallets update in place + WalletUpdate on the next replicate pass;
+    /// offline accounts get a write-through bank credit). Records the
+    /// `OwnerShare` ledger leg agent → player.
+    fn pay_owner_share(&mut self, idx: usize, share: u32) {
+        let Some(owner) = self.agents[idx].owner else { return };
+        if share == 0 || !self.agents[idx].purse.debit(Currency::Wild, share) {
+            return;
+        }
+        self.agents[idx].lifetime_owner_earnings += share as u64;
+        let agent_party = self.agents[idx].party();
+        let online =
+            self.players.iter().find(|(_, p)| p.character.id == owner).map(|(&e, _)| e);
+        let to_party = if let Some(e) = online {
+            let p = self.players.get_mut(&e).unwrap();
+            // Straight into the vault: credit carried then move it banked.
+            p.purse.credit(Currency::Wild, share);
+            p.purse.deposit(Currency::Wild, share);
+            p.dirty = true;
+            let party = player_party(p);
+            self.persist_actor_purse(EconActor::Player(e));
+            party
+        } else if let Ok(ch) = self.store.character(owner) {
+            if let Ok(account) = self.store.account_by_id(ch.account_id) {
+                let _ = self.store.update_bank(account.id, account.bank + share);
+            }
+            TxParty::Player { id: owner, name: ch.name, faction: ch.faction }
+        } else {
+            // Owner character vanished from the store: put the cut back.
+            self.agents[idx].purse.credit(Currency::Wild, share);
+            self.agents[idx].lifetime_owner_earnings -= share as u64;
+            return;
+        };
+        self.ledger.record(
+            TxKind::OwnerShare,
+            agent_party,
+            to_party,
+            TxAmount::Wild { amount: share },
+            0,
+        );
+    }
+
+    /// Re-send `AgentRoster` to subscribed players (~2 s cadence).
+    fn broadcast_agent_rosters(&mut self) {
+        let subs: Vec<EntityId> =
+            self.players.iter().filter(|(_, p)| p.agent_sub).map(|(&e, _)| e).collect();
+        for e in subs {
+            self.send_agent_roster(e);
+        }
+    }
+
+    /// Re-push `AgentDetail` to watchers (~1 Hz), dropping watches whose
+    /// ownership lapsed (dismissed from another session, etc).
+    fn broadcast_agent_details(&mut self) {
+        let watches: Vec<(EntityId, usize, CharacterId)> = self
+            .players
+            .iter()
+            .filter_map(|(&e, p)| p.agent_detail.map(|idx| (e, idx, p.character.id)))
+            .collect();
+        for (e, idx, char_id) in watches {
+            if self.agents.get(idx).is_none_or(|a| a.owner != Some(char_id)) {
+                if let Some(p) = self.players.get_mut(&e) {
+                    p.agent_detail = None;
+                }
+                continue;
+            }
+            let detail = self.agent_detail_snapshot(idx);
+            if let Some(player) = self.players.get(&e) {
+                let _ = player.tx.send(S2C::AgentDetail(detail));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Streaming / replication
     // -----------------------------------------------------------------------
 
@@ -8139,30 +8785,6 @@ impl World {
     }
 
     fn seed_chunk_content(&mut self, coord: ChunkCoord) {
-        // NPCs in hostile chunks.
-        if !is_safe_chunk(coord) && !self.npc_seeded_chunks.contains(&coord) {
-            self.npc_seeded_chunks.insert(coord);
-            let chunk = self.chunks.get(coord);
-            let zone = zone_of_chunk(coord);
-            for (archetype, pos) in npc_spawns_for_chunk(coord, &chunk) {
-                let entity = self.alloc_entity();
-                let mut npc = Npc::new(entity, archetype, pos);
-                // Agents spawn with their inventory minted to them, so what
-                // they drop on death was theirs all along.
-                npc.inventory = roll_npc_loot(&mut self.rng, zone, archetype.variant == 2);
-                let agent = npc_party(&npc);
-                for stack in &npc.inventory {
-                    self.ledger.record(
-                        TxKind::Mint,
-                        TxParty::Mint,
-                        agent.clone(),
-                        TxAmount::Item { kind: stack.kind, count: stack.count },
-                        0,
-                    );
-                }
-                self.npcs.insert(entity, npc);
-            }
-        }
         // Resource nodes materialize through the view-independent path (the
         // same one agent gather targeting uses).
         self.ensure_nodes(coord);
@@ -8294,21 +8916,10 @@ impl World {
                 is_agent: false,
             });
         }
-        for npc in self.npcs.values() {
-            if !npc.alive() {
-                continue;
-            }
-            all.push(Replicated {
-                id: npc.entity,
-                chunk: ChunkCoord::from_world(npc.position),
-                spawn: npc.spawn_data(),
-                snap: npc.snapshot(),
-                is_agent: false,
-            });
-        }
-        // Hot faction agents replicate like NPCs (cold agents don't exist as
-        // entities; tier flips drive spawn/despawn through the known-entity
-        // diff below). The hot list keeps this off the whole population.
+        // Hot faction agents replicate as full entities (cold agents don't
+        // exist as entities; tier flips drive spawn/despawn through the
+        // known-entity diff below). The hot list keeps this off the whole
+        // population.
         for &i in &self.hot_agents {
             let agent = &self.agents[i as usize];
             if agent.tier != Tier::Hot || !agent.alive() {
@@ -8645,7 +9256,6 @@ impl World {
         tracing::debug!(
             tick = self.tick,
             players = self.players.len(),
-            npcs = self.npcs.len(),
             chunks = self.chunks.loaded_count(),
             "world saved"
         );
@@ -8677,6 +9287,73 @@ impl World {
         let saves: Vec<AgentSave> = self.agents[lo..hi].iter().map(|a| a.save()).collect();
         if let Err(e) = self.store.save_meta(&format!("faction_agents_shard_{shard}"), &saves) {
             tracing::error!("agent shard save failed: {e}");
+        }
+    }
+
+    /// Reclaim disk when the store crosses the high-water mark by purging
+    /// throwaway guest accounts (and their characters/inventory/stash/sessions
+    /// + leaderboard rows). Currently-connected accounts are always spared, and
+    /// deletions are bounded per pass so a big backlog drains over successive
+    /// checks rather than stalling one tick. The space is only physically
+    /// released by compaction, which runs off-thread so the sim keeps ticking.
+    fn tick_disk_guard(&mut self) {
+        let used = self.store.on_disk_bytes();
+        let high_water = disk_high_water_bytes();
+        if used < high_water {
+            return;
+        }
+
+        let older_than = now_unix().saturating_sub(guest_min_age_secs());
+        let active: HashSet<AccountId> =
+            self.players.values().map(|p| p.character.account_id).collect();
+        let report = match self.store.purge_stale_guests(
+            &active,
+            GUEST_PREFIX,
+            older_than,
+            MAX_PURGE_PER_PASS,
+        ) {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::error!("disk purge failed: {e}");
+                return;
+            }
+        };
+
+        if report.is_empty() {
+            tracing::warn!(
+                used_gb = used as f64 / GIB,
+                high_water_gb = high_water as f64 / GIB,
+                "disk over high-water but no purgeable guest accounts found"
+            );
+            return;
+        }
+
+        // Drop leaderboard/stats rows for the removed characters (keyed by
+        // character id) so the books don't retain ghost competitors.
+        for cid in &report.character_ids {
+            self.stats.actors.remove(cid);
+        }
+
+        tracing::warn!(
+            used_gb = used as f64 / GIB,
+            accounts = report.accounts_deleted,
+            characters = report.character_ids.len(),
+            sessions = report.sessions_deleted,
+            "purged stale guest accounts to reclaim disk"
+        );
+
+        // Physically release the freed space via a full compaction, off the sim
+        // thread. Skip if a previous compaction is still running.
+        use std::sync::atomic::Ordering;
+        if PURGE_COMPACTING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let store = Arc::clone(&self.store);
+            std::thread::spawn(move || {
+                store.compact();
+                PURGE_COMPACTING.store(false, Ordering::Release);
+            });
         }
     }
 
@@ -8763,7 +9440,7 @@ pub mod bench {
         );
 
         // Fake players parked around the hub combat ring: hot-tier agent
-        // simulation, NPC seeding and replication all engage around them.
+        // simulation, chunk seeding and replication all engage around them.
         let mut player_rx: Vec<(EntityId, mpsc::UnboundedReceiver<S2C>)> = Vec::new();
         for i in 0..cfg.players {
             let account = store
@@ -8792,7 +9469,7 @@ pub mod bench {
             player_rx.push((entity, prx));
         }
 
-        // Warm up: stream in chunks/NPCs around the parked players and drain
+        // Warm up: stream in chunks/agents around the parked players and drain
         // the join burst so steady-state stats aren't polluted by setup.
         for _ in 0..(TICK_HZ as u64 * 2) {
             world.step();
@@ -9049,8 +9726,6 @@ mod tests {
             production_outputs: HashMap::new(),
             production_dirty: false,
             players: HashMap::new(),
-            npcs: HashMap::new(),
-            npc_seeded_chunks: HashSet::new(),
             loot: HashMap::new(),
             pickups: HashMap::new(),
             statics: HashMap::new(),
@@ -9086,8 +9761,9 @@ mod tests {
             agent_decision_queue: std::collections::VecDeque::new(),
             agent_save_cursor: 0,
             service_load: HashMap::new(),
-            recent_attacks: HashMap::new(),
             district_spots: Vec::new(),
+            owned_agents: HashMap::new(),
+            agent_logs: HashMap::new(),
             timings: TickTimings::default(),
         };
         (world, dir)
@@ -9124,6 +9800,8 @@ mod tests {
                 blueprints: Vec::new(),
                 stash: Vec::new(),
                 pending_jobs: Vec::new(),
+                owner: None,
+                lifetime_owner_earnings: 0,
                 position,
                 health: 100.0,
                 max_health: 100.0,
@@ -9227,17 +9905,213 @@ mod tests {
         let f3 = world.agents[b3].entity;
         assert!(!world.deal_damage(f1, f3, 10.0, None));
 
-        // Guarded ground: only the home faction may aggress...
+        // Guarded ground is open combat now: home turf grants capture
+        // immunity (see territory tests), not damage immunity.
         let rebel_home = district_anchor("LITTLE MEOW");
         let g1 = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), rebel_home);
         let g2 = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), rebel_home);
         let (h1, h2) = (world.agents[g1].entity, world.agents[g2].entity);
-        // Forum attacking a rebel on rebel home turf: blocked.
-        assert!(!world.deal_damage(h2, h1, 10.0, None));
-        // Rebel (home faction) attacking the intruder: allowed.
-        assert!(world.deal_damage(h1, h2, 10.0, None));
-        // ...and now the intruder may retaliate against its attacker.
+        // Forum attacking a rebel on rebel home turf: allowed.
         assert!(world.deal_damage(h2, h1, 10.0, None));
+        // And the rebel fights back, same as anywhere hostile.
+        assert!(world.deal_damage(h1, h2, 10.0, None));
+    }
+
+    #[test]
+    fn all_factions_fight_each_other_outside_safe_zones() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let r = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let f = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        let w = spawn_test_agent(&mut world, FACTION_WAPES, Traits::fighter(), contested);
+        let (re, fe, we) =
+            (world.agents[r].entity, world.agents[f].entity, world.agents[w].entity);
+        assert!(world.deal_damage(re, we, 5.0, None), "rebel vs wape");
+        assert!(world.deal_damage(fe, we, 5.0, None), "forum vs wape");
+        assert!(world.deal_damage(we, re, 5.0, None), "wape vs rebel");
+        assert!(world.deal_damage(we, fe, 5.0, None), "wape vs forum");
+        assert!(world.deal_damage(re, fe, 5.0, None), "rebel vs forum");
+    }
+
+    #[test]
+    fn respawn_protection_blocks_damage_both_ways() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let b = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        // Kill and respawn `a`; it comes back with the grace timer running.
+        world.kill_agent(a, false);
+        world.respawn_agent(a);
+        assert!(world.agents[a].spawn_protection > 0.0);
+        // Move it back onto contested ground next to its enemy (respawn
+        // relocated it to the home district).
+        world.agents[a].position = contested;
+        world.regrid_agent(a);
+        let (ea, eb) = (world.agents[a].entity, world.agents[b].entity);
+        // Protected: no damage in...
+        assert!(!world.deal_damage(eb, ea, 10.0, None));
+        // ...and none out.
+        assert!(!world.deal_damage(ea, eb, 10.0, None));
+        // Once the timer runs out, combat is open again.
+        world.agents[a].spawn_protection = 0.0;
+        assert!(world.deal_damage(eb, ea, 10.0, None));
+        assert!(world.deal_damage(ea, eb, 10.0, None));
+    }
+
+    #[test]
+    fn wape_seeding_share_homes_and_priors() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.seed_agents_with_wape_share(100, 20);
+        let wapes: Vec<&FactionAgent> =
+            world.agents.iter().filter(|a| a.faction == FACTION_WAPES).collect();
+        assert_eq!(wapes.len(), 20, "20% wape share of 100");
+        for w in &wapes {
+            assert!(w.name.starts_with("WAPE-"), "wape name: {}", w.name);
+            let anchor = w.home_spot.expect("wapes anchor to a scattered home_spot");
+            assert!(
+                matches!(
+                    districts::danger_at(anchor),
+                    DangerLevel::Contested | DangerLevel::Warzone
+                ),
+                "wape anchored on safe ground at {anchor:?}"
+            );
+            // Grubstake includes street Cash so the Bank loop stays fed.
+            assert!(
+                w.inventory.slots.iter().flatten().any(|s| s.kind == ItemKind::Cash),
+                "wape grubstake missing Cash"
+            );
+            // Scav/raider priors lean fight/gather/haul, never trade/craft.
+            assert!(!matches!(w.traits.dominant(), Activity::Trade | Activity::Craft));
+        }
+        // No guarded home district: respawns anchor to home_spot instead.
+        assert_eq!(districts::faction_home_district(FACTION_WAPES), None);
+        // The organized remainder still splits 50/50.
+        let rebels = world.agents.iter().filter(|a| a.faction == FACTION_REBELS).count();
+        let forum = world.agents.iter().filter(|a| a.faction == FACTION_FORUM).count();
+        assert_eq!(rebels, 40);
+        assert_eq!(forum, 40);
+    }
+
+    #[test]
+    fn wape_intel_sides_count_both_organized_factions_as_enemies() {
+        let intel = RegionIntel {
+            controller: FACTION_NEUTRAL,
+            rebels: 2,
+            forum: 3,
+            wapes: 4,
+            rebel_strength: 20.0,
+            forum_strength: 30.0,
+            wape_strength: 40.0,
+            income: 0.0,
+            casualties: 0.0,
+        };
+        let (friends, enemies, fs, es) = intel.sides(FACTION_WAPES);
+        assert_eq!((friends, enemies), (4, 5));
+        assert_eq!((fs, es), (40.0, 50.0));
+    }
+
+    #[test]
+    fn hot_agent_death_spills_half_carried_currency() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        world.agents[idx].purse = Purse { carried: [101, 7, 3], banked: [50, 0, 0] };
+        world.kill_agent(idx, true);
+        let spilled = |world: &World, c: Currency| -> u32 {
+            world.pickups.values().filter(|p| p.currency == c).map(|p| p.amount).sum()
+        };
+        assert_eq!(spilled(&world, Currency::Wild), 50, "half of 101, rounded down");
+        assert_eq!(spilled(&world, Currency::Shards), 3);
+        assert_eq!(spilled(&world, Currency::Energy), 1);
+        // The full carried purse burned; the banked side is untouched.
+        assert_eq!(world.agents[idx].purse.carried, [0, 0, 0]);
+        assert_eq!(world.agents[idx].purse.banked, [50, 0, 0]);
+    }
+
+    #[test]
+    fn cold_agent_death_burns_everything_without_pickups() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        world.agents[idx].purse = Purse { carried: [100, 4, 2], banked: [25, 0, 0] };
+        world.kill_agent(idx, false);
+        assert!(world.pickups.is_empty(), "no body, no spill");
+        assert_eq!(world.agents[idx].purse.carried, [0, 0, 0]);
+        assert_eq!(world.agents[idx].purse.banked, [25, 0, 0]);
+    }
+
+    #[test]
+    fn player_death_spills_half_carried_currency() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let victim = insert_test_player(&mut world, contested);
+        world.players.get_mut(&victim).unwrap().purse =
+            Purse { carried: [80, 5, 2], banked: [10, 0, 0] };
+        let killer = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        let killer_entity = world.agents[killer].entity;
+        world.kill_player(killer_entity, victim);
+        let spilled = |world: &World, c: Currency| -> u32 {
+            world.pickups.values().filter(|p| p.currency == c).map(|p| p.amount).sum()
+        };
+        assert_eq!(spilled(&world, Currency::Wild), 40);
+        assert_eq!(spilled(&world, Currency::Shards), 2);
+        assert_eq!(spilled(&world, Currency::Energy), 1);
+        let player = &world.players[&victim];
+        assert_eq!(player.purse.carried, [0, 0, 0], "carried burns on death");
+        assert_eq!(player.purse.banked, [10, 0, 0], "banked survives");
+        // Respawned at the hub with the grace timer running.
+        assert!(player.spawn_protection > 0.0, "respawn grants spawn protection");
+    }
+
+    #[test]
+    fn pvp_damage_gated_by_faction_and_safe_zones() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let a = insert_test_player(&mut world, contested);
+        let b = insert_test_player(&mut world, contested + Vec3::new(2.0, 0.0, 0.0));
+        // Same faction (both default Rebels): no PvP anywhere.
+        assert!(!world.deal_damage(a, b, 10.0, None));
+        // Hostile factions on contested ground: PvP lands.
+        world.players.get_mut(&b).unwrap().character.faction = FACTION_FORUM;
+        assert!(world.deal_damage(a, b, 10.0, None));
+        assert!(world.players[&b].character.health < 100.0);
+        // Sanctuary still blocks PvP.
+        let sanctuary = district_anchor("TRANQUILITY GARDENS");
+        world.players.get_mut(&a).unwrap().character.position = sanctuary;
+        world.players.get_mut(&b).unwrap().character.position = sanctuary;
+        assert!(!world.deal_damage(a, b, 10.0, None));
+    }
+
+    #[test]
+    fn player_faction_persists_from_store_to_spawn_data() {
+        let (mut world, _dir) = test_world();
+        let account = world.store.create_account("wape-fan", "pw").unwrap();
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: account.id,
+            name: "WAPELOVER".into(),
+            appearance: Appearance::default(),
+            position: SPAWN,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_WAPES,
+        };
+        world.store.create_character(&character).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let entity = world.join(account.id, character.id, tx).unwrap();
+        let player = &world.players[&entity];
+        assert_eq!(player.character.faction, FACTION_WAPES);
+        assert_eq!(player.spawn_data().faction, FACTION_WAPES);
+        assert!(matches!(
+            player_party(player),
+            TxParty::Player { faction: FACTION_WAPES, .. }
+        ));
     }
 
     #[test]
@@ -9310,6 +10184,7 @@ mod tests {
                 roll_dir: (1.0, 0.0),
                 roll_cooldown: 0.0,
                 shield_delay: 0.0,
+                spawn_protection: 0.0,
                 ability_cooldowns: [0.0; 3],
                 stim_heal_left: 0.0,
                 stim_speed_time: 0.0,
@@ -9319,6 +10194,8 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+            agent_sub: false,
+            agent_detail: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -9663,6 +10540,8 @@ mod tests {
             blueprints: Vec::new(),
             stash: Vec::new(),
             pending_jobs: Vec::new(),
+            owner: None,
+            lifetime_owner_earnings: 0,
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
             health: 80.0,
@@ -9891,6 +10770,7 @@ mod tests {
                 roll_dir: (1.0, 0.0),
                 roll_cooldown: 0.0,
                 shield_delay: 0.0,
+                spawn_protection: 0.0,
                 ability_cooldowns: [0.0; 3],
                 stim_heal_left: 0.0,
                 stim_speed_time: 0.0,
@@ -9900,6 +10780,8 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+            agent_sub: false,
+            agent_detail: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -10072,6 +10954,7 @@ mod tests {
                 roll_dir: (1.0, 0.0),
                 roll_cooldown: 0.0,
                 shield_delay: 0.0,
+                spawn_protection: 0.0,
                 ability_cooldowns: [0.0; 3],
                 stim_heal_left: 0.0,
                 stim_speed_time: 0.0,
@@ -10081,6 +10964,8 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+            agent_sub: false,
+            agent_detail: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -10601,9 +11486,7 @@ mod tests {
         let spot = Vec3::new(100.0, 0.0, 100.0); // hub ring, outside safe chunks
         assert_eq!(districts::danger_at(spot), DangerLevel::Contested);
         for _ in 0..3 {
-            let entity = world.alloc_entity();
-            let npc = Npc::new(entity, &wilder_ai::SCAV, spot);
-            world.npcs.insert(entity, npc);
+            spawn_test_agent(&mut world, FACTION_WAPES, Traits::fighter(), spot);
         }
         world.tick_territory();
         assert_eq!(world.territory.get(&region_of(spot)), Some(&FACTION_WAPES));

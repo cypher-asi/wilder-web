@@ -44,6 +44,8 @@ const TX_KIND_LABEL: Record<TxKind, string> = {
   CraftProduce: "CRAFT OUT",
   Fee: "FEE",
   Extract: "EXTRACT",
+  AgentHire: "AGENT HIRE",
+  OwnerShare: "OWNER SHARE",
 };
 
 // Cohesive blue / white / red scheme: creation reads light-blue, destruction and
@@ -64,6 +66,8 @@ const TX_KIND_COLOR: Record<TxKind, string> = {
   CraftProduce: "#cfe4f5",
   Fee: "#e0808f",
   Extract: "#8fd6ff",
+  AgentHire: "#e0808f",
+  OwnerShare: "#9fdcff",
 };
 
 // Per-category color (dashboard-local so the shared inventory tick palette in

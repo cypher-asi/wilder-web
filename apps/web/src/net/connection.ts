@@ -17,7 +17,12 @@ import {
   playZoneLost,
 } from "../assets/audio";
 import { interiorRegistry } from "../game/interiors";
-import { applyTerritory, MY_FACTION, REGION_SIZE } from "../game/territory";
+import {
+  applyTerritory,
+  MY_FACTION,
+  REGION_SIZE,
+  setMyFaction,
+} from "../game/territory";
 import {
   armorShield,
   bumpEntityRoster,
@@ -153,6 +158,7 @@ export class GameConnection {
         interiorRegistry.clear();
         game.localEntityId = msg.d.entity_id;
         game.worldSeed = msg.d.world_seed;
+        setMyFaction(msg.d.character.faction ?? 1);
         game.predicted = {
           x: msg.d.character.position[0],
           z: msg.d.character.position[2],
@@ -653,6 +659,36 @@ export class GameConnection {
         // Consumed once by the holo map's CensusLayer (not per-frame).
         game.mapIntel.census = msg.d.blips;
         game.mapIntel.censusVersion++;
+        break;
+      }
+      case "AgentDots": {
+        // Always-on far-agent dot feed for the live map; ingested by the
+        // AgentDots renderer from useFrame (module cache, not Zustand).
+        game.agentDots.blips = msg.d.blips;
+        game.agentDots.version++;
+        break;
+      }
+      case "AgentRoster": {
+        ui.set({ agentRoster: msg.d.agents });
+        break;
+      }
+      case "AgentDetail": {
+        ui.set({ agentDetail: msg.d });
+        break;
+      }
+      case "AgentHireOffers": {
+        ui.set({ agentHireOffers: msg.d.offers });
+        break;
+      }
+      case "AgentResult": {
+        ui.set({ agentResult: { ok: msg.d.ok, error: msg.d.error, at: performance.now() } });
+        if (!msg.d.ok) {
+          ui.pushChat({
+            from: "system",
+            text: `Agent: ${msg.d.error ?? "action failed"}`,
+            system: true,
+          });
+        }
         break;
       }
       case "LeaderboardState": {

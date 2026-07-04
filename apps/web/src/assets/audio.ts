@@ -530,14 +530,34 @@ export function stopAmbience() {
 }
 
 // --- Crowd chatter (synthesized talking bed) -------------------------------
-// A density-driven ambience: a pool of "babbler" voices (formant-filtered
-// noise whose gain is modulated by a slow LFO to fake syllable cadence) plus a
-// steadier "murmur fill" that blends the voices into a wash. One or two nearby
-// agents read as sparse individual talking; a big group swells into a crowd.
+// A density-driven ambience of babbling voices. Each voice is a buzzy voiced
+// source (sawtooth "vocal cords") run through three shifting formant filters,
+// gated into syllable bursts with gaps by a look-ahead scheduler. Morphing the
+// formants per syllable makes it read as vowels ("wah-weh-wih") rather than a
+// steady tone, so a lone voice sounds like someone talking and a group swells
+// into a crowd. A soft murmur fill blends many voices into a continuous hum.
+
+// Vowel formant presets (F1, F2, F3 in Hz). Jumping between these per syllable
+// is what gives the babble recognisable speech-like vowels.
+const CROWD_VOWELS: [number, number, number][] = [
+  [700, 1220, 2600], // "ah"
+  [400, 2100, 2900], // "eh"
+  [300, 2300, 3000], // "ee"
+  [450, 800, 2830], // "oh"
+  [325, 700, 2530], // "oo"
+  [640, 1190, 2390], // "uh"
+];
 
 interface CrowdVoice {
-  gain: GainNode; // per-voice level (lit as the crowd grows)
-  baseGain: number; // its target level when fully lit
+  osc: OscillatorNode; // voiced source ("vocal cords")
+  formants: BiquadFilterNode[]; // three formant resonators
+  gain: GainNode; // syllable envelope + on/off level
+  base: number; // fundamental pitch (Hz) for this speaker
+  scale: number; // formant scaling (speaker size/timbre)
+  peak: number; // loudness of this voice's syllables
+  active: boolean; // currently within the crowd radius budget
+  next: number; // ctx time of this voice's next syllable
+  wordsLeft: number; // syllables before the next longer phrase pause
 }
 
 interface Crowd {
@@ -545,6 +565,7 @@ interface Crowd {
   master: GainNode;
   voices: CrowdVoice[];
   fill: GainNode;
+  timer: ReturnType<typeof setInterval>;
 }
 
 let crowd: Crowd | null = null;
@@ -554,8 +575,10 @@ const CROWD_FULL = 12;
 /** Peak master level; kept near the rain bed so it sits under the music. */
 const CROWD_PEAK = 0.2;
 const CROWD_RAMP = 0.4;
+/** Scheduler cadence and how far ahead syllables are queued (s). */
+const CROWD_LOOKAHEAD = 0.35;
 
-/** Long looping noise buffer for the crowd bed (independent of the short
+/** Long looping noise buffer for the murmur fill (independent of the short
  * percussive noiseBuffer so its loop point is not audibly periodic). */
 function makeCrowdNoise(ctx: AudioContext): AudioBuffer {
   const seconds = 3;
@@ -563,6 +586,24 @@ function makeCrowdNoise(ctx: AudioContext): AudioBuffer {
   const data = buf.getChannelData(0);
   for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
   return buf;
+}
+
+/** Queue one syllable for a voice: pick a vowel (set formants), nudge the
+ * pitch for prosody, and ramp the gain up and back down over the burst. */
+function scheduleSyllable(voice: CrowdVoice, t: number): number {
+  const dur = 0.11 + Math.random() * 0.13; // 110-240 ms syllable
+  const vowel = CROWD_VOWELS[Math.floor(Math.random() * CROWD_VOWELS.length)];
+  voice.formants.forEach((f, i) => f.frequency.setValueAtTime(vowel[i] * voice.scale, t));
+  // Prosody: shift the fundamental a little each syllable so it is not monotone.
+  voice.osc.frequency.setValueAtTime(voice.base * (0.94 + Math.random() * 0.16), t);
+
+  const g = voice.gain.gain;
+  const peak = voice.peak * (0.7 + Math.random() * 0.3);
+  g.setValueAtTime(0.0001, t);
+  g.linearRampToValueAtTime(peak, t + 0.035); // attack
+  g.setValueAtTime(peak, t + dur * 0.55);
+  g.exponentialRampToValueAtTime(0.0008, t + dur); // release
+  return dur;
 }
 
 /** Build (once) and start the crowd graph, silent until setCrowdLevel runs. */
@@ -576,54 +617,82 @@ export function startCrowd() {
     master.gain.value = 0;
     master.connect(ctx.destination);
 
-    // Babbler voices: each a noise -> bandpass (vocal formant) -> gain the LFO
-    // opens and closes, so a lone voice sounds like intermittent talking.
     const voices: CrowdVoice[] = [];
     const VOICE_COUNT = 6;
     for (let i = 0; i < VOICE_COUNT; i++) {
-      const src = ctx.createBufferSource();
-      src.buffer = noise;
-      src.loop = true;
-      src.playbackRate.value = 0.85 + Math.random() * 0.4;
+      // Voiced source: a sawtooth buzz reads as vocal cords once shaped by the
+      // formant filters (a pure tone or noise would beep/hiss instead).
+      const osc = ctx.createOscillator();
+      osc.type = "sawtooth";
+      const base = 90 + Math.random() * 90; // 90-180 Hz speakers
+      osc.frequency.value = base;
 
-      const bp = ctx.createBiquadFilter();
-      bp.type = "bandpass";
-      bp.frequency.value = 350 + Math.random() * 2000; // vocal formant range
-      bp.Q.value = 3 + Math.random() * 3;
+      const gain = ctx.createGain();
+      gain.gain.value = 0.0001;
 
-      const voiceGain = ctx.createGain();
-      voiceGain.gain.value = 0;
+      // Three parallel formant band-passes summed into the voice gain.
+      const scale = 0.85 + Math.random() * 0.4;
+      const formants: BiquadFilterNode[] = [];
+      const startVowel = CROWD_VOWELS[i % CROWD_VOWELS.length];
+      for (let k = 0; k < 3; k++) {
+        const bp = ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = startVowel[k] * scale;
+        bp.Q.value = 6 + k * 3; // higher formants a touch tighter
+        osc.connect(bp).connect(gain);
+        formants.push(bp);
+      }
+      gain.connect(master);
+      osc.start();
 
-      // Syllable LFO: pushes the voice gain up and down at a talking cadence.
-      const lfo = ctx.createOscillator();
-      lfo.type = "sine";
-      lfo.frequency.value = 2 + Math.random() * 3; // ~2-5 Hz syllables
-      const lfoDepth = ctx.createGain();
-      lfoDepth.gain.value = 0.5;
-      lfo.connect(lfoDepth).connect(voiceGain.gain);
-
-      src.connect(bp).connect(voiceGain).connect(master);
-      src.start();
-      lfo.start();
-
-      voices.push({ gain: voiceGain, baseGain: 0.7 + Math.random() * 0.3 });
+      voices.push({
+        osc,
+        formants,
+        gain,
+        base,
+        scale,
+        peak: 0.7 + Math.random() * 0.3,
+        active: false,
+        next: 0,
+        wordsLeft: 1 + Math.floor(Math.random() * 4),
+      });
     }
 
-    // Murmur fill: steady band-limited noise that fills the gaps between voices
-    // so a large group blends into a continuous crowd hum instead of clatter.
+    // Murmur fill: soft low-passed noise that fills the gaps between voices so a
+    // large group blends into a continuous crowd hum instead of clatter.
     const fillSrc = ctx.createBufferSource();
     fillSrc.buffer = noise;
     fillSrc.loop = true;
-    const fillBp = ctx.createBiquadFilter();
-    fillBp.type = "bandpass";
-    fillBp.frequency.value = 900;
-    fillBp.Q.value = 0.8;
+    const fillLp = ctx.createBiquadFilter();
+    fillLp.type = "lowpass";
+    fillLp.frequency.value = 1100;
     const fill = ctx.createGain();
     fill.gain.value = 0;
-    fillSrc.connect(fillBp).connect(fill).connect(master);
+    fillSrc.connect(fillLp).connect(fill).connect(master);
     fillSrc.start();
 
-    crowd = { ctx, master, voices, fill };
+    // Look-ahead scheduler: keep each active voice's syllables queued a little
+    // into the future, grouped into "words" with longer pauses between phrases.
+    const timer = setInterval(() => {
+      if (!crowd) return;
+      const now = crowd.ctx.currentTime;
+      const horizon = now + CROWD_LOOKAHEAD;
+      for (const v of crowd.voices) {
+        if (!v.active) continue;
+        if (v.next < now) v.next = now + 0.02;
+        while (v.next < horizon) {
+          const dur = scheduleSyllable(v, v.next);
+          let gap = 0.05 + Math.random() * 0.09; // between syllables of a word
+          if (--v.wordsLeft <= 0) {
+            gap += 0.3 + Math.random() * 0.6; // pause between phrases
+            v.wordsLeft = 1 + Math.floor(Math.random() * 4);
+          }
+          v.next += dur + gap;
+        }
+      }
+    }, 120);
+
+    crowd = { ctx, master, voices, fill, timer };
   } catch {
     // Audio not available yet (autoplay policy); retried on the next start.
   }
@@ -631,8 +700,8 @@ export function startCrowd() {
 
 /**
  * Steer the crowd bed toward `count` nearby agents. 0 fades to silence; 1-2
- * lights a couple of gappy voices; approaching CROWD_FULL brings every voice in
- * and fades up the murmur fill for a dense large-crowd wash.
+ * activates a couple of talking voices; approaching CROWD_FULL brings every
+ * voice in and fades up the murmur fill for a dense large-crowd wash.
  */
 export function setCrowdLevel(count: number) {
   if (!crowd) return;
@@ -642,22 +711,22 @@ export function setCrowdLevel(count: number) {
 
   master.gain.linearRampToValueAtTime(CROWD_PEAK * level, t + CROWD_RAMP);
 
-  // Light one voice per nearby agent (capped at the pool size): 1-2 agents
-  // leaves most voices silent, so it reads as a few people talking.
+  // Activate one voice per nearby agent (capped at the pool size): 1-2 agents
+  // leaves most voices idle, so it reads as a few people talking.
   voices.forEach((v, i) => {
-    const on = i < count;
-    v.gain.gain.linearRampToValueAtTime(on ? v.baseGain : 0, t + CROWD_RAMP);
+    v.active = i < count;
   });
 
   // Fill only comes up once it is genuinely a crowd, and stays subordinate.
   const fillLevel = Math.max(0, Math.min(1, (count - 2) / (CROWD_FULL - 2)));
-  fill.gain.linearRampToValueAtTime(0.35 * fillLevel, t + CROWD_RAMP);
+  fill.gain.linearRampToValueAtTime(0.28 * fillLevel, t + CROWD_RAMP);
 }
 
 /** Fade out and tear down the crowd bed. */
 export function stopCrowd() {
   if (!crowd) return;
-  const { ctx, master } = crowd;
+  const { ctx, master, timer } = crowd;
+  clearInterval(timer);
   master.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
   setTimeout(() => ctx.close(), 600);
   crowd = null;

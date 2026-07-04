@@ -140,6 +140,9 @@ const XP_RAIDER_KILL: u32 = 50;
 const TERRITORY_TAX_PCT: u32 = 25;
 /// Recompute territory occupancy every N ticks (20 Hz -> ~1 Hz).
 const TERRITORY_TICK_INTERVAL: u64 = 20;
+/// Recount agents committed to each congestible service every N ticks; the
+/// count stays live between recounts as `decide_agent` reassigns agents.
+const SERVICE_LOAD_RECOUNT_INTERVAL: u64 = 20;
 /// Faction slots the zone clock tracks (ids 0..=3: neutral, rebels, forum,
 /// wapes).
 const ZONE_FACTIONS: usize = 4;
@@ -1068,6 +1071,11 @@ pub struct World {
     /// Loose currency dropped on death, auto-collected on walk-over.
     pickups: HashMap<EntityId, CurrencyPickup>,
     statics: HashMap<EntityId, StaticEntity>,
+    /// Static services bucketed by kind (statics never move once seeded).
+    /// `decide_agent` routes errands through `nearest_service` and
+    /// `route_service` constantly; one bucket walk beats filtering the whole
+    /// statics map per call. Maintained by `register_static`.
+    services_by_kind: HashMap<EntityKind, Vec<(EntityId, Vec3)>>,
     /// World-space room rect `[minx, minz, maxx, maxz]` of each service
     /// entity's walk-in interior (entities without a carved room are absent).
     /// Interacting from anywhere inside the room is allowed.
@@ -1175,6 +1183,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         loot: HashMap::new(),
         pickups: HashMap::new(),
         statics: HashMap::new(),
+        services_by_kind: HashMap::new(),
         interior_bounds: HashMap::new(),
         nodes: HashMap::new(),
         static_seeded_chunks: HashSet::new(),
@@ -2697,9 +2706,23 @@ impl World {
                 add(npc.position, FACTION_WAPES, false);
             }
         }
-        for agent in &self.agents {
-            if agent.alive() {
-                add(agent.position, agent.faction, false);
+        // Agents come off the maintained spatial grid: only living agents,
+        // already grouped by chunk, with the region derived once per bucket
+        // — not a scan of the whole (mostly irrelevant) population vec.
+        for (chunk, bucket) in &self.agent_grid {
+            if bucket.is_empty() {
+                continue;
+            }
+            let region = (chunk.x.div_euclid(REGION_CHUNKS), chunk.z.div_euclid(REGION_CHUNKS));
+            let counts = presence.entry(region).or_default();
+            for &i in bucket {
+                let agent = &self.agents[i as usize];
+                // The grid holds living agents, but deaths that bypass
+                // kill_agent (tests zero health directly) regrid lazily.
+                if !agent.alive() || agent.faction == FACTION_NEUTRAL {
+                    continue;
+                }
+                counts.entry(agent.faction).or_insert((0, 0)).0 += 1;
             }
         }
 
@@ -4273,23 +4296,25 @@ impl World {
                 _ => {}
             }
         }
+        // Congestion counts: the full recount is O(population), so it runs
+        // once a second instead of every tick. `decide_agent` keeps the
+        // counter live as agents re-choose in between; goals dropped outside
+        // the decision path (deaths, boxed-in bailouts) leak into the counts
+        // for at most a second before the next recount absorbs them.
+        if self.tick % SERVICE_LOAD_RECOUNT_INTERVAL == 0 {
+            self.rebuild_service_load();
+        }
         // Drain the decision queue under a per-tick budget. Re-scores burst
         // (a freshly seeded world, a whole cold bucket finishing goals at
         // once); the queue spreads that spike over a few ticks instead of
-        // stalling one. Snapshot how many agents are committed to each
-        // service before the batch re-decides; `decide_agent` keeps it live
-        // as it reassigns, so the cohort self-distributes across storefronts
-        // (congestion game).
+        // stalling one.
         const DECISION_BUDGET: usize = 256;
         let n = self.agent_decision_queue.len().min(DECISION_BUDGET);
-        if n > 0 {
-            self.rebuild_service_load();
-            for _ in 0..n {
-                let idx = self.agent_decision_queue.pop_front().unwrap() as usize;
-                self.agents[idx].decision_queued = false;
-                if self.agents[idx].alive() {
-                    self.decide_agent(idx);
-                }
+        for _ in 0..n {
+            let idx = self.agent_decision_queue.pop_front().unwrap() as usize;
+            self.agents[idx].decision_queued = false;
+            if self.agents[idx].alive() {
+                self.decide_agent(idx);
             }
         }
 
@@ -4379,22 +4404,30 @@ impl World {
     /// nearby, resolve casualties with strength-weighted rolls.
     fn tick_cold_combat(&mut self, hot_chunks: &HashSet<ChunkCoord>) {
         use rand::Rng;
-        // Bucket cold agents by territory region.
+        // Bucket cold agents by territory region, walking the maintained
+        // spatial grid (living agents grouped by chunk, region derived once
+        // per bucket) instead of enumerating the whole population.
         let mut regions: HashMap<(i32, i32), (Vec<usize>, Vec<usize>)> = HashMap::new();
-        for (i, agent) in self.agents.iter().enumerate() {
-            if !agent.alive() || agent.tier == Tier::Hot {
+        for (chunk, grid_bucket) in &self.agent_grid {
+            if grid_bucket.is_empty() {
                 continue;
             }
-            match districts::danger_at(agent.position) {
-                DangerLevel::Contested | DangerLevel::Warzone => {}
-                _ => continue, // no cold war on safe ground
-            }
-            let region = region_of(agent.position);
-            let bucket = regions.entry(region).or_default();
-            match agent.faction {
-                FACTION_REBELS => bucket.0.push(i),
-                FACTION_FORUM => bucket.1.push(i),
-                _ => {}
+            let region = (chunk.x.div_euclid(REGION_CHUNKS), chunk.z.div_euclid(REGION_CHUNKS));
+            for &i in grid_bucket {
+                let agent = &self.agents[i as usize];
+                if !agent.alive() || agent.tier == Tier::Hot {
+                    continue;
+                }
+                match districts::danger_at(agent.position) {
+                    DangerLevel::Contested | DangerLevel::Warzone => {}
+                    _ => continue, // no cold war on safe ground
+                }
+                let bucket = regions.entry(region).or_default();
+                match agent.faction {
+                    FACTION_REBELS => bucket.0.push(i as usize),
+                    FACTION_FORUM => bucket.1.push(i as usize),
+                    _ => {}
+                }
             }
         }
         let mut casualties: Vec<(usize, usize)> = Vec::new();
@@ -4577,17 +4610,27 @@ impl World {
         self.nearest_walkable(center)
     }
 
+    /// Add a seeded static entity, keeping the by-kind service table in sync
+    /// (the routing helpers below walk one kind's bucket, never the whole
+    /// statics map). Statics never move or despawn, so insert is the only
+    /// maintenance point.
+    fn register_static(&mut self, s: StaticEntity) {
+        self.services_by_kind.entry(s.kind).or_default().push((s.entity, s.position));
+        self.statics.insert(s.entity, s);
+    }
+
     /// Nearest seeded service of `kind` to `pos`.
     fn nearest_service(&self, pos: Vec3, kind: EntityKind) -> Option<(EntityId, Vec3)> {
-        self.statics
-            .values()
-            .filter(|s| s.kind == kind)
+        self.services_by_kind
+            .get(&kind)
+            .into_iter()
+            .flatten()
             .min_by(|a, b| {
-                let da = (a.position - pos).length_squared();
-                let db = (b.position - pos).length_squared();
+                let da = (a.1 - pos).length_squared();
+                let db = (b.1 - pos).length_squared();
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|s| (s.entity, s.position))
+            .copied()
     }
 
     /// Congestion-aware routing: choose a service of `kind` by trading off
@@ -4599,14 +4642,14 @@ impl World {
     /// from `service_load` (see `decide_agent`) so it doesn't count itself.
     fn route_service(&self, pos: Vec3, kind: EntityKind) -> Option<(EntityId, Vec3, f32)> {
         let mut best: Option<(EntityId, Vec3, f32)> = None;
-        for s in self.statics.values().filter(|s| s.kind == kind) {
-            let dist = (s.position - pos).length();
+        for &(entity, position) in self.services_by_kind.get(&kind).into_iter().flatten() {
+            let dist = (position - pos).length();
             let dist_factor = 1.0 / (1.0 + dist / SERVICE_TRAVEL_HALF);
-            let occ = self.service_load.get(&s.entity).copied().unwrap_or(0) as f32;
+            let occ = self.service_load.get(&entity).copied().unwrap_or(0) as f32;
             let crowd_factor = SERVICE_CAPACITY / (SERVICE_CAPACITY + occ);
             let appeal = dist_factor * crowd_factor;
             if best.map(|(_, _, a)| appeal > a).unwrap_or(true) {
-                best = Some((s.entity, s.position, appeal));
+                best = Some((entity, position, appeal));
             }
         }
         best
@@ -5724,17 +5767,14 @@ impl World {
                 used.push(pos);
                 first_pos.get_or_insert(pos);
                 let entity = self.alloc_entity();
-                self.statics.insert(
+                self.register_static(StaticEntity {
                     entity,
-                    StaticEntity {
-                        entity,
-                        kind,
-                        position: pos,
-                        name,
-                        variant: 0,
-                        agent_id: static_agent_id(self.seed, entity),
-                    },
-                );
+                    kind,
+                    position: pos,
+                    name,
+                    variant: 0,
+                    agent_id: static_agent_id(self.seed, entity),
+                });
             }
             // The district's staging spot: outside its first service door,
             // falling back to walkable ground near the raw anchor (baked
@@ -6235,17 +6275,14 @@ impl World {
                 };
                 used.push(pos);
                 let entity = self.alloc_entity();
-                self.statics.insert(
+                self.register_static(StaticEntity {
                     entity,
-                    StaticEntity {
-                        entity,
-                        kind,
-                        position: pos,
-                        name: name.into(),
-                        variant: 0,
-                        agent_id: static_agent_id(self.seed, entity),
-                    },
-                );
+                    kind,
+                    position: pos,
+                    name: name.into(),
+                    variant: 0,
+                    agent_id: static_agent_id(self.seed, entity),
+                });
             }
         }
     }
@@ -6367,21 +6404,18 @@ impl World {
                     for tx in (2..TILES_PER_CHUNK).step_by(3) {
                         if chunk.tile(tx, tz).walkable() {
                             let entity = self.alloc_entity();
-                            self.statics.insert(
+                            self.register_static(StaticEntity {
                                 entity,
-                                StaticEntity {
-                                    entity,
-                                    kind: EntityKind::ExtractionPoint,
-                                    position: Vec3::new(
-                                        coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
-                                        0.0,
-                                        coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
-                                    ),
-                                    name: "Extraction Point".into(),
-                                    variant: 0,
-                                    agent_id: static_agent_id(self.seed, entity),
-                                },
-                            );
+                                kind: EntityKind::ExtractionPoint,
+                                position: Vec3::new(
+                                    coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
+                                    0.0,
+                                    coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
+                                ),
+                                name: "Extraction Point".into(),
+                                variant: 0,
+                                agent_id: static_agent_id(self.seed, entity),
+                            });
                             break 'find;
                         }
                     }
@@ -7056,6 +7090,7 @@ mod tests {
             loot: HashMap::new(),
             pickups: HashMap::new(),
             statics: HashMap::new(),
+            services_by_kind: HashMap::new(),
             interior_bounds: HashMap::new(),
             nodes: HashMap::new(),
             static_seeded_chunks: HashSet::new(),
@@ -7489,17 +7524,14 @@ mod tests {
         let (mut world, _dir) = test_world();
         let place = |world: &mut World, pos: Vec3| -> EntityId {
             let e = world.alloc_entity();
-            world.statics.insert(
-                e,
-                StaticEntity {
-                    entity: e,
-                    kind: EntityKind::Bodega,
-                    position: pos,
-                    name: "Bodega".into(),
-                    variant: 0,
-                    agent_id: static_agent_id(world.seed, e),
-                },
-            );
+            world.register_static(StaticEntity {
+                entity: e,
+                kind: EntityKind::Bodega,
+                position: pos,
+                name: "Bodega".into(),
+                variant: 0,
+                agent_id: static_agent_id(world.seed, e),
+            });
             e
         };
         // Two Bodegas: A is nearer the agent, B a short detour farther.
@@ -7567,17 +7599,14 @@ mod tests {
         let pos = district_anchor("NEXUS");
         // A Bodega right next door, so if Sell scores at all it wins routing.
         let entity = world.alloc_entity();
-        world.statics.insert(
+        world.register_static(StaticEntity {
             entity,
-            StaticEntity {
-                entity,
-                kind: EntityKind::Bodega,
-                position: pos + Vec3::new(10.0, 0.0, 0.0),
-                name: "Bodega".into(),
-                variant: 0,
-                agent_id: static_agent_id(world.seed, entity),
-            },
-        );
+            kind: EntityKind::Bodega,
+            position: pos + Vec3::new(10.0, 0.0, 0.0),
+            name: "Bodega".into(),
+            variant: 0,
+            agent_id: static_agent_id(world.seed, entity),
+        });
         let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
         // A valuable pack — but it's all personal kit, which the Bodega
         // (raw resources in, consumables out) pays nothing for. Under
@@ -7696,17 +7725,14 @@ mod tests {
         assert!(world.agents[idx].haul_value() >= agents::EXTRACT_MIN_HAUL);
         // Plant a beacon next door so extraction outscores hauling to a store.
         let entity = world.alloc_entity();
-        world.statics.insert(
+        world.register_static(StaticEntity {
             entity,
-            StaticEntity {
-                entity,
-                kind: EntityKind::ExtractionPoint,
-                position: pos + Vec3::new(4.0, 0.0, 0.0),
-                name: "Extraction Point".into(),
-                variant: 0,
-                agent_id: static_agent_id(world.seed, entity),
-            },
-        );
+            kind: EntityKind::ExtractionPoint,
+            position: pos + Vec3::new(4.0, 0.0, 0.0),
+            name: "Extraction Point".into(),
+            variant: 0,
+            agent_id: static_agent_id(world.seed, entity),
+        });
         world.decide_agent(idx);
         assert!(
             matches!(world.agents[idx].goal, Goal::Extract { .. }),

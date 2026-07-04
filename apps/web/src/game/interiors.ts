@@ -46,12 +46,20 @@ export interface InteriorSpec {
   counters: Aabb[];
   /** Wall + furniture colliders (includes the counters). */
   colliders: Aabb[];
+  /** Furniture with render semantics (same boxes as in `colliders`). */
+  deco: InteriorDeco[];
 }
 
 export interface ChunkInteriors {
   specs: InteriorSpec[];
   /** [building index, replacement front bands (door gaps carved)]. */
   frontBands: [number, Aabb[]][];
+}
+
+/** Furniture piece with render semantics (client-only; boxes mirror Rust). */
+export interface InteriorDeco {
+  box: Aabb;
+  type: "shelf" | "machine" | "bench" | "pedestal";
 }
 
 /** Service kinds that get a walk-in interior. */
@@ -120,21 +128,32 @@ function hostBuilding(chunk: ChunkData, ex: number, ez: number): number | null {
  * Try to add `bx` if it fits inside `open` and avoids every box in `avoid`
  * (mirror of `push_if_clear`).
  */
-function pushIfClear(out: Aabb[], avoid: Aabb[], open: Aabb, bx: Aabb) {
-  if (bx[0] < open[0] || bx[1] < open[1] || bx[2] > open[2] || bx[3] > open[3]) return;
-  if (bx[2] - bx[0] < 0.05 || bx[3] - bx[1] < 0.05) return;
-  if (avoid.some((a) => boxesOverlap(a, bx))) return;
+function pushIfClear(out: Aabb[], avoid: Aabb[], open: Aabb, bx: Aabb): boolean {
+  if (bx[0] < open[0] || bx[1] < open[1] || bx[2] > open[2] || bx[3] > open[3]) return false;
+  if (bx[2] - bx[0] < 0.05 || bx[3] - bx[1] < 0.05) return false;
+  if (avoid.some((a) => boxesOverlap(a, bx))) return false;
   avoid.push(bx);
   out.push(bx);
+  return true;
 }
 
 /** Per-kind furniture blockers (mirror of `furniture`). */
-function furniture(kind: EntityKind, open: Aabb, style: number, avoidIn: Aabb[], out: Aabb[]) {
+function furniture(
+  kind: EntityKind,
+  open: Aabb,
+  style: number,
+  avoidIn: Aabb[],
+  out: Aabb[],
+  deco: InteriorDeco[],
+) {
   const avoid = avoidIn.slice();
   const [ax0, az0, ax1, az1] = open;
   const w = ax1 - ax0;
   const d = az1 - az0;
   if (w < 4.0 || d < 2.0) return;
+  const put = (bx: Aabb, type: InteriorDeco["type"]) => {
+    if (pushIfClear(out, avoid, open, bx)) deco.push({ box: bx, type });
+  };
   switch (kind) {
     case "Armory":
     case "Bodega":
@@ -143,29 +162,29 @@ function furniture(kind: EntityKind, open: Aabb, style: number, avoidIn: Aabb[],
       const span = Math.max(d - len - 0.4, 0);
       const zl = az0 + 0.2 + (mix(style, 11) % 8) * (span / 8.0);
       const zr = az0 + 0.2 + (mix(style, 23) % 8) * (span / 8.0);
-      pushIfClear(out, avoid, open, [ax0, zl, ax0 + 0.5, zl + len]);
-      pushIfClear(out, avoid, open, [ax1 - 0.5, zr, ax1, zr + len]);
+      put([ax0, zl, ax0 + 0.5, zl + len], "shelf");
+      put([ax1 - 0.5, zr, ax1, zr + len], "shelf");
       break;
     }
     case "Factory":
     case "Refinery": {
       const zl = az0 + 0.4 + (mix(style, 37) % 6) * (Math.max(d - 2.0, 0) / 6.0);
       const zr = az0 + 0.4 + (mix(style, 53) % 6) * (Math.max(d - 2.0, 0) / 6.0);
-      pushIfClear(out, avoid, open, [ax0 + 0.3, zl, ax0 + 1.5, zl + 1.2]);
-      pushIfClear(out, avoid, open, [ax1 - 1.5, zr, ax1 - 0.3, zr + 1.2]);
+      put([ax0 + 0.3, zl, ax0 + 1.5, zl + 1.2], "machine");
+      put([ax1 - 1.5, zr, ax1 - 0.3, zr + 1.2], "machine");
       break;
     }
     case "Laboratory": {
       const cz = az0 + d * 0.45;
       const cx = (ax0 + ax1) / 2;
-      pushIfClear(out, avoid, open, [cx - 3.1, cz - 0.4, cx - 1.5, cz + 0.4]);
-      pushIfClear(out, avoid, open, [cx + 1.5, cz - 0.4, cx + 3.1, cz + 0.4]);
+      put([cx - 3.1, cz - 0.4, cx - 1.5, cz + 0.4], "bench");
+      put([cx + 1.5, cz - 0.4, cx + 3.1, cz + 0.4], "bench");
       break;
     }
     case "Dealership": {
       const cx = ax0 + w * 0.3;
       const cz = az0 + d * 0.5;
-      pushIfClear(out, avoid, open, [cx - 1.0, cz - 1.0, cx + 1.0, cz + 1.0]);
+      put([cx - 1.0, cz - 1.0, cx + 1.0, cz + 1.0], "pedestal");
       break;
     }
     default:
@@ -270,8 +289,9 @@ export function chunkInteriors(chunk: ChunkData, services: ServiceEntity[]): Chu
       for (const d of g.doors) {
         avoid.push([d.x - 1.3, frontZ, d.x + 1.3, Math.max(counterZ0, frontZ)]);
       }
+      const deco: InteriorDeco[] = [];
       for (let di = 0; di < g.doors.length; di++) {
-        furniture(g.doors[di].kind, open, (b.style + di) >>> 0, avoid, colliders);
+        furniture(g.doors[di].kind, open, (b.style + di) >>> 0, avoid, colliders, deco);
       }
 
       out.specs.push({
@@ -283,6 +303,7 @@ export function chunkInteriors(chunk: ChunkData, services: ServiceEntity[]): Chu
         doors: g.doors,
         counters,
         colliders,
+        deco,
       });
     }
 

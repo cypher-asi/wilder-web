@@ -9,6 +9,7 @@ import { Chunks } from "./Chunks";
 import { CityProxy } from "./CityProxy";
 import { CombatFx } from "./CombatFx";
 import { Entities } from "./Entities";
+import { Interiors } from "./Interior";
 import { Ocean } from "./Ocean";
 import { PlayerInput } from "./PlayerInput";
 
@@ -74,6 +75,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         <Ocean />
         <CityProxy />
         <Chunks />
+        <Interiors />
         <Entities />
         <CombatFx />
         <CameraRig />

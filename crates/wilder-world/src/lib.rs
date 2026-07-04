@@ -39,7 +39,7 @@ use wilder_types::*;
 pub use chunks::ChunkCache;
 use agents::{
     base_value, guild_for, mint_agent_name, AgentEvent, AgentSave, FactionAgent, Goal, Role,
-    TargetInfo, Tier, AGENT_RESPAWN_SECONDS, COLD_BUCKETS, HOT_RADIUS_CHUNKS,
+    TargetInfo, Tier, AGENT_RESPAWN_SECONDS, COLD_BUCKETS, COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS,
     RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
 };
 use factions::{are_hostile, faction_registry};
@@ -1113,6 +1113,10 @@ pub struct World {
     dead_agents: Vec<u32>,
     /// Budgeted A* queue: agent indices waiting for a `find_path` grant.
     agent_path_queue: std::collections::VecDeque<usize>,
+    /// Budgeted decision queue: agent indices waiting for a `decide_agent`
+    /// re-score. A per-tick budget flattens decision bursts (a whole cold
+    /// bucket going idle at once) into a steady, bounded per-tick cost.
+    agent_decision_queue: std::collections::VecDeque<u32>,
     /// Service entity -> count of agents currently committed to it (Sell/Buy
     /// vendor errands, craft stations). Drives congestion-aware routing so a
     /// cohort self-distributes across storefronts instead of funneling to the
@@ -1191,6 +1195,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         hot_agents: Vec::new(),
         dead_agents: Vec::new(),
         agent_path_queue: std::collections::VecDeque::new(),
+        agent_decision_queue: std::collections::VecDeque::new(),
         service_load: HashMap::new(),
         recent_attacks: HashMap::new(),
         district_spots: Vec::new(),
@@ -4232,28 +4237,27 @@ impl World {
         }
 
         // Simulation slices: hot agents every tick at TICK_DT, cold agents
-        // once a second from the bucket wheel. Iterate the hot list plus
-        // this tick's cold bucket stride — not every agent every tick.
-        let cold_bucket = self.tick % COLD_BUCKETS;
+        // from the bucket wheel. Iterate the hot list plus this tick's cold
+        // bucket stride — not every agent every tick. The wheel scales with
+        // population: at most COLD_TICK_BUDGET cold agents per tick, so a
+        // 10-100x population pays with slice cadence (1 s at small counts,
+        // a few seconds at 50k) instead of per-tick CPU. Slice dt grows to
+        // match, so per-agent sim-time stays honest at any wheel size.
+        let cold_buckets =
+            COLD_BUCKETS.max((self.agents.len() as u64).div_ceil(COLD_TICK_BUDGET));
+        let cold_bucket = self.tick % cold_buckets;
         let mut events: Vec<(usize, AgentEvent)> = Vec::new();
-        let mut decisions: Vec<usize> = Vec::new();
         let hot_now = self.hot_agents.clone();
         for i in hot_now {
-            self.tick_one_agent(i as usize, true, TICK_DT, &mut events, &mut decisions);
+            self.tick_one_agent(i as usize, true, TICK_DT, &mut events);
         }
         let mut idx = cold_bucket as usize;
         while idx < self.agents.len() {
             // Hot agents in this stride already ticked from the hot list.
             if self.agents[idx].tier == Tier::Cold {
-                self.tick_one_agent(
-                    idx,
-                    false,
-                    COLD_BUCKETS as f32 * TICK_DT,
-                    &mut events,
-                    &mut decisions,
-                );
+                self.tick_one_agent(idx, false, cold_buckets as f32 * TICK_DT, &mut events);
             }
-            idx += COLD_BUCKETS as usize;
+            idx += cold_buckets as usize;
         }
 
         for (idx, event) in events {
@@ -4269,12 +4273,24 @@ impl World {
                 _ => {}
             }
         }
-        // Snapshot how many agents are committed to each service before the
-        // batch re-decides; `decide_agent` keeps it live as it reassigns, so
-        // the cohort self-distributes across storefronts (congestion game).
-        self.rebuild_service_load();
-        for idx in decisions {
-            self.decide_agent(idx);
+        // Drain the decision queue under a per-tick budget. Re-scores burst
+        // (a freshly seeded world, a whole cold bucket finishing goals at
+        // once); the queue spreads that spike over a few ticks instead of
+        // stalling one. Snapshot how many agents are committed to each
+        // service before the batch re-decides; `decide_agent` keeps it live
+        // as it reassigns, so the cohort self-distributes across storefronts
+        // (congestion game).
+        const DECISION_BUDGET: usize = 256;
+        let n = self.agent_decision_queue.len().min(DECISION_BUDGET);
+        if n > 0 {
+            self.rebuild_service_load();
+            for _ in 0..n {
+                let idx = self.agent_decision_queue.pop_front().unwrap() as usize;
+                self.agents[idx].decision_queued = false;
+                if self.agents[idx].alive() {
+                    self.decide_agent(idx);
+                }
+            }
         }
 
         self.serve_agent_paths();
@@ -4287,14 +4303,13 @@ impl World {
 
     /// One agent's simulation slice: goal upkeep, the behavior tick itself,
     /// path-queue bookkeeping and grid maintenance. Shared by the hot list
-    /// (every tick) and the cold bucket wheel (once a second each).
+    /// (every tick) and the cold bucket wheel.
     fn tick_one_agent(
         &mut self,
         idx: usize,
         hot: bool,
         dt: f32,
         events: &mut Vec<(usize, AgentEvent)>,
-        decisions: &mut Vec<usize>,
     ) {
         if !self.agents[idx].alive() {
             return;
@@ -4327,7 +4342,15 @@ impl World {
         }
         match event {
             AgentEvent::None => {}
-            AgentEvent::NeedsGoal => decisions.push(idx),
+            AgentEvent::NeedsGoal => {
+                // Queue for a budgeted re-score (once; the flag clears when
+                // the queue serves it). Until then the agent keeps running
+                // its current goal.
+                if !self.agents[idx].decision_queued {
+                    self.agents[idx].decision_queued = true;
+                    self.agent_decision_queue.push_back(idx as u32);
+                }
+            }
             AgentEvent::Act => events.push((idx, event)),
             AgentEvent::Attack { .. } => events.push((idx, event)),
         }
@@ -7053,6 +7076,7 @@ mod tests {
             hot_agents: Vec::new(),
             dead_agents: Vec::new(),
             agent_path_queue: std::collections::VecDeque::new(),
+            agent_decision_queue: std::collections::VecDeque::new(),
             service_load: HashMap::new(),
             recent_attacks: HashMap::new(),
             district_spots: Vec::new(),

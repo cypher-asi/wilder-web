@@ -22,8 +22,13 @@ use wilder_types::*;
 pub const AGENT_SPEED: f32 = 6.5;
 /// Hot tier: within this many chunks (Chebyshev) of any connected player.
 pub const HOT_RADIUS_CHUNKS: i32 = 2;
-/// Cold agents tick from a 1 Hz bucket wheel (`idx % BUCKETS == tick % BUCKETS`).
+/// Cold agents tick from a bucket wheel (`idx % buckets == tick % buckets`).
+/// This is the minimum wheel size (1 Hz slices at 20 Hz sim); the wheel grows
+/// with population so one tick never simulates more than `COLD_TICK_BUDGET`
+/// cold agents (their slice dt grows to match, so sim-time stays honest).
 pub const COLD_BUCKETS: u64 = 20;
+/// Cap on cold agents simulated per world tick (see `COLD_BUCKETS`).
+pub const COLD_TICK_BUDGET: u64 = 1024;
 /// Seconds a dead agent waits before respawning as a fresh identity.
 pub const AGENT_RESPAWN_SECONDS: f32 = 60.0;
 /// Retreat when health drops below this fraction.
@@ -271,6 +276,8 @@ pub struct FactionAgent {
     pub path_request: Option<Vec3>,
     /// Already sitting in the world's path queue.
     pub path_queued: bool,
+    /// Already sitting in the world's decision queue (budgeted re-scores).
+    pub decision_queued: bool,
     pub attack_cooldown: f32,
     /// Suppresses wealth-triggered retreats right after one completed.
     pub retreat_cooldown: f32,
@@ -461,6 +468,7 @@ impl FactionAgent {
             path: Vec::new(),
             path_request: None,
             path_queued: false,
+            decision_queued: false,
             attack_cooldown: 0.0,
             retreat_cooldown: 0.0,
             anim: AnimState::Idle,

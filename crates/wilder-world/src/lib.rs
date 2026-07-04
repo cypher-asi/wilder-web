@@ -657,6 +657,10 @@ pub struct World {
     /// Loose currency dropped on death, auto-collected on walk-over.
     pickups: HashMap<EntityId, CurrencyPickup>,
     statics: HashMap<EntityId, StaticEntity>,
+    /// World-space room rect `[minx, minz, maxx, maxz]` of each service
+    /// entity's walk-in interior (entities without a carved room are absent).
+    /// Interacting from anywhere inside the room is allowed.
+    interior_bounds: HashMap<EntityId, [f32; 4]>,
     nodes: HashMap<EntityId, ResourceNode>,
     static_seeded_chunks: HashSet<ChunkCoord>,
     next_entity: EntityId,
@@ -707,6 +711,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         loot: HashMap::new(),
         pickups: HashMap::new(),
         statics: HashMap::new(),
+        interior_bounds: HashMap::new(),
         nodes: HashMap::new(),
         static_seeded_chunks: HashSet::new(),
         next_entity: 1,
@@ -720,6 +725,9 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
     };
     // Seed the spawn district up front so PoiList is complete on every join.
     world.seed_district();
+    // Carve walk-in interiors into every service's host building (collision
+    // door gaps + room walls; the client mirrors this from replicated data).
+    world.register_interiors();
     tokio::spawn(world.run());
     WorldHandle { tx, seed }
 }
@@ -943,7 +951,7 @@ impl World {
                 player.last_input_seq = player.last_input_seq.max(seq);
                 player.extracting = None;
                 let from = player.character.position;
-                match find_path(&self.chunks, from, Vec3::new(x, 0.0, z)) {
+                match find_path(&self.chunks.nav(), from, Vec3::new(x, 0.0, z)) {
                     Some(path) => player.path = path,
                     None => {
                         let _ = player
@@ -1661,10 +1669,17 @@ impl World {
         let Some(static_entity) = self.statics.get(&target) else { return };
         let kind = static_entity.kind;
         let pos = static_entity.position;
+        let room = self.interior_bounds.get(&target).copied();
         let Some(player) = self.players.get_mut(&entity) else { return };
-        // Service buildings render as 6x4 m storefronts around their entity
-        // position, so allow interacting from their street side.
-        if (pos - player.character.position).length() > 5.0 {
+        // Service buildings are interactable from their street side (the
+        // entity stands on the sidewalk by the door) or from anywhere inside
+        // their walk-in room, whose counter sits well past the 5 m ring.
+        let p = player.character.position;
+        let near = (pos - p).length() <= 5.0;
+        let inside = room.map_or(false, |[x0, z0, x1, z1]| {
+            p.x >= x0 - 0.5 && p.x <= x1 + 0.5 && p.z >= z0 - 0.5 && p.z <= z1 + 0.5
+        });
+        if !near && !inside {
             let _ = player.tx.send(S2C::Error { message: "too far away".into() });
             return;
         }
@@ -3361,6 +3376,34 @@ impl World {
                     },
                 );
             }
+        }
+    }
+
+    /// Compute and register the walk-in interior for every service building.
+    /// Runs once after `seed_district`: rooms are pure derived data (chunk
+    /// geometry + entity positions), so this never needs to persist anything.
+    fn register_interiors(&mut self) {
+        let mut per_chunk: HashMap<ChunkCoord, Vec<(EntityId, EntityKind, Vec3)>> = HashMap::new();
+        for s in self.statics.values() {
+            if interiors::is_service_kind(s.kind) {
+                per_chunk
+                    .entry(ChunkCoord::from_world(s.position))
+                    .or_default()
+                    .push((s.entity, s.kind, s.position));
+            }
+        }
+        for (coord, services) in per_chunk {
+            let chunk = self.chunks.get(coord);
+            let ints = interiors::chunk_interiors(&chunk, &services);
+            if ints.is_empty() {
+                continue;
+            }
+            for spec in &ints.specs {
+                for door in &spec.doors {
+                    self.interior_bounds.insert(door.entity, spec.bounds);
+                }
+            }
+            self.chunks.set_interiors(coord, ints);
         }
     }
 

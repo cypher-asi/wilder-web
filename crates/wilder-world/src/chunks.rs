@@ -9,20 +9,31 @@ use wilder_physics::{disc_aabb_overlap, CollisionWorld, BUILDING_FRONT_PROUD};
 use wilder_terrain::TerrainGenerator;
 use wilder_types::*;
 
+use crate::interiors::ChunkInteriors;
+
 pub struct ChunkCache {
     generator: TerrainGenerator,
     store: Arc<RocksStore>,
     // RefCell: the world sim is single-task; collision queries during movement
     // need to lazily load/generate chunks through &self.
     loaded: RefCell<HashMap<ChunkCoord, LoadedChunk>>,
+    /// Registered walk-in interiors per chunk (service buildings). Applied to
+    /// the collision grids whenever the chunk is (re)loaded.
+    interiors: RefCell<HashMap<ChunkCoord, ChunkInteriors>>,
 }
 
 struct LoadedChunk {
     data: ChunkData,
+    /// Physics walkability: interior room tiles are open (walls and door
+    /// gaps are enforced by `building_aabbs`).
     walkable: Vec<bool>,
-    /// World-space front-face buffers `[minx, minz, maxx, maxz]`, one per
-    /// building: the [`BUILDING_FRONT_PROUD`] band in front of each footprint's
-    /// street (-z) face, matching the client's proud storefront geometry.
+    /// Pathfinding walkability: the raw tile grid, with interiors still
+    /// solid. A* is tile-granular and cannot see the sub-tile walls, so nav
+    /// keeps routing around store buildings instead of cutting through them.
+    nav_walkable: Vec<bool>,
+    /// World-space collision boxes `[minx, minz, maxx, maxz]`: storefront
+    /// front-face buffers (door gaps carved for interiors) plus interior
+    /// walls / counters / furniture.
     building_aabbs: Vec<[f32; 4]>,
     dirty: bool,
 }
@@ -42,12 +53,48 @@ fn building_front_aabbs(data: &ChunkData) -> Vec<[f32; 4]> {
         .collect()
 }
 
+/// Physics walkability + collision boxes for a chunk, with any registered
+/// interiors applied: room tiles open up, host front bands gain door gaps,
+/// and interior walls/furniture join the box list.
+fn apply_interiors(
+    data: &ChunkData,
+    ints: Option<&ChunkInteriors>,
+) -> (Vec<bool>, Vec<[f32; 4]>) {
+    let mut walkable = wilder_terrain::walkable_grid(data);
+    let mut bands = building_front_aabbs(data);
+    let Some(ints) = ints else {
+        return (walkable, bands);
+    };
+    for &(building, ref replacement) in &ints.front_bands {
+        // Swap the host's full-width band for the door-gapped segments. The
+        // building keeps exactly one entry slot; extra segments append.
+        if let Some(first) = replacement.first() {
+            bands[building] = *first;
+            bands.extend_from_slice(&replacement[1..]);
+        } else {
+            // Degenerate (door spans the whole face): zero-size the band.
+            bands[building] = [0.0, 0.0, 0.0, 0.0];
+        }
+    }
+    for spec in &ints.specs {
+        let [tx0, tz0, tx1, tz1] = spec.tiles;
+        for tz in tz0..tz1 {
+            for tx in tx0..tx1 {
+                walkable[tz as usize * TILES_PER_CHUNK + tx as usize] = true;
+            }
+        }
+        bands.extend_from_slice(&spec.colliders);
+    }
+    (walkable, bands)
+}
+
 impl ChunkCache {
     pub fn new(generator: TerrainGenerator, store: Arc<RocksStore>) -> Self {
         Self {
             generator,
             store,
             loaded: RefCell::new(HashMap::new()),
+            interiors: RefCell::new(HashMap::new()),
         }
     }
 
@@ -55,6 +102,27 @@ impl ChunkCache {
     pub fn get(&self, coord: ChunkCoord) -> ChunkData {
         self.ensure(coord);
         self.loaded.borrow()[&coord].data.clone()
+    }
+
+    /// Register the walk-in interiors carved into this chunk's buildings.
+    /// Takes effect immediately if the chunk is loaded, and re-applies on
+    /// every future load (interiors are derived data, never persisted).
+    pub fn set_interiors(&self, coord: ChunkCoord, ints: ChunkInteriors) {
+        self.interiors.borrow_mut().insert(coord, ints);
+        let mut loaded = self.loaded.borrow_mut();
+        if let Some(chunk) = loaded.get_mut(&coord) {
+            let ints = self.interiors.borrow();
+            let (walkable, building_aabbs) = apply_interiors(&chunk.data, ints.get(&coord));
+            chunk.walkable = walkable;
+            chunk.building_aabbs = building_aabbs;
+        }
+    }
+
+    /// Pathfinding view of this world: interiors read as solid so A* keeps
+    /// routing around store buildings (the tile grid can't express their
+    /// sub-tile walls / door gaps).
+    pub fn nav(&self) -> NavView<'_> {
+        NavView { cache: self }
     }
 
     fn ensure(&self, coord: ChunkCoord) {
@@ -65,11 +133,13 @@ impl ChunkCache {
             Ok(Some(persisted)) => persisted,
             _ => self.generator.generate(coord),
         };
-        let walkable = wilder_terrain::walkable_grid(&data);
-        let building_aabbs = building_front_aabbs(&data);
+        let nav_walkable = wilder_terrain::walkable_grid(&data);
+        let ints = self.interiors.borrow();
+        let (walkable, building_aabbs) = apply_interiors(&data, ints.get(&coord));
+        drop(ints);
         self.loaded.borrow_mut().insert(
             coord,
-            LoadedChunk { data, walkable, building_aabbs, dirty: false },
+            LoadedChunk { data, walkable, nav_walkable, building_aabbs, dirty: false },
         );
     }
 
@@ -105,10 +175,8 @@ impl ChunkCache {
     pub fn loaded_count(&self) -> usize {
         self.loaded.borrow().len()
     }
-}
 
-impl CollisionWorld for ChunkCache {
-    fn walkable(&self, x: f32, z: f32) -> bool {
+    fn tile_walkable(&self, x: f32, z: f32, nav: bool) -> bool {
         let coord = ChunkCoord::from_world(Vec3::new(x, 0.0, z));
         self.ensure(coord);
         let loaded = self.loaded.borrow();
@@ -119,7 +187,25 @@ impl CollisionWorld for ChunkCache {
         let tz = (lz / TILE_SIZE) as usize;
         let tx = tx.min(TILES_PER_CHUNK - 1);
         let tz = tz.min(TILES_PER_CHUNK - 1);
-        chunk.walkable[tz * TILES_PER_CHUNK + tx]
+        let grid = if nav { &chunk.nav_walkable } else { &chunk.walkable };
+        grid[tz * TILES_PER_CHUNK + tx]
+    }
+}
+
+/// Pathfinding-only collision view (see [`ChunkCache::nav`]).
+pub struct NavView<'a> {
+    cache: &'a ChunkCache,
+}
+
+impl CollisionWorld for NavView<'_> {
+    fn walkable(&self, x: f32, z: f32) -> bool {
+        self.cache.tile_walkable(x, z, true)
+    }
+}
+
+impl CollisionWorld for ChunkCache {
+    fn walkable(&self, x: f32, z: f32) -> bool {
+        self.tile_walkable(x, z, false)
     }
 
     fn prop_blocked(&self, x: f32, z: f32, radius: f32) -> bool {

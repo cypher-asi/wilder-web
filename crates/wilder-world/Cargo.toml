@@ -14,7 +14,6 @@ wilder-pathfinding = { workspace = true }
 wilder-inventory = { workspace = true }
 wilder-replication = { workspace = true }
 wilder-combat = { workspace = true }
-wilder-ai = { workspace = true }
 wilder-economy = { workspace = true }
 wilder-crafting = { workspace = true }
 wilder-market = { workspace = true }

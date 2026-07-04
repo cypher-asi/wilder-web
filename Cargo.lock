@@ -1605,7 +1605,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "wilder-ai",
  "wilder-combat",
  "wilder-crafting",
  "wilder-economy",

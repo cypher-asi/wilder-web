@@ -1,15 +1,16 @@
 //! RocksDB-backed implementation of the storage traits.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use rocksdb::{ColumnFamilyDescriptor, DBCompressionType, IteratorMode, Options, WriteBatch, DB};
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 use wilder_types::*;
 
 use crate::{
-    Account, CharacterStore, SessionStore, Stash, StoreError, StoreResult, WorldStore,
+    Account, CharacterStore, PurgeReport, SessionStore, Stash, StoreError, StoreResult, WorldStore,
 };
 
 const CF_ACCOUNTS: &str = "accounts";
@@ -38,23 +39,187 @@ const ALL_CFS: &[&str] = &[
 
 pub struct RocksStore {
     db: DB,
+    path: PathBuf,
+}
+
+/// Tuned RocksDB options shared by the base DB and every column family.
+///
+/// The world re-serializes bounded JSON blobs (ledger, market stats, agent
+/// shards, ...) on a tight cadence, so the raw write volume dwarfs the live
+/// data set. Left on defaults RocksDB stores it all uncompressed and lets WAL
+/// + churned SSTs pile up, which is how a 10 GB disk filled. These settings
+/// keep on-disk size proportional to *live* data:
+///   - Lz4 on hot levels (cheap) + Zstd on the bottommost level (best ratio;
+///     JSON compresses ~5-10x). Transparent: old uncompressed blocks still
+///     read fine and get recompressed as they compact down.
+///   - A hard WAL ceiling so write-ahead logs can't grow without bound.
+///   - Periodic compaction so churned/obsolete data is reclaimed even when a
+///     key is rewritten in place forever.
+///   - Bounded LOG files so RocksDB's own logging can't eat the disk.
+fn tuned_options() -> Options {
+    let mut opts = Options::default();
+    opts.set_compression_type(DBCompressionType::Lz4);
+    opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+    opts.set_level_compaction_dynamic_level_bytes(true);
+    // Recompact anything untouched for a day so stale/uncompressed blocks and
+    // tombstones are reclaimed even under steady in-place overwrites.
+    opts.set_periodic_compaction_seconds(24 * 60 * 60);
+    opts.set_write_buffer_size(64 * 1024 * 1024);
+    opts.set_max_write_buffer_number(3);
+    opts
 }
 
 impl RocksStore {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let mut opts = Options::default();
+        let path = path.as_ref().to_path_buf();
+        let mut opts = tuned_options();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        opts.increase_parallelism(num_cpus_hint());
+        opts.set_max_background_jobs(4);
+        // Bound total WAL and RocksDB's own LOG files (both live on the disk).
+        opts.set_max_total_wal_size(256 * 1024 * 1024);
+        opts.set_keep_log_file_num(5);
+        opts.set_max_log_file_size(16 * 1024 * 1024);
         let cfs: Vec<ColumnFamilyDescriptor> = ALL_CFS
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+            .map(|name| ColumnFamilyDescriptor::new(*name, tuned_options()))
             .collect();
-        let db = DB::open_cf_descriptors(&opts, path, cfs)?;
-        Ok(Self { db })
+        let db = DB::open_cf_descriptors(&opts, &path, cfs)?;
+        Ok(Self { db, path })
     }
 
     fn cf(&self, name: &str) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(name).expect("column family exists")
+    }
+
+    /// Directory this store lives in (the persistent disk mount).
+    pub fn data_dir(&self) -> &Path {
+        &self.path
+    }
+
+    /// Total bytes the store occupies on disk (SSTs + WAL + LOG + manifests).
+    /// Walks the data directory so it reflects real disk pressure, not just
+    /// RocksDB's live-data estimate. Returns 0 if the dir can't be read.
+    pub fn on_disk_bytes(&self) -> u64 {
+        fn walk(dir: &Path) -> u64 {
+            let mut total = 0;
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    total += walk(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+            total
+        }
+        walk(&self.path)
+    }
+
+    /// Force a full compaction of every column family. Reclaims space from
+    /// obsolete versions/tombstones (e.g. right after a purge) and applies the
+    /// current compression settings to older SSTs.
+    pub fn compact(&self) {
+        self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+        for name in ALL_CFS {
+            self.db
+                .compact_range_cf(self.cf(name), None::<&[u8]>, None::<&[u8]>);
+        }
+    }
+
+    /// Reclaim space by deleting throwaway guest accounts and their data.
+    ///
+    /// A guest (username starts with `guest_prefix`, e.g. `runner_`) is eligible
+    /// when it was created before `older_than_unix` and is **not** in `active`
+    /// (the set of accounts currently connected). For each victim this cascades
+    /// through the character rows it owns (character + inventory + stash +
+    /// blueprints), then the account/username-index entries, then any sessions
+    /// pointing at it — all in one atomic write batch. At most `max_delete`
+    /// accounts are removed per call so a big backlog drains across several
+    /// passes instead of stalling the caller.
+    ///
+    /// Returns the character ids that were removed (so callers can prune their
+    /// in-memory leaderboard/stats rows) plus counts. Does NOT compact; call
+    /// [`RocksStore::compact`] afterwards to actually release disk.
+    pub fn purge_stale_guests(
+        &self,
+        active: &HashSet<AccountId>,
+        guest_prefix: &str,
+        older_than_unix: u64,
+        max_delete: usize,
+    ) -> StoreResult<PurgeReport> {
+        let prefix = guest_prefix.to_lowercase();
+        let mut victims: Vec<Account> = Vec::new();
+        for item in self.db.iterator_cf(self.cf(CF_ACCOUNTS), IteratorMode::Start) {
+            let (_key, value) = item.map_err(|e| StoreError::Backend(e.to_string()))?;
+            let Ok(account) = serde_json::from_slice::<Account>(&value) else {
+                continue;
+            };
+            if account.created_unix > older_than_unix
+                || active.contains(&account.id)
+                || !account.username.to_lowercase().starts_with(&prefix)
+            {
+                continue;
+            }
+            victims.push(account);
+            if victims.len() >= max_delete {
+                break;
+            }
+        }
+
+        if victims.is_empty() {
+            return Ok(PurgeReport::default());
+        }
+
+        let victim_ids: HashSet<AccountId> = victims.iter().map(|a| a.id).collect();
+        let mut batch = WriteBatch::default();
+        let mut character_ids: Vec<CharacterId> = Vec::new();
+
+        for account in &victims {
+            let char_ids: Vec<CharacterId> = self
+                .get_json(CF_ACCOUNT_CHARACTERS, account.id.as_bytes())?
+                .unwrap_or_default();
+            for cid in &char_ids {
+                batch.delete_cf(self.cf(CF_CHARACTERS), cid.as_bytes());
+                batch.delete_cf(self.cf(CF_INVENTORY), cid.as_bytes());
+                batch.delete_cf(self.cf(CF_STASH), cid.as_bytes());
+                batch.delete_cf(self.cf(CF_BLUEPRINTS), cid.as_bytes());
+            }
+            character_ids.extend(char_ids);
+            batch.delete_cf(self.cf(CF_ACCOUNT_CHARACTERS), account.id.as_bytes());
+            batch.delete_cf(self.cf(CF_ACCOUNTS), account.id.as_bytes());
+            batch.delete_cf(
+                self.cf(CF_USERNAME_INDEX),
+                account.username.to_lowercase().as_bytes(),
+            );
+        }
+
+        // One sweep over the session table drops every token that pointed at a
+        // purged account (cheaper than re-scanning per account).
+        let mut sessions_deleted = 0usize;
+        for item in self.db.iterator_cf(self.cf(CF_SESSIONS), IteratorMode::Start) {
+            let (key, value) = item.map_err(|e| StoreError::Backend(e.to_string()))?;
+            if let Ok(account) = serde_json::from_slice::<AccountId>(&value) {
+                if victim_ids.contains(&account) {
+                    batch.delete_cf(self.cf(CF_SESSIONS), &key);
+                    sessions_deleted += 1;
+                }
+            }
+        }
+
+        self.db
+            .write(batch)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+
+        Ok(PurgeReport {
+            accounts_deleted: victims.len(),
+            character_ids,
+            sessions_deleted,
+        })
     }
 
     fn get_json<T: DeserializeOwned>(&self, cf: &str, key: &[u8]) -> StoreResult<Option<T>> {
@@ -73,6 +238,14 @@ impl RocksStore {
             .put_cf(self.cf(cf), key, bytes)
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
+}
+
+/// Available CPU parallelism for RocksDB background work, clamped so a big
+/// host doesn't spin up an absurd number of compaction threads.
+fn num_cpus_hint() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(8) as i32)
+        .unwrap_or(2)
 }
 
 fn chunk_key(coord: ChunkCoord) -> Vec<u8> {
@@ -344,5 +517,94 @@ mod tests {
         };
         s.save_chunk(&chunk).unwrap();
         assert!(s.chunk(coord).unwrap().is_some());
+    }
+
+    fn guest_char(s: &RocksStore, account: AccountId) -> CharacterId {
+        let c = Character {
+            id: Uuid::new_v4(),
+            account_id: account,
+            name: "Runner".into(),
+            appearance: Appearance::default(),
+            position: Vec3::new(0.0, 0.0, 0.0),
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        s.create_character(&c).unwrap();
+        s.save_inventory(c.id, &Inventory::new()).unwrap();
+        s.save_stash(c.id, &Stash::new()).unwrap();
+        c.id
+    }
+
+    #[test]
+    fn purge_removes_stale_guests_only() {
+        let (_dir, s) = store();
+        // Two guests + one real account, each with a character + a session.
+        let g1 = s.create_account("runner_aaaa", "h").unwrap();
+        let g2 = s.create_account("runner_bbbb", "h").unwrap();
+        let real = s.create_account("Neo", "h").unwrap();
+        let g1_char = guest_char(&s, g1.id);
+        let g2_char = guest_char(&s, g2.id);
+        let real_char = guest_char(&s, real.id);
+        let g1_token = s.create_session(g1.id).unwrap();
+        let g2_token = s.create_session(g2.id).unwrap();
+        let real_token = s.create_session(real.id).unwrap();
+
+        // g2 is "connected" (active) so it must survive; cutoff is in the far
+        // future so age never spares anyone.
+        let active: HashSet<AccountId> = [g2.id].into_iter().collect();
+        let report = s
+            .purge_stale_guests(&active, "runner_", u64::MAX, 100)
+            .unwrap();
+
+        assert_eq!(report.accounts_deleted, 1);
+        assert_eq!(report.sessions_deleted, 1);
+        assert_eq!(report.character_ids, vec![g1_char]);
+
+        // g1 fully gone (account, username index, character, inventory, session).
+        assert!(matches!(s.account_by_id(g1.id), Err(StoreError::NotFound)));
+        assert!(matches!(
+            s.account_by_username("runner_aaaa"),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(s.character(g1_char), Err(StoreError::NotFound)));
+        assert!(matches!(
+            s.account_for_token(&g1_token),
+            Err(StoreError::NotFound)
+        ));
+
+        // g2 (active) and the real account are untouched.
+        assert_eq!(s.account_by_id(g2.id).unwrap().id, g2.id);
+        assert_eq!(s.account_for_token(&g2_token).unwrap(), g2.id);
+        assert!(s.character(g2_char).is_ok());
+        assert_eq!(s.account_by_id(real.id).unwrap().id, real.id);
+        assert_eq!(s.account_for_token(&real_token).unwrap(), real.id);
+        assert!(s.character(real_char).is_ok());
+    }
+
+    #[test]
+    fn purge_respects_min_age() {
+        let (_dir, s) = store();
+        let g = s.create_account("runner_young", "h").unwrap();
+        guest_char(&s, g.id);
+        // Cutoff of 0 => nothing is old enough, so a brand-new guest is spared.
+        let report = s
+            .purge_stale_guests(&HashSet::new(), "runner_", 0, 100)
+            .unwrap();
+        assert!(report.is_empty());
+        assert!(s.account_by_id(g.id).is_ok());
+    }
+
+    #[test]
+    fn compact_and_disk_size_work() {
+        let (_dir, s) = store();
+        s.create_account("runner_x", "h").unwrap();
+        s.compact();
+        assert!(s.on_disk_bytes() > 0);
     }
 }

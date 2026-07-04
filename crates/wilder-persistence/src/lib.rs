@@ -24,6 +24,23 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+/// Outcome of a [`RocksStore::purge_stale_guests`] pass.
+#[derive(Debug, Clone, Default)]
+pub struct PurgeReport {
+    /// Guest accounts removed.
+    pub accounts_deleted: usize,
+    /// Character ids removed (so callers can prune leaderboard/stats rows).
+    pub character_ids: Vec<CharacterId>,
+    /// Session tokens dropped for the removed accounts.
+    pub sessions_deleted: usize,
+}
+
+impl PurgeReport {
+    pub fn is_empty(&self) -> bool {
+        self.accounts_deleted == 0 && self.sessions_deleted == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: AccountId,

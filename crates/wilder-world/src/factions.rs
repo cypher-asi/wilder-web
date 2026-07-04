@@ -6,9 +6,10 @@
 //! it never appears in the registry and is hostile to no one — services,
 //! loot and unaffiliated actors all carry it by `serde(default)`.
 //!
-//! Three registered factions: the organized Rebels and Forum wage the
-//! territory war, while the wild `Wapes` are hostile to everyone — an
-//! environmental threat both sides must fend off.
+//! Three registered factions — the organized Rebels and Forum plus the wild
+//! Wapes — all mutually hostile. Whether damage actually lands is a ground
+//! rule (Sanctuary, safehouse bubbles), not an alliance: outside safe zones
+//! everyone is fair game.
 
 use wilder_types::{FactionId, FactionInfo, FACTION_FORUM, FACTION_REBELS, FACTION_WAPES};
 
@@ -17,19 +18,19 @@ pub fn faction_registry() -> Vec<FactionInfo> {
     vec![
         FactionInfo {
             id: FACTION_REBELS,
-            // The player character's own neon blue (players are always
-            // Rebels, so allies read as the same color family as you).
+            // The classic neon blue (the default player faction, so allies
+            // read as the same color family as the starter character).
             name: "Rebels".into(),
             tagline: "Free the grid.".into(),
             color: 0x40_e8_ff,
-            hostile_to: vec![FACTION_FORUM],
+            hostile_to: vec![FACTION_FORUM, FACTION_WAPES],
         },
         FactionInfo {
             id: FACTION_FORUM,
             name: "The Forum".into(),
             tagline: "Order through moderation.".into(),
             color: 0xff_38_60,
-            hostile_to: vec![FACTION_REBELS],
+            hostile_to: vec![FACTION_REBELS, FACTION_WAPES],
         },
         FactionInfo {
             id: FACTION_WAPES,
@@ -74,9 +75,12 @@ mod tests {
     use wilder_types::FACTION_NEUTRAL;
 
     #[test]
-    fn rebels_and_forum_are_mutually_hostile() {
-        assert!(are_hostile(FACTION_REBELS, FACTION_FORUM));
-        assert!(are_hostile(FACTION_FORUM, FACTION_REBELS));
+    fn all_registered_factions_are_mutually_hostile() {
+        for a in [FACTION_REBELS, FACTION_FORUM, FACTION_WAPES] {
+            for b in [FACTION_REBELS, FACTION_FORUM, FACTION_WAPES] {
+                assert_eq!(are_hostile(a, b), a != b, "{a} vs {b}");
+            }
+        }
     }
 
     #[test]

@@ -45,7 +45,10 @@ interface SessionState {
   screen: Screen;
   characters: CharacterSummary[];
   activeCharacter: CharacterSummary | null;
+  /** Message surfaced on the login screen when auto-boot fails. */
+  authError: string | null;
 
+  setAuthError: (message: string | null) => void;
   setAuth: (token: string, username: string) => void;
   setCharacters: (chars: CharacterSummary[]) => void;
   enterGame: (character: CharacterSummary) => void;
@@ -67,11 +70,13 @@ export const useSession = create<SessionState>((set, get) => ({
   screen: "boot",
   characters: [],
   activeCharacter: null,
+  authError: null,
 
+  setAuthError: (authError) => set({ authError }),
   setAuth: (token, username) => {
     localStorage.setItem(TOKEN_KEY, token);
     localStorage.setItem(USER_KEY, username);
-    set({ token, username, screen: "characters" });
+    set({ token, username, screen: "characters", authError: null });
   },
   setCharacters: (characters) => set({ characters }),
   enterGame: (character) => set({ activeCharacter: character, screen: "game" }),
@@ -152,9 +157,11 @@ export const useSession = create<SessionState>((set, get) => ({
       }
       set({ characters });
       get().enterGame(characters[0]);
-    } catch {
-      // Anything failed: fall back to the manual login screen.
-      set({ screen: "login" });
+    } catch (e) {
+      // Anything failed: fall back to the manual login screen, but surface why
+      // instead of silently dumping the user on a blank form (e.g. the server
+      // is out of disk and can't persist new accounts).
+      set({ screen: "login", authError: (e as Error).message });
     }
   },
 }));

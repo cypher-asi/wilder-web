@@ -12,10 +12,16 @@ import { game } from "../state/game";
 export const REGION_SIZE = CHUNK_SIZE * REGION_CHUNKS;
 
 /**
- * The local player's faction (all players are Rebels for now). `control`
- * values are FactionIds; anything non-neutral that isn't ours is hostile.
+ * The local player's faction, set from the joined character on WorldJoined
+ * (defaults to Rebels until then). `control` values are FactionIds; anything
+ * non-neutral that isn't ours is hostile.
  */
-export const MY_FACTION = 1;
+export let MY_FACTION = 1;
+
+/** Adopt the joined character's faction (WorldJoined handler). */
+export function setMyFaction(faction: number): void {
+  MY_FACTION = faction;
+}
 
 /** control value keyed by "rx,rz" (only non-neutral regions are stored). */
 const controlByRegion = new Map<string, number>();

@@ -9,6 +9,8 @@ interface AuthResponse {
 export function Login() {
   const setAuth = useSession((s) => s.setAuth);
   const enterAssetLab = useSession((s) => s.enterAssetLab);
+  const authError = useSession((s) => s.authError);
+  const setAuthError = useSession((s) => s.setAuthError);
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -19,6 +21,7 @@ export function Login() {
     event.preventDefault();
     setBusy(true);
     setError("");
+    setAuthError(null);
     try {
       const res = await api<AuthResponse>(`/api/${mode}`, {
         method: "POST",
@@ -35,6 +38,7 @@ export function Login() {
   async function devLogin() {
     setBusy(true);
     setError("");
+    setAuthError(null);
     try {
       const res = await api<AuthResponse>("/dev/login", { method: "POST" });
       setAuth(res.token, res.username);
@@ -64,7 +68,7 @@ export function Login() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <div className="error">{error}</div>
+        <div className="error">{error || authError}</div>
         <button className="btn btn-primary" disabled={busy} type="submit">
           {mode === "login" ? "LOG IN" : "CREATE ACCOUNT"}
         </button>

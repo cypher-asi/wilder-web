@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use wilder_types::{
     DangerLevel, DistrictInfo, FactionId, Vec3, FACTION_FORUM, FACTION_NEUTRAL, FACTION_REBELS,
-    TILE_SIZE,
+    FACTION_WAPES, TILE_SIZE,
 };
 
 use crate::is_safe_chunk;
@@ -122,7 +122,12 @@ pub fn district_infos() -> Vec<DistrictInfo> {
 }
 
 /// Index of a faction's Guarded home district (agent staging / respawns).
+/// Wapes have none: they live scattered across hostile ground and respawn
+/// at their per-agent `home_spot` anchors.
 pub fn faction_home_district(faction: FactionId) -> Option<usize> {
+    if faction == FACTION_WAPES {
+        return None;
+    }
     district_defs()
         .iter()
         .position(|d| d.danger == DangerLevel::Guarded && d.home_faction == faction)

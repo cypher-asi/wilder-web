@@ -18,6 +18,17 @@ import { api, useSession } from "../state/session";
 
 const TINTS = [0xffffff, 0x40e8ff, 0xff2d78, 0xffe14d, 0x39ff8e, 0xb64dff];
 
+/** Pickable factions (ids/colors mirror the server registry). */
+const FACTIONS: { id: number; label: string; color: string }[] = [
+  { id: 1, label: "REBELS", color: "#40e8ff" },
+  { id: 2, label: "THE FORUM", color: "#ff3860" },
+  { id: 3, label: "WAPES", color: "#b45cff" },
+];
+
+function factionOf(id: number | undefined) {
+  return FACTIONS.find((f) => f.id === (id ?? 1)) ?? FACTIONS[0];
+}
+
 // Sections with their own Escape listener: HoloMap closes the menu itself,
 // and EconomyDashboard (economy + leaderboard) backs out of an item detail
 // page before closing. Every other tab relies on GameMenu's handler below.
@@ -101,6 +112,7 @@ function ProfileSection() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [tintIndex, setTintIndex] = useState(0);
+  const [faction, setFaction] = useState(1);
   const [error, setError] = useState("");
 
   const characters = useQuery({
@@ -121,7 +133,11 @@ function ProfileSection() {
       api<CharacterSummary>("/api/characters", {
         method: "POST",
         token,
-        body: { name: charName, appearance: { body: 0, tint: TINTS[tintIndex] } },
+        body: {
+          name: charName,
+          appearance: { body: 0, tint: TINTS[tintIndex] },
+          faction,
+        },
       }),
     onSuccess: (character) => {
       setName("");
@@ -150,6 +166,10 @@ function ProfileSection() {
                 <div className="char-name">{c.name}</div>
                 <div className="char-level">
                   {active ? "Active" : `Level ${c.level}`}
+                  {" · "}
+                  <span style={{ color: factionOf(c.faction).color }}>
+                    {factionOf(c.faction).label}
+                  </span>
                 </div>
               </div>
               <div
@@ -187,6 +207,23 @@ function ProfileSection() {
                   border: i === tintIndex ? "2px solid #fff" : "2px solid transparent",
                 }}
               />
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            {FACTIONS.map((f) => (
+              <button
+                key={f.id}
+                className="btn btn-ghost"
+                onClick={() => setFaction(f.id)}
+                style={{
+                  flex: 1,
+                  color: f.color,
+                  borderColor: faction === f.id ? f.color : undefined,
+                  opacity: faction === f.id ? 1 : 0.55,
+                }}
+              >
+                {f.label}
+              </button>
             ))}
           </div>
           <div className="error">{error}</div>

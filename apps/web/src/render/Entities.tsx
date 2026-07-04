@@ -2136,6 +2136,110 @@ function CrowdChatter() {
   return null;
 }
 
+/** Third agent LOD tier. Furthest fidelity below full rigs and capsule
+ * impostors: agents beyond the replicated entity view arrive as compact blips
+ * on the always-on `game.agentDots` feed and draw here as one additive glowing
+ * point cloud. */
+const AGENT_DOT_MAX = 1500;
+/** Distance band (m): dots glow full at DOT_NEAR and fade toward DOT_MIN_FADE
+ * by DOT_FAR (roughly the main camera far plane), so farther dots read dimmer
+ * and, being un-interpolated 5 Hz samples, visibly steadier. */
+const DOT_NEAR = 220;
+const DOT_FAR = 900;
+const DOT_MIN_FADE = 0.22;
+const DOT_FALLBACK = new THREE.Color(0x9ff4ff);
+
+const dotWorld = new THREE.Vector3();
+const dotFrustum = new THREE.Frustum();
+const dotProjView = new THREE.Matrix4();
+const dotColor = new THREE.Color();
+
+/**
+ * Glowing dots for distant agents. Positions come straight from the latest
+ * `AgentDots` snapshot (no interpolation — far dots barely move on screen), get
+ * ground-snapped, frustum-culled so only agents in the camera's view cone show
+ * ("visible sight"), and tinted by faction and dimmed with distance. Additive
+ * blending plus the scene bloom turns each point into a soft glow.
+ */
+function AgentDots() {
+  const factions = useGame((s) => s.factions);
+  const points = useRef<THREE.Points>(null);
+  const palette = useMemo(() => {
+    const m = new Map<number, THREE.Color>();
+    for (const f of factions) m.set(f.id, new THREE.Color(f.color).multiplyScalar(1.4));
+    return m;
+  }, [factions]);
+  const paletteRef = useRef(palette);
+  paletteRef.current = palette;
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    const pos = new THREE.BufferAttribute(new Float32Array(AGENT_DOT_MAX * 3), 3);
+    const col = new THREE.BufferAttribute(new Float32Array(AGENT_DOT_MAX * 3), 3);
+    pos.setUsage(THREE.DynamicDrawUsage);
+    col.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("position", pos);
+    geo.setAttribute("color", col);
+    geo.setDrawRange(0, 0);
+    return geo;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  useFrame(({ camera }) => {
+    const p = points.current;
+    if (!p) return;
+    perf.begin("entities.dots");
+    const posAttr = geometry.getAttribute("position") as THREE.BufferAttribute;
+    const colAttr = geometry.getAttribute("color") as THREE.BufferAttribute;
+    // Rebuild the frustum from the live camera each frame so culling and the
+    // distance fade track head movement (the feed itself only lands ~5 Hz).
+    dotProjView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    dotFrustum.setFromProjectionMatrix(dotProjView);
+    const pal = paletteRef.current;
+    const cx = camera.position.x;
+    const cz = camera.position.z;
+    let i = 0;
+    for (const b of game.agentDots.blips) {
+      if (i >= AGENT_DOT_MAX) break;
+      const y = groundHeightAt(b.x, b.z) + 1.2;
+      dotWorld.set(b.x, y, b.z);
+      if (!dotFrustum.containsPoint(dotWorld)) continue;
+      const dx = b.x - cx;
+      const dz = b.z - cz;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const fade = THREE.MathUtils.clamp(
+        1 - (dist - DOT_NEAR) / (DOT_FAR - DOT_NEAR),
+        DOT_MIN_FADE,
+        1,
+      );
+      dotColor.copy(pal.get(b.faction) ?? DOT_FALLBACK).multiplyScalar(fade);
+      posAttr.setXYZ(i, b.x, y, b.z);
+      colAttr.setXYZ(i, dotColor.r, dotColor.g, dotColor.b);
+      i++;
+    }
+    geometry.setDrawRange(0, i);
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    perf.end("entities.dots");
+  });
+
+  return (
+    <points ref={points} geometry={geometry} frustumCulled={false} raycast={noRaycast}>
+      <pointsMaterial
+        size={7}
+        sizeAttenuation={false}
+        vertexColors
+        transparent
+        depthTest={false}
+        depthWrite={false}
+        toneMapped={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
+  );
+}
+
 export function Entities() {
   // Mount/unmount entity views the moment the spawn/despawn arrives: the
   // roster version bumps synchronously with the network handler (the old
@@ -2150,6 +2254,7 @@ export function Entities() {
       <EntityDriver />
       <AgentLodArbiter />
       <AgentImpostors />
+      <AgentDots />
       <CrowdChatter />
       <TargetReticle />
     </>

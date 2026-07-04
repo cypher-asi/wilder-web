@@ -17,7 +17,6 @@ members = [
     "crates/wilder-ai",
     "crates/wilder-economy",
     "crates/wilder-crafting",
-    "crates/wilder-market",
     "crates/wilder-sim",
     "crates/exchange/wilder-exchange-asset",
     "crates/exchange/wilder-exchange-book",
@@ -47,7 +46,6 @@ wilder-combat = { path = "crates/wilder-combat" }
 wilder-ai = { path = "crates/wilder-ai" }
 wilder-economy = { path = "crates/wilder-economy" }
 wilder-crafting = { path = "crates/wilder-crafting" }
-wilder-market = { path = "crates/wilder-market" }
 wilder-exchange-asset = { path = "crates/exchange/wilder-exchange-asset" }
 wilder-exchange-book = { path = "crates/exchange/wilder-exchange-book" }
 wilder-exchange-data = { path = "crates/exchange/wilder-exchange-data" }

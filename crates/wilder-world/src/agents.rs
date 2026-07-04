@@ -444,6 +444,12 @@ pub struct AgentSave {
     /// queued and hasn't collected yet.
     #[serde(default)]
     pub pending_jobs: Vec<(EntityId, u64)>,
+    /// Exchange order ids this agent believes are still resting. The orders
+    /// themselves (and any unclaimed settlement inboxes) persist inside the
+    /// exchange; this is only the agent's bookkeeping for the repricing
+    /// loop, reconciled against the books whenever it visits a venue.
+    #[serde(default)]
+    pub resting_orders: Vec<u64>,
     /// Character that hired this agent, if any. Like traits and the banked
     /// purse, ownership survives death/respawn (older saves default to
     /// unowned).
@@ -581,6 +587,9 @@ pub struct FactionAgent {
     /// (building, job id) of queued production batches awaiting a Collect.
     /// Cleared on death (the dead identity's jobs and buffers are purged).
     pub pending_jobs: Vec<(EntityId, u64)>,
+    /// Ids of this agent's resting exchange orders (bookkeeping for the
+    /// stale-ask repricing loop; the source of truth is the exchange).
+    pub resting_orders: Vec<u64>,
     /// Character that hired this agent, if any. Survives death/respawn
     /// (the fresh identity stays on the owner's roster).
     pub owner: Option<CharacterId>,
@@ -812,6 +821,7 @@ impl FactionAgent {
             blueprints: self.blueprints.iter().cloned().collect(),
             stash: self.stash.clone(),
             pending_jobs: self.pending_jobs.clone(),
+            resting_orders: self.resting_orders.clone(),
             owner: self.owner,
             lifetime_owner_earnings: self.lifetime_owner_earnings,
             position: self.position,
@@ -851,6 +861,7 @@ impl FactionAgent {
                 stash
             },
             pending_jobs: save.pending_jobs,
+            resting_orders: save.resting_orders,
             owner: save.owner,
             lifetime_owner_earnings: save.lifetime_owner_earnings,
             position: save.position,
@@ -1215,6 +1226,7 @@ mod tests {
                 blueprints: Vec::new(),
                 stash: Vec::new(),
                 pending_jobs: Vec::new(),
+                resting_orders: Vec::new(),
                 owner: None,
                 lifetime_owner_earnings: 0,
                 position: Vec3::new(10.0, 0.0, 10.0),

@@ -237,6 +237,20 @@ impl Settlement {
             .unwrap_or_default()
     }
 
+    /// Merge `inbox` back into the (venue, owner) inbox. The partial-claim
+    /// path: the world claims, materializes what fits the actor's pack, and
+    /// restores the remainder here so nothing is lost.
+    pub fn restore(&mut self, venue: VenueId, owner: OrderOwner, inbox: Inbox) {
+        if inbox.is_empty() {
+            return;
+        }
+        let slot = self.inbox_mut(venue, owner);
+        slot.credit_mild(inbox.mild);
+        for (asset, qty) in inbox.assets {
+            slot.credit_asset(asset, qty);
+        }
+    }
+
     /// Total fee MILD carved from fills so far (the world routes/burns it
     /// as it sees fit; this is the audit counter).
     pub fn fees_collected(&self) -> u64 {

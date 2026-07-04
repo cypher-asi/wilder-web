@@ -1549,14 +1549,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wilder-market"
-version = "0.1.0"
-dependencies = [
- "serde",
- "wilder-types",
-]
-
-[[package]]
 name = "wilder-pathfinding"
 version = "0.1.0"
 dependencies = [
@@ -1662,8 +1654,8 @@ dependencies = [
  "wilder-combat",
  "wilder-crafting",
  "wilder-economy",
+ "wilder-exchange",
  "wilder-inventory",
- "wilder-market",
  "wilder-pathfinding",
  "wilder-persistence",
  "wilder-physics",

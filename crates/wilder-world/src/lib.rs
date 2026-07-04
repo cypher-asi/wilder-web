@@ -10,7 +10,6 @@ pub mod econ;
 pub mod factions;
 pub mod interiors;
 mod ledger;
-pub mod market_stats;
 pub mod stats;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -49,8 +48,11 @@ use agents::{
 use econ::{Currency, EconActor, OwnerId, Purse};
 use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
-use market_stats::{MarketStats, MarketStatsSave};
 use stats::{build_leaderboard, ActorRef, LiveActor, StatsBook};
+use wilder_exchange::{
+    Asset, Escrow, Exchange, ExchangeSave, Inbox, OrderKind, OrderOwner, PlaceOutcome, Side,
+    Venue, VenueId,
+};
 use smallvec::SmallVec;
 
 pub const TICK_HZ: u32 = 20;
@@ -172,15 +174,17 @@ const PRODUCTION_QUEUE_CAP: usize = 16;
 /// Reference MILD value of one Energy for agent utility scoring (Energy has
 /// no market price yet; this is what the craft EV charges per unit burned).
 const ENERGY_MILD_VALUE: f32 = 3.0;
-/// Market fee (percent) taken from every sale: routed to whoever holds the
-/// market's territory, burned otherwise.
+/// Market fee (percent) carved from the MILD leg of every exchange fill:
+/// routed to whoever holds the venue's territory, burned otherwise.
 const MARKET_FEE_PCT: u32 = 5;
-/// Order book capacity (listings). Agents stop listing at the cap unless a
-/// dead floor-priced agent listing can be scrapped to make room.
-const MARKET_BOOK_CAP: usize = 200;
-/// Agent asks decay toward their price floor every this many ticks (~15 s):
-/// unsold stock walks down to meet demand instead of clogging the book.
-const MARKET_DECAY_TICKS: u64 = 300;
+/// Max resting exchange orders per agent, so one agent can't wallpaper the
+/// books with asks (its escrowed goods bound it anyway; this bounds clutter).
+const AGENT_OPEN_ORDER_CAP: usize = 12;
+/// A resting agent ask older than this is stale: next time its owner stands
+/// at the venue it cancels and relists ~5% cheaper (the event-driven
+/// replacement for the old global ask decay — unsold stock still walks down
+/// to meet demand, but only when the seller is physically back at the book).
+const AGENT_ASK_STALE_MS: u64 = 5 * 60_000;
 /// MILD granted to every account once.
 const WALLET_GRANT: u32 = 200;
 /// Max agents one character can own at a time.
@@ -804,7 +808,7 @@ fn zone_infos() -> Vec<ZoneInfo> {
 /// Spread across the safe 3x3 so every service is a short walk from spawn.
 const DISTRICT: &[((i32, i32), EntityKind, &str)] = &[
     ((0, 0), EntityKind::Building, "Storage"),
-    ((0, 0), EntityKind::MarketTerminal, "Market"),
+    ((0, 0), EntityKind::MarketTerminal, "Hub Market"),
     ((1, 0), EntityKind::Refinery, "Refinery"),
     ((1, 0), EntityKind::Factory, "Factory"),
     ((-1, 0), EntityKind::Bank, "Bank"),
@@ -1401,8 +1405,15 @@ pub struct World {
     seed: u64,
     rng: SmallRng,
     rx: mpsc::UnboundedReceiver<WorldCmd>,
-    /// Market listings (persisted in world meta).
-    market: Vec<wilder_market::Listing>,
+    /// The order-book spot exchange: independent books per (venue, asset),
+    /// escrow and settlement inboxes included. Venues map 1:1 onto seeded
+    /// Market Terminals; persisted whole in world meta (`exchange`).
+    exchange: Exchange,
+    /// Venue lookup, sorted by venue id: (venue, terminal entity, terminal
+    /// position). Derived deterministically at boot by `init_exchange`.
+    venue_terminals: Vec<(VenueId, EntityId, Vec3)>,
+    /// Item kinds whose books traded since the last item-market broadcast.
+    item_market_dirty: HashSet<ItemKind>,
     /// Stock-backed vendor shelves keyed by vendor static (Armory/Bodega).
     /// A vendor only sells what it holds; sold-in items land here. Seeded
     /// once per vendor (`ensure_vendor_stock`), persisted in world meta
@@ -1411,7 +1422,6 @@ pub struct World {
     vendor_stock: HashMap<EntityId, Vec<ItemStack>>,
     /// Vendor stock changed since the last save sweep.
     vendor_stock_dirty: bool,
-    next_listing_id: u64,
     next_job_id: u64,
     /// Shared production queues keyed by station building. Only buildings
     /// with live jobs have an entry, so ticking scales with active industry,
@@ -1440,9 +1450,6 @@ pub struct World {
     zone_clock: ZoneClock,
     /// Economy transaction ledger + supply counters (K dashboard).
     ledger: Ledger,
-    /// Per-item market fill-price history (dashboard item charts + agent
-    /// pricing reference).
-    market_stats: MarketStats,
     /// Per-competitor stats + faction/guild lifetime totals (leaderboards).
     stats: StatsBook,
     /// Players subscribed to live ledger updates.
@@ -1506,16 +1513,6 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         }
     };
 
-    let mut market: Vec<wilder_market::Listing> =
-        store.meta("market_listings").ok().flatten().unwrap_or_default();
-    // Saves predating the `agent` flag: any listing whose seller isn't a
-    // stored player character is agent stock (eligible for ask decay).
-    for l in market.iter_mut() {
-        if !l.agent {
-            l.agent = store.character(l.seller).is_err();
-        }
-    }
-    let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
     // Vendor shelves: persisted stock per vendor static (entity ids are
     // stable across restarts because statics seed deterministically).
     let vendor_stock: HashMap<EntityId, Vec<ItemStack>> = store
@@ -1557,9 +1554,6 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         .collect();
     // Ledger aggregates survive restarts; the recent-tx feed is in-memory.
     let ledger_save: LedgerSave = store.meta("econ_ledger").ok().flatten().unwrap_or_default();
-    // Per-item market price history survives restarts too.
-    let market_stats_save: MarketStatsSave =
-        store.meta("market_stats").ok().flatten().unwrap_or_default();
     // War map: which faction holds each region survives restarts too.
     let territory: HashMap<(i32, i32), FactionId> = store
         .meta::<Vec<(i32, i32, FactionId)>>("territory")
@@ -1575,10 +1569,11 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
     let mut world = World {
         store: store.clone(),
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
-        market,
+        exchange: Exchange::default(),
+        venue_terminals: Vec::new(),
+        item_market_dirty: HashSet::new(),
         vendor_stock,
         vendor_stock_dirty: false,
-        next_listing_id,
         next_job_id,
         production,
         production_outputs,
@@ -1606,7 +1601,6 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         region_casualties: HashMap::new(),
         zone_clock: ZoneClock::new(districts::district_defs().len()),
         ledger: Ledger::new(ledger_save),
-        market_stats: MarketStats::new(market_stats_save),
         stats,
         econ_subs: HashSet::new(),
         item_subs: HashMap::new(),
@@ -1631,6 +1625,9 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
     // Carve walk-in interiors into every service's host building (collision
     // door gaps + room walls; the client mirrors this from replicated data).
     world.register_interiors();
+    // The exchange boots off the seeded Market Terminals: derive the venue
+    // list, then restore the persisted books or open fresh ones.
+    world.init_exchange();
     // Faction agents: restore the persisted population or seed a fresh one.
     world.load_or_seed_agents();
     // Ownership index: restored saves carry owners; hires maintain it live.
@@ -3775,50 +3772,91 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
-    // Market
+    // Exchange (the spot market): venues, shared trading path, persistence
     // -----------------------------------------------------------------------
 
-    fn save_market(&self) {
-        let _ = self.store.save_meta("market_listings", &self.market);
-        let _ = self.store.save_meta("market_next_id", &self.next_listing_id);
-    }
-
-    fn send_market_state(&self, entity: EntityId) {
-        let Some(player) = self.players.get(&entity) else { return };
-        let listings: Vec<MarketListing> = self
-            .market
+    /// Boot the exchange off the seeded Market Terminals: one venue per
+    /// terminal (hub + every district). VenueId is the terminal's rank in
+    /// entity-id order — stable across restarts because statics seed
+    /// deterministically before anything dynamic allocates. A persisted
+    /// exchange restores its books/inboxes as-is (venue names/positions are
+    /// refreshed from the live terminals); absent one, fresh books open.
+    fn init_exchange(&mut self) {
+        let mut terminals: Vec<(EntityId, String, Vec3)> = self
+            .statics
+            .values()
+            .filter(|s| s.kind == EntityKind::MarketTerminal)
+            .map(|s| (s.entity, s.name.clone(), s.position))
+            .collect();
+        terminals.sort_by_key(|&(entity, ..)| entity);
+        let venues: Vec<Venue> = terminals
             .iter()
-            .map(|l| MarketListing {
-                id: l.id,
-                seller: l.seller_name.clone(),
-                kind: l.kind,
-                count: l.count,
-                price_each: l.price_each,
+            .enumerate()
+            .map(|(i, (_, name, pos))| Venue {
+                id: VenueId(i as u16),
+                name: name.clone(),
+                x: pos.x,
+                z: pos.z,
             })
             .collect();
-        let _ = player
-            .tx
-            .send(S2C::MarketState { listings, wallet: player.purse.carried(Currency::Wild) });
+        self.venue_terminals = terminals
+            .iter()
+            .enumerate()
+            .map(|(i, &(entity, _, pos))| (VenueId(i as u16), entity, pos))
+            .collect();
+        self.exchange = match self.store.meta::<ExchangeSave>("exchange") {
+            Ok(Some(mut save)) => {
+                save.venues = venues;
+                Exchange::load(save)
+            }
+            _ => Exchange::new(venues),
+        };
     }
 
-    fn market_action(&mut self, entity: EntityId, action: MarketAction) {
-        let result = self.apply_market_action(entity, action);
-        if let Some(player) = self.players.get(&entity) {
-            let _ = player.tx.send(S2C::MarketResult {
-                ok: result.is_ok(),
-                error: result.err(),
-            });
-            let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+    /// Persist the whole exchange (books, inboxes, market data). Called on
+    /// every order event — same immediate-durability rule the old listing
+    /// market followed — and again from `save_all`.
+    fn save_exchange(&self) {
+        if let Err(e) = self.store.save_meta("exchange", &self.exchange.save()) {
+            tracing::error!("exchange save failed: {e}");
         }
-        self.send_market_state(entity);
     }
 
-    /// The market trades as an agent: the terminal's identity, or a stable
-    /// fallback when no terminal is seeded (never in practice).
-    fn market_party(&self) -> TxParty {
-        self.statics
-            .values()
-            .find(|s| s.kind == EntityKind::MarketTerminal)
+    /// Terminal entity + position of one venue.
+    fn venue_terminal(&self, venue: VenueId) -> Option<(EntityId, Vec3)> {
+        self.venue_terminals
+            .iter()
+            .find(|&&(v, ..)| v == venue)
+            .map(|&(_, entity, pos)| (entity, pos))
+    }
+
+    /// Venue whose terminal the actor is standing at (5 m or inside its
+    /// walk-in room) — the shared range rule for trading on the book.
+    fn venue_at(&self, actor: EconActor) -> Option<VenueId> {
+        self.venue_terminals
+            .iter()
+            .find(|&&(_, entity, _)| self.actor_in_range(actor, entity, 5.0))
+            .map(|&(venue, ..)| venue)
+    }
+
+    /// Nearest venue to a position (routing/scoring; presence is still
+    /// enforced at execution).
+    fn nearest_venue(&self, pos: Vec3) -> Option<(VenueId, Vec3)> {
+        self.venue_terminals
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.2 - pos).length_squared();
+                let db = (b.2 - pos).length_squared();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|&(venue, _, pos)| (venue, pos))
+    }
+
+    /// A venue trades as an agent: its terminal's identity, or a stable
+    /// fallback when the terminal is gone (never in practice).
+    fn venue_party(&self, venue: VenueId) -> TxParty {
+        self.venue_terminal(venue)
+            .and_then(|(entity, _)| self.statics.get(&entity))
             .map(static_party)
             .unwrap_or(TxParty::Agent {
                 id: static_agent_id(self.seed, 0),
@@ -3827,199 +3865,363 @@ impl World {
             })
     }
 
-    /// Position of a MarketTerminal the actor is standing at (5 m or inside
-    /// its walk-in room) — the shared range rule for trading on the book.
-    fn market_terminal_near(&self, actor: EconActor) -> Option<Vec3> {
-        self.services_by_kind
-            .get(&EntityKind::MarketTerminal)
-            .into_iter()
-            .flatten()
-            .find(|&&(entity, _)| self.actor_in_range(actor, entity, 5.0))
-            .map(|&(_, pos)| pos)
-    }
-
-    fn apply_market_action(&mut self, entity: EntityId, action: MarketAction) -> Result<(), String> {
-        let market_agent = self.market_party();
-        match action {
-            MarketAction::Refresh => Ok(()),
-            MarketAction::List { kind, count, price_each } => {
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                if count == 0 || price_each == 0 || price_each > 1_000_000 {
-                    return Err("invalid listing".into());
-                }
-                let have = inv::count_items(&player.inventory.slots, kind);
-                if have < count {
-                    return Err(format!("you only have {have}x {}", kind.display_name()));
-                }
-                inv::remove_items(&mut player.inventory.slots, kind, count);
-                player.dirty = true;
-                // Escrow: the listed items move onto the market agent.
-                self.ledger.record(
-                    TxKind::MarketList,
-                    player_party(player),
-                    market_agent,
-                    TxAmount::Item { kind, count },
-                    0,
-                );
-                let listing = wilder_market::Listing {
-                    id: self.next_listing_id,
-                    seller: player.character.id,
-                    seller_name: player.character.name.clone(),
-                    kind,
-                    count,
-                    price_each,
-                    agent: false,
-                };
-                self.next_listing_id += 1;
-                self.market.push(listing);
-                self.save_market();
-                Ok(())
+    /// Exchange identity of an actor: players by character id, agents by
+    /// their minted uuid (same id space the ledger's TxParty::Agent uses).
+    fn exchange_owner(&self, actor: EconActor) -> Option<OrderOwner> {
+        match actor {
+            EconActor::Player(id) => {
+                self.players.get(&id).map(|p| OrderOwner::Player(p.character.id))
             }
-            MarketAction::Buy { listing_id, count } => {
-                let idx = self
-                    .market
-                    .iter()
-                    .position(|l| l.id == listing_id)
-                    .ok_or("listing gone")?;
-                let (kind, price_each, available, seller, seller_name) = {
-                    let l = &self.market[idx];
-                    (l.kind, l.price_each, l.count, l.seller, l.seller_name.clone())
-                };
-                let count = count.min(available).max(1);
-                let cost = price_each.saturating_mul(count);
-                let buyer = self.players.get_mut(&entity).ok_or("not in world")?;
-                if !buyer.purse.debit(Currency::Wild, cost) {
-                    return Err(format!(
-                        "need {cost} MILD, have {}",
-                        buyer.purse.carried(Currency::Wild)
-                    ));
-                }
-                let buyer_account = buyer.character.account_id;
-                let buyer_pos = buyer.character.position;
-                let buyer_name = buyer.character.name.clone();
-                let buyer_party = player_party(buyer);
-                let leftover = inv::add_items(&mut buyer.inventory.slots, kind, count);
-                buyer.dirty = true;
-                let _ = self
-                    .store
-                    .update_wallet(buyer_account, self.players[&entity].purse.carried(Currency::Wild));
-                if leftover > 0 {
-                    self.spawn_loot(
-                        buyer_pos,
-                        vec![ItemStack { kind, count: leftover }],
-                        Some(buyer_party.clone()),
-                        true,
-                    );
-                }
-
-                // Credit the seller (minus the burn fee): online player,
-                // offline player, or faction agent.
-                let fee = cost * MARKET_FEE_PCT / 100;
-                let proceeds = cost - fee;
-                // Ledger: escrowed items leave the market agent for the
-                // buyer; the buyer's MILD splits into seller proceeds and
-                // the market fee (routed to territory holders or burned).
-                let seller_party = self.credit_market_seller(seller, proceeds);
-                // Leaderboards: both sides of a fill count a trade.
-                if let Some(b) = party_actor(&buyer_party) {
-                    self.stats.add_trade(&b);
-                }
-                if let Some(s) = party_actor(&seller_party) {
-                    self.stats.add_trade(&s);
-                }
-                self.ledger.record(
-                    TxKind::MarketBuy,
-                    market_agent.clone(),
-                    buyer_party.clone(),
-                    TxAmount::Item { kind, count },
-                    fee,
-                );
-                self.ledger.record(
-                    TxKind::MarketBuy,
-                    buyer_party.clone(),
-                    seller_party,
-                    TxAmount::Wild { amount: proceeds },
-                    fee,
-                );
-                if fee > 0 {
-                    self.ledger.record(
-                        TxKind::Fee,
-                        buyer_party,
-                        market_agent.clone(),
-                        TxAmount::Wild { amount: fee },
-                        0,
-                    );
-                }
-                self.ledger.trades += 1;
-                self.market_stats.record_fill(kind, price_each, count, buyer_name, seller_name);
-
-                let l = &mut self.market[idx];
-                l.count -= count;
-                if l.count == 0 {
-                    self.market.remove(idx);
-                }
-                self.save_market();
-
-                // The market's fee is commerce: whoever holds the terminal's
-                // territory takes it, otherwise it burns as before.
-                let terminal = self
-                    .statics
-                    .values()
-                    .find(|s| {
-                        s.kind == EntityKind::MarketTerminal
-                            && (s.position - buyer_pos).length() < 5.0
-                    })
-                    .map(|s| s.position);
-                if let Some(terminal_pos) = terminal {
-                    self.distribute_commerce(terminal_pos, fee, market_agent, false);
-                } else if fee > 0 {
-                    // No terminal in reach: the collected fee burns outright.
-                    self.ledger.record(
-                        TxKind::Fee,
-                        market_agent,
-                        TxParty::Burn,
-                        TxAmount::Wild { amount: fee },
-                        0,
-                    );
-                }
-                Ok(())
-            }
-            MarketAction::Cancel { listing_id } => {
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                let idx = self
-                    .market
-                    .iter()
-                    .position(|l| l.id == listing_id)
-                    .ok_or("listing gone")?;
-                if self.market[idx].seller != player.character.id {
-                    return Err("not your listing".into());
-                }
-                let listing = self.market.remove(idx);
-                let leftover =
-                    inv::add_items(&mut player.inventory.slots, listing.kind, listing.count);
-                player.dirty = true;
-                let pos = player.character.position;
-                let canceller = player_party(player);
-                // Escrow returns from the market agent to the seller.
-                self.ledger.record(
-                    TxKind::MarketCancel,
-                    market_agent,
-                    canceller.clone(),
-                    TxAmount::Item { kind: listing.kind, count: listing.count },
-                    0,
-                );
-                if leftover > 0 {
-                    self.spawn_loot(
-                        pos,
-                        vec![ItemStack { kind: listing.kind, count: leftover }],
-                        Some(canceller),
-                        true,
-                    );
-                }
-                self.save_market();
-                Ok(())
+            EconActor::Agent(idx) => {
+                self.agents.get(idx).map(|a| OrderOwner::Agent(a.agent_id))
             }
         }
+    }
+
+    /// Ledger party for an order owner (fill attribution). Live actors
+    /// resolve to their real identity; an owner that has left the world
+    /// (offline player, respawned agent) attributes to a stored character
+    /// when one exists, else burns — mirroring the old seller-credit rule.
+    fn order_owner_party(&self, owner: OrderOwner) -> TxParty {
+        let id = owner.id();
+        if let Some(p) = self.players.values().find(|p| p.character.id == id) {
+            return player_party(p);
+        }
+        if let Some(a) = self.agents.iter().find(|a| a.agent_id == id) {
+            return a.party();
+        }
+        if let Ok(ch) = self.store.character(id) {
+            return TxParty::Player { id, name: ch.name, faction: ch.faction };
+        }
+        TxParty::Burn
+    }
+
+    /// The ledger amount of an escrow / inbox line.
+    fn asset_amount(asset: Asset, qty: u32) -> TxAmount {
+        match asset {
+            Asset::Item(kind) => TxAmount::Item { kind, count: qty },
+            Asset::Shards => Currency::Shards.tx_amount(qty),
+            Asset::Energy => Currency::Energy.tx_amount(qty),
+        }
+    }
+
+    /// Whether the actor's real holdings cover `escrow` (checked before
+    /// `Exchange::place`, which applies the identical lock rule).
+    fn actor_can_cover(&self, actor: EconActor, escrow: &Escrow) -> bool {
+        match *escrow {
+            Escrow::Mild(m) => u32::try_from(m).is_ok_and(|m| {
+                self.actor_purse(actor).is_some_and(|p| p.carried(Currency::Wild) >= m)
+            }),
+            Escrow::Asset { asset: Asset::Item(kind), qty } => {
+                self.actor_count_items(actor, kind) >= qty
+            }
+            Escrow::Asset { asset: Asset::Shards, qty } => {
+                self.actor_purse(actor).is_some_and(|p| p.carried(Currency::Shards) >= qty)
+            }
+            Escrow::Asset { asset: Asset::Energy, qty } => {
+                self.actor_purse(actor).is_some_and(|p| p.carried(Currency::Energy) >= qty)
+            }
+        }
+    }
+
+    /// Debit `escrow` from the actor's real holdings (affordability already
+    /// checked by `actor_can_cover`; a failed debit is a bug, not a flow).
+    fn debit_escrow(&mut self, actor: EconActor, escrow: &Escrow) {
+        match *escrow {
+            Escrow::Mild(m) => {
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.debit(Currency::Wild, m as u32);
+                }
+            }
+            Escrow::Asset { asset: Asset::Item(kind), qty } => {
+                self.actor_remove_items(actor, kind, qty);
+            }
+            Escrow::Asset { asset: Asset::Shards, qty } => {
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.debit(Currency::Shards, qty);
+                }
+            }
+            Escrow::Asset { asset: Asset::Energy, qty } => {
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.debit(Currency::Energy, qty);
+                }
+            }
+        }
+    }
+
+    /// Credit an escrow refund straight back to holdings. Item overflow
+    /// spills as the actor's ground loot (never silently dropped).
+    fn credit_escrow(&mut self, actor: EconActor, escrow: &Escrow) {
+        match *escrow {
+            Escrow::Mild(m) => {
+                if m == 0 {
+                    return;
+                }
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.credit(Currency::Wild, m.min(u32::MAX as u64) as u32);
+                }
+            }
+            Escrow::Asset { qty: 0, .. } => {}
+            Escrow::Asset { asset: Asset::Item(kind), qty } => {
+                let leftover = self.actor_add_items(actor, kind, qty);
+                if leftover > 0 {
+                    if let (Some(pos), party) =
+                        (self.actor_position(actor), self.actor_party(actor))
+                    {
+                        self.spawn_loot(
+                            pos,
+                            vec![ItemStack { kind, count: leftover }],
+                            party,
+                            true,
+                        );
+                    }
+                }
+            }
+            Escrow::Asset { asset: Asset::Shards, qty } => {
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.credit(Currency::Shards, qty);
+                }
+            }
+            Escrow::Asset { asset: Asset::Energy, qty } => {
+                if let Some(p) = self.actor_purse_mut(actor) {
+                    p.credit(Currency::Energy, qty);
+                }
+            }
+        }
+    }
+
+    /// Shared order entry — the ONLY way players and agents trade. Enforces
+    /// presence at the venue's terminal, debits real holdings for the escrow
+    /// the order locks, applies immediate refunds (IOC remainder / unspent
+    /// market budget / limit-bid price improvement), routes each fill's fee
+    /// to the venue's territory holder, and records the same ledger legs per
+    /// fill the old listing market emitted (item leg, MILD leg, fee leg).
+    #[allow(clippy::too_many_arguments)]
+    pub fn exchange_place(
+        &mut self,
+        actor: EconActor,
+        venue: VenueId,
+        asset: Asset,
+        side: Side,
+        kind: OrderKind,
+        qty: u32,
+        max_spend: Option<u64>,
+    ) -> Result<PlaceOutcome, String> {
+        let owner = self.exchange_owner(actor).ok_or("not in world")?;
+        let (terminal, terminal_pos) =
+            self.venue_terminal(venue).ok_or("unknown venue")?;
+        if !self.actor_in_range(actor, terminal, 5.0) {
+            return Err("not at this market terminal".into());
+        }
+        // Affordability against the exact lock `place` will take.
+        let escrow = match (side, kind) {
+            (Side::Bid, OrderKind::Limit { price }) => {
+                Escrow::Mild(price as u64 * qty as u64)
+            }
+            (Side::Bid, OrderKind::Market) => {
+                Escrow::Mild(max_spend.ok_or("market buys need a spend budget")?)
+            }
+            (Side::Ask, _) => Escrow::Asset { asset, qty },
+        };
+        if !self.actor_can_cover(actor, &escrow) {
+            return Err(match escrow {
+                Escrow::Mild(m) => format!("need {m} MILD"),
+                Escrow::Asset { asset, qty } => {
+                    format!("need {qty}x {}", asset.display_name())
+                }
+            });
+        }
+
+        let now_ms = ledger::unix_ms();
+        let outcome = self
+            .exchange
+            .place(owner, venue, asset, side, kind, qty, max_spend, MARKET_FEE_PCT, now_ms)
+            .map_err(|e| e.to_string())?;
+
+        // Escrow leaves the actor's holdings for the venue's books.
+        self.debit_escrow(actor, &outcome.escrow_taken);
+        let venue_agent = self.venue_party(venue);
+        let actor_party = self.actor_party(actor).unwrap_or(TxParty::Burn);
+        let (amount, escrow_units) = match outcome.escrow_taken {
+            Escrow::Mild(m) => (TxAmount::Wild { amount: m.min(u32::MAX as u64) as u32 }, m),
+            Escrow::Asset { asset, qty } => (Self::asset_amount(asset, qty), qty as u64),
+        };
+        if escrow_units > 0 {
+            self.ledger.record(TxKind::MarketList, actor_party, venue_agent.clone(), amount, 0);
+        }
+
+        // Settle each fill on the ledger, mirroring the old market's legs:
+        // escrowed goods leave the venue for the bid side, the bid side's
+        // MILD nets to the ask side, and the fee is commerce for whoever
+        // holds the venue's ground (burned on neutral territory).
+        for (fill, effect) in &outcome.fills {
+            let (bid_owner, ask_owner) = match fill.taker_side {
+                Side::Bid => (fill.taker, fill.maker),
+                Side::Ask => (fill.maker, fill.taker),
+            };
+            let bid_party = self.order_owner_party(bid_owner);
+            let ask_party = self.order_owner_party(ask_owner);
+            let fee = effect.fee_mild.min(u32::MAX as u64) as u32;
+            self.ledger.record(
+                TxKind::MarketBuy,
+                venue_agent.clone(),
+                bid_party.clone(),
+                Self::asset_amount(asset, fill.qty),
+                fee,
+            );
+            self.ledger.record(
+                TxKind::MarketBuy,
+                bid_party.clone(),
+                ask_party.clone(),
+                TxAmount::Wild { amount: effect.seller_proceeds.min(u32::MAX as u64) as u32 },
+                fee,
+            );
+            if fee > 0 {
+                self.ledger.record(
+                    TxKind::Fee,
+                    bid_party.clone(),
+                    venue_agent.clone(),
+                    TxAmount::Wild { amount: fee },
+                    0,
+                );
+            }
+            self.distribute_commerce(terminal_pos, fee, venue_agent.clone(), false);
+            // Leaderboards: both sides of a fill count a trade.
+            if let Some(b) = party_actor(&bid_party) {
+                self.stats.add_trade(&b);
+            }
+            if let Some(s) = party_actor(&ask_party) {
+                self.stats.add_trade(&s);
+            }
+            self.ledger.trades += 1;
+        }
+        if !outcome.fills.is_empty() {
+            if let Asset::Item(kind) = asset {
+                self.item_market_dirty.insert(kind);
+            }
+        }
+
+        // IOC remainder / unspent budget / price improvement comes right back.
+        if let Some(refund) = &outcome.refund {
+            self.credit_escrow(actor, refund);
+        }
+        self.persist_actor_purse(actor);
+        self.save_exchange();
+        Ok(outcome)
+    }
+
+    /// Cancel a resting order and refund the remaining escrow to holdings.
+    /// Cancels happen at the venue, like every other book interaction.
+    pub fn exchange_cancel(&mut self, actor: EconActor, order_id: u64) -> Result<(), String> {
+        let owner = self.exchange_owner(actor).ok_or("not in world")?;
+        let order = self
+            .exchange
+            .open_orders(owner)
+            .into_iter()
+            .find(|o| o.id == order_id)
+            .ok_or("no such order")?;
+        let (terminal, _) = self.venue_terminal(order.venue).ok_or("unknown venue")?;
+        if !self.actor_in_range(actor, terminal, 5.0) {
+            return Err("not at this market terminal".into());
+        }
+        let refund = self.exchange.cancel(owner, order_id).map_err(|e| e.to_string())?;
+        self.credit_escrow(actor, &refund);
+        let amount = match refund {
+            Escrow::Mild(m) => TxAmount::Wild { amount: m.min(u32::MAX as u64) as u32 },
+            Escrow::Asset { asset, qty } => Self::asset_amount(asset, qty),
+        };
+        let canceller = self.actor_party(actor).unwrap_or(TxParty::Burn);
+        // Escrow returns from the venue to its owner.
+        self.ledger.record(
+            TxKind::MarketCancel,
+            self.venue_party(order.venue),
+            canceller,
+            amount,
+            0,
+        );
+        if let EconActor::Agent(idx) = actor {
+            self.agents[idx].resting_orders.retain(|&id| id != order_id);
+        }
+        self.persist_actor_purse(actor);
+        self.save_exchange();
+        Ok(())
+    }
+
+    /// Drain the actor's settlement inbox at a venue into its purse and
+    /// pack. Requires standing at that venue's terminal. Items that don't
+    /// fit go straight back into the inbox (partial claim) — MILD, Shards
+    /// and Energy always fit. No ledger legs: fills already attributed the
+    /// value transfer when they executed.
+    pub fn exchange_claim(&mut self, actor: EconActor, venue: VenueId) -> Result<(), String> {
+        let owner = self.exchange_owner(actor).ok_or("not in world")?;
+        let (terminal, _) = self.venue_terminal(venue).ok_or("unknown venue")?;
+        if !self.actor_in_range(actor, terminal, 5.0) {
+            return Err("not at this market terminal".into());
+        }
+        let inbox = self.exchange.claim(owner, venue);
+        if inbox.is_empty() {
+            return Ok(());
+        }
+        let mild = inbox.mild.min(u32::MAX as u64) as u32;
+        if let Some(p) = self.actor_purse_mut(actor) {
+            p.credit(Currency::Wild, mild);
+        }
+        let mut back = Inbox::default();
+        for (asset, qty) in inbox.assets {
+            match asset {
+                Asset::Item(kind) => {
+                    let leftover = self.actor_add_items(actor, kind, qty);
+                    if leftover > 0 {
+                        back.credit_asset(asset, leftover);
+                    }
+                }
+                Asset::Shards => {
+                    if let Some(p) = self.actor_purse_mut(actor) {
+                        p.credit(Currency::Shards, qty);
+                    }
+                }
+                Asset::Energy => {
+                    if let Some(p) = self.actor_purse_mut(actor) {
+                        p.credit(Currency::Energy, qty);
+                    }
+                }
+            }
+        }
+        if !back.is_empty() {
+            self.exchange.return_to_inbox(owner, venue, back);
+        }
+        if let EconActor::Agent(idx) = actor {
+            // Realized market proceeds teach Trade, so sellers whose asks
+            // actually fill keep working the book.
+            if mild > 0 {
+                self.agents[idx].learn(Activity::Trade, mild as f32);
+            }
+        }
+        self.persist_actor_purse(actor);
+        self.save_exchange();
+        Ok(())
+    }
+
+    /// Old listing-market UI hook: the panel still opens (Phase 3 replaces
+    /// it with the exchange protocol), but the book it showed is gone.
+    fn send_market_state(&self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let _ = player.tx.send(S2C::MarketState {
+            listings: Vec::new(),
+            wallet: player.purse.carried(Currency::Wild),
+        });
+    }
+
+    /// Old listing-market actions no longer exist; every request is refused
+    /// until the Phase 3 exchange protocol lands client-side.
+    fn market_action(&mut self, entity: EntityId, _action: MarketAction) {
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::MarketResult {
+                ok: false,
+                error: Some("market migrated to exchange".into()),
+            });
+        }
+        self.send_market_state(entity);
     }
 
     // -----------------------------------------------------------------------
@@ -4751,10 +4953,6 @@ impl World {
             if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
                 w.broadcast_agent_dots();
             }
-            // Unsold agent asks decay toward their floor every ~15 s.
-            if w.tick % MARKET_DECAY_TICKS == 0 {
-                w.tick_market_decay();
-            }
             // Item market drill-in: re-push watched kinds that traded, ~1 Hz.
             if w.tick % ITEM_MARKET_TICK_INTERVAL == 0 {
                 w.broadcast_item_markets();
@@ -5344,6 +5542,7 @@ impl World {
             agent.path.clear();
             agent.path_request = None;
             agent.pending_jobs.clear();
+            agent.resting_orders.clear();
             let items: Vec<ItemStack> =
                 agent.inventory.slots.iter_mut().filter_map(|s| s.take()).collect();
             let burned = agent.purse.burn_carried_on_death();
@@ -5382,6 +5581,50 @@ impl World {
                     0,
                 );
             }
+        }
+        // Exchange positions are at-risk like carried cargo: respawn mints a
+        // fresh uuid the books have never heard of, so the dying identity's
+        // resting orders cancel with their escrow burned, and any unclaimed
+        // settlement inboxes burn with them.
+        let owner = OrderOwner::Agent(agent_id);
+        let mut exchange_touched = false;
+        for order in self.exchange.open_orders(owner) {
+            let Ok(escrow) = self.exchange.cancel(owner, order.id) else { continue };
+            exchange_touched = true;
+            let amount = match escrow {
+                Escrow::Mild(m) => TxAmount::Wild { amount: m.min(u32::MAX as u64) as u32 },
+                Escrow::Asset { asset, qty } => Self::asset_amount(asset, qty),
+            };
+            self.ledger.record(TxKind::Burn, party.clone(), TxParty::Burn, amount, 0);
+        }
+        for i in 0..self.venue_terminals.len() {
+            let venue = self.venue_terminals[i].0;
+            let inbox = self.exchange.claim(owner, venue);
+            if inbox.is_empty() {
+                continue;
+            }
+            exchange_touched = true;
+            if inbox.mild > 0 {
+                self.ledger.record(
+                    TxKind::Burn,
+                    party.clone(),
+                    TxParty::Burn,
+                    TxAmount::Wild { amount: inbox.mild.min(u32::MAX as u64) as u32 },
+                    0,
+                );
+            }
+            for (asset, qty) in inbox.assets {
+                self.ledger.record(
+                    TxKind::Burn,
+                    party.clone(),
+                    TxParty::Burn,
+                    Self::asset_amount(asset, qty),
+                    0,
+                );
+            }
+        }
+        if exchange_touched {
+            self.save_exchange();
         }
         if drop_loot {
             self.broadcast_combat(CombatEvent::EntityDied { id: entity });
@@ -5981,6 +6224,7 @@ impl World {
     }
 
     /// Nearest seeded service of `kind` to `pos`.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn nearest_service(&self, pos: Vec3, kind: EntityKind) -> Option<(EntityId, Vec3)> {
         self.services_by_kind
             .get(&kind)
@@ -6200,13 +6444,22 @@ impl World {
         // permanent statue crowd at the door. Destinations come from the
         // congestion-aware router so packed storefronts price themselves out.
         let sell_mult = traits.mult(Activity::Haul);
-        let market_pay = self.market_sell_value(idx);
+        // Market channel: the venue-shopping router prices every venue's
+        // book (sell dear beats sell near — the arbitrage hook), and the
+        // open-order cap keeps one agent from wallpapering the books.
+        let market_pick = self.best_sell_venue(idx);
+        let market_pay = market_pick.map(|(.., net)| net).unwrap_or(0);
         let vendor_pay = vendor_sell_value(&self.agents[idx], EntityKind::Bodega);
         let want_market = (market_pay > vendor_pay || traits.leans(Activity::Trade))
-            && self.market.len() < MARKET_BOOK_CAP;
+            && self.agents[idx].resting_orders.len() < AGENT_OPEN_ORDER_CAP;
         let sell_plan = if want_market {
-            self.route_service(pos, EntityKind::MarketTerminal)
-                .map(|r| (true, market_pay.max(market_list_value(&self.agents[idx])), r))
+            market_pick.map(|(store, store_pos, appeal, net)| {
+                (
+                    true,
+                    net.max(market_list_value(&self.agents[idx])),
+                    (store, store_pos, appeal),
+                )
+            })
         } else {
             None
         }
@@ -6285,19 +6538,17 @@ impl World {
             // Market first: the best weapon class with a live ask at or
             // under the Armory's counter price arms the agent for less and
             // clears the book — this is the demand side of the gear market.
-            let market_pick = agents::WEAPON_PREFERENCE
-                .iter()
-                .find_map(|&k| self.market_bargain(k, wallet).map(|p| (k, p)));
-            if let Some((kind, price_each)) = market_pick {
-                if let Some((_, terminal_pos)) =
-                    self.nearest_service(pos, EntityKind::MarketTerminal)
-                {
-                    if want > best.0 {
-                        best = (
-                            want,
-                            Goal::BuyMarket { terminal_pos, kind, count: 1, max_each: price_each },
-                        );
-                    }
+            let market_pick = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
+                agents::WEAPON_PREFERENCE.iter().find_map(|&k| {
+                    self.market_bargain(venue, k, wallet).map(|p| (k, p, terminal_pos))
+                })
+            });
+            if let Some((kind, price_each, terminal_pos)) = market_pick {
+                if want > best.0 {
+                    best = (
+                        want,
+                        Goal::BuyMarket { terminal_pos, kind, count: 1, max_each: price_each },
+                    );
                 }
             } else if let Some((store, store_pos, appeal)) =
                 self.route_service(pos, EntityKind::Armory)
@@ -6326,22 +6577,22 @@ impl World {
         if self.agents[idx].count_item(ItemKind::Medkit) == 0 && wallet >= 60 && has_weapon {
             // Same market-first routing as weapons: a live medkit ask at or
             // under the Bodega's price wins the errand.
-            if let Some(price_each) = self.market_bargain(ItemKind::Medkit, wallet) {
-                if let Some((_, terminal_pos)) =
-                    self.nearest_service(pos, EntityKind::MarketTerminal)
-                {
-                    let score = 8.0;
-                    if score > best.0 {
-                        best = (
-                            score,
-                            Goal::BuyMarket {
-                                terminal_pos,
-                                kind: ItemKind::Medkit,
-                                count: 2,
-                                max_each: price_each,
-                            },
-                        );
-                    }
+            let medkit_pick = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
+                self.market_bargain(venue, ItemKind::Medkit, wallet)
+                    .map(|p| (p, terminal_pos))
+            });
+            if let Some((price_each, terminal_pos)) = medkit_pick {
+                let score = 8.0;
+                if score > best.0 {
+                    best = (
+                        score,
+                        Goal::BuyMarket {
+                            terminal_pos,
+                            kind: ItemKind::Medkit,
+                            count: 2,
+                            max_each: price_each,
+                        },
+                    );
                 }
             } else if let Some((store, store_pos, appeal)) =
                 self.route_service(pos, EntityKind::Bodega)
@@ -6368,22 +6619,22 @@ impl World {
             let short = agents::kit_reserve(&self.agents[idx], ItemKind::Ammo9mm)
                 .saturating_sub(self.agents[idx].count_item(ItemKind::Ammo9mm));
             if short > 0 {
-                if let Some(price_each) = self.market_bargain(ItemKind::Ammo9mm, wallet) {
-                    if let Some((_, terminal_pos)) =
-                        self.nearest_service(pos, EntityKind::MarketTerminal)
-                    {
-                        let score = 6.0;
-                        if score > best.0 {
-                            best = (
-                                score,
-                                Goal::BuyMarket {
-                                    terminal_pos,
-                                    kind: ItemKind::Ammo9mm,
-                                    count: short.min(wallet / price_each.max(1)),
-                                    max_each: price_each,
-                                },
-                            );
-                        }
+                let ammo_pick = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
+                    self.market_bargain(venue, ItemKind::Ammo9mm, wallet)
+                        .map(|p| (p, terminal_pos))
+                });
+                if let Some((price_each, terminal_pos)) = ammo_pick {
+                    let score = 6.0;
+                    if score > best.0 {
+                        best = (
+                            score,
+                            Goal::BuyMarket {
+                                terminal_pos,
+                                kind: ItemKind::Ammo9mm,
+                                count: short.min(wallet / price_each.max(1)),
+                                max_each: price_each,
+                            },
+                        );
                     }
                 }
             }
@@ -6488,53 +6739,80 @@ impl World {
         // inputs — raw resources AND intermediates (plates, polymer,
         // boards...) — so every production input has real buy-side demand.
         if traits.leans(Activity::Craft) && best_recipe.is_none() && wallet >= 30 {
-            let wanted = |kind: ItemKind| {
+            let restock = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
                 wilder_crafting::RECIPES
                     .iter()
                     .filter(|r| r.station != wilder_crafting::Station::Laboratory)
                     .flat_map(|r| r.inputs.iter())
-                    .any(|&(k, _)| k == kind)
-            };
-            let listing = self.market.iter().find(|l| {
-                wanted(l.kind)
-                    && l.price_each <= self.market_ref_price(l.kind).saturating_mul(2)
+                    .find_map(|&(kind, _)| {
+                        let ask = self.exchange.best_ask(venue, Asset::Item(kind))?;
+                        (ask <= wallet
+                            && ask <= self.market_ref_price(kind).saturating_mul(2))
+                        .then_some((kind, ask, terminal_pos))
+                    })
             });
-            if let Some(l) = listing {
-                if let Some((_, terminal_pos)) =
-                    self.nearest_service(pos, EntityKind::MarketTerminal)
-                {
-                    let score = 12.0;
-                    if score > best.0 {
-                        best = (
-                            score,
-                            Goal::BuyMarket {
-                                terminal_pos,
-                                kind: l.kind,
-                                count: l.count.min(wallet / l.price_each.max(1)),
-                                max_each: l.price_each,
-                            },
-                        );
-                    }
+            if let Some((kind, ask, terminal_pos)) = restock {
+                let score = 12.0;
+                if score > best.0 {
+                    best = (
+                        score,
+                        Goal::BuyMarket {
+                            terminal_pos,
+                            kind,
+                            count: (wallet / ask.max(1)).clamp(1, 10),
+                            max_each: ask,
+                        },
+                    );
                 }
             }
         }
 
-        // --- Trade: arbitrage underpriced listings ---
+        // --- Trade: arbitrage underpriced asks on the nearest book ---
         if wallet >= 20 {
             let trade_mult = traits.mult(Activity::Trade);
-            let bargain = self.market.iter().any(|l| {
-                let market_ref = self.market_ref_price(l.kind);
-                l.price_each.saturating_mul(10) <= market_ref.saturating_mul(7)
-                    && l.price_each <= wallet
+            let bargain = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
+                Asset::all()
+                    .into_iter()
+                    .filter_map(|asset| {
+                        let Asset::Item(kind) = asset else { return None };
+                        let ask = self.exchange.best_ask(venue, asset)?;
+                        let market_ref = self.market_ref_price(kind);
+                        (ask <= wallet
+                            && ask.saturating_mul(10) <= market_ref.saturating_mul(7))
+                        .then_some(terminal_pos)
+                    })
+                    .next()
             });
-            if bargain {
-                if let Some((_, terminal_pos)) =
-                    self.nearest_service(pos, EntityKind::MarketTerminal)
-                {
-                    let score = 18.0 * trade_mult;
-                    if score > best.0 {
-                        best = (score, Goal::Trade { terminal_pos });
-                    }
+            if let Some(terminal_pos) = bargain {
+                let score = 18.0 * trade_mult;
+                if score > best.0 {
+                    best = (score, Goal::Trade { terminal_pos });
+                }
+            }
+        }
+        // --- Settlements: an inbox with proceeds waiting pulls the agent
+        // back to that venue's terminal (claiming rides the Trade act, which
+        // drains the inbox on arrival before scanning for bargains). ---
+        {
+            let owner = OrderOwner::Agent(self.agents[idx].agent_id);
+            let trade_mult = traits.mult(Activity::Trade).max(0.6);
+            for &(venue, _, terminal_pos) in &self.venue_terminals {
+                let Some(inbox) = self.exchange.inbox(owner, venue) else { continue };
+                if inbox.is_empty() {
+                    continue;
+                }
+                let value = inbox.mild.min(u32::MAX as u64) as u32
+                    + inbox
+                        .assets
+                        .iter()
+                        .map(|&(asset, qty)| match asset {
+                            Asset::Item(kind) => base_value(kind).saturating_mul(qty),
+                            Asset::Shards | Asset::Energy => qty,
+                        })
+                        .sum::<u32>();
+                let score = (6.0 + value as f32 * 0.05).min(30.0) * trade_mult;
+                if score > best.0 {
+                    best = (score, Goal::Trade { terminal_pos });
                 }
             }
         }
@@ -7050,28 +7328,28 @@ impl World {
         }
     }
 
-    /// Live market reference price for an item: the most recent fill when the
-    /// kind has traded, clamped to sane bounds around the static base value
-    /// (so one absurd fill can't poison agent decisions), else the base value.
+    /// Live market reference price for an item: the most recent fill across
+    /// every venue when the kind has traded, clamped to sane bounds around
+    /// the static base value (so one absurd fill can't poison agent
+    /// decisions), else the base value.
     fn market_ref_price(&self, kind: ItemKind) -> u32 {
         let base = base_value(kind).max(1);
-        match self.market_stats.last_price(kind) {
+        match self
+            .exchange
+            .asset_summary(Asset::Item(kind), ledger::unix_ms())
+            .last_price
+        {
             Some(p) => p.clamp((base / 2).max(1), base.saturating_mul(3)),
             None => base,
         }
     }
 
-    /// Cheapest live ask for `kind` the agent can afford, when it beats the
-    /// vendor's counter price (at-or-under: same MILD, but the fill keeps
-    /// the floating market alive). No vendor line for the kind → any
-    /// affordable ask up to twice the market reference qualifies.
-    fn market_bargain(&self, kind: ItemKind, wallet: u32) -> Option<u32> {
-        let ask = self
-            .market
-            .iter()
-            .filter(|l| l.kind == kind && l.count > 0 && l.price_each <= wallet)
-            .map(|l| l.price_each)
-            .min()?;
+    /// Cheapest live ask for `kind` at one venue the agent can afford, when
+    /// it beats the vendor's counter price (at-or-under: same MILD, but the
+    /// fill keeps the floating market alive). No vendor line for the kind →
+    /// any affordable ask up to twice the market reference qualifies.
+    fn market_bargain(&self, venue: VenueId, kind: ItemKind, wallet: u32) -> Option<u32> {
+        let ask = self.exchange.best_ask(venue, Asset::Item(kind)).filter(|&p| p <= wallet)?;
         let vendor = wilder_economy::reference_prices(kind).0;
         let cap = if vendor > 0 {
             vendor
@@ -7081,287 +7359,239 @@ impl World {
         (ask <= cap).then_some(ask)
     }
 
-    /// Walk every agent ask down ~5% toward its price floor (unsold stock
-    /// meets demand instead of clogging the book forever); player listings
-    /// are never repriced. Changed kinds are marked dirty so item-market
-    /// watchers see the book move. Called every `MARKET_DECAY_TICKS`.
-    fn tick_market_decay(&mut self) {
-        let mut changed = false;
-        for i in 0..self.market.len() {
-            let l = &self.market[i];
-            if !l.agent {
-                continue;
-            }
-            let floor = (base_value(l.kind) / 2).max(1);
-            if l.price_each <= floor {
-                continue;
-            }
-            let next = (l.price_each.saturating_mul(95) / 100).clamp(floor, l.price_each - 1);
-            let kind = l.kind;
-            self.market[i].price_each = next;
-            self.market_stats.mark_dirty(kind);
-            changed = true;
-        }
-        if changed {
-            self.save_market();
-        }
-    }
-
-    /// Ask price for a fresh agent listing. Prices float with supply and
-    /// demand instead of sitting on a static markup: with live competition on
-    /// the book the new seller undercuts the cheapest ask by ~5%; on an empty
-    /// book (demand just cleared the supply) it marks up ~10% over the last
-    /// fill — rounded *up*, or cheap items (iron at 2 MILD) would floor the
-    /// markup away and the price could never float off its base. Clamped to
-    /// [base/2, base*3] so the loop can't run away.
-    fn agent_ask_price(&self, kind: ItemKind) -> u32 {
+    /// Ask price for a fresh agent order at one venue. Prices float with
+    /// supply and demand instead of sitting on a static markup: with live
+    /// competition on that venue's book the new seller undercuts the
+    /// cheapest ask by ~5%; on an empty book (demand just cleared the
+    /// supply) it marks up ~10% over the last fill — rounded *up*, or cheap
+    /// items (iron at 2 MILD) would floor the markup away and the price
+    /// could never float off its base. Clamped to [base/2, base*3] so the
+    /// loop can't run away.
+    fn agent_ask_price(&self, venue: VenueId, kind: ItemKind) -> u32 {
         let base = base_value(kind).max(1);
         let floor = (base / 2).max(1);
         let ceil = base.saturating_mul(3);
-        let best_ask = self
-            .market
-            .iter()
-            .filter(|l| l.kind == kind && l.count > 0)
-            .map(|l| l.price_each)
-            .min();
-        let anchor = match best_ask {
+        let anchor = match self.exchange.best_ask(venue, Asset::Item(kind)) {
             Some(ask) => ask.saturating_mul(95) / 100,
             None => self.market_ref_price(kind).saturating_mul(11).div_ceil(10),
         };
         anchor.clamp(floor, ceil)
     }
 
-    /// Expected net MILD (after the market fee) from listing the agent's
-    /// listable cargo at today's floating ask. The Sell scorer compares this
-    /// against the Bodega's fixed floor to pick the errand's channel.
-    fn market_sell_value(&self, idx: usize) -> u32 {
-        let gross: u32 = market_surplus(&self.agents[idx])
-            .iter()
-            .map(|&(k, c)| self.agent_ask_price(k).saturating_mul(c))
-            .sum();
-        gross.saturating_mul(100 - MARKET_FEE_PCT) / 100
+    /// Best venue to sell this agent's surplus at, weighing what each
+    /// venue's book would pay (its floating ask level, net of the fee)
+    /// against travel distance and crowding — the basic arbitrage hook:
+    /// traders haul to the venue paying dearest, not just the nearest one.
+    /// Returns (terminal entity, terminal pos, appeal, expected net MILD).
+    fn best_sell_venue(&self, idx: usize) -> Option<(EntityId, Vec3, f32, u32)> {
+        let surplus = market_surplus(&self.agents[idx]);
+        if surplus.is_empty() {
+            return None;
+        }
+        let pos = self.agents[idx].position;
+        let mut best: Option<(EntityId, Vec3, f32, u32, f32)> = None;
+        for &(venue, terminal, tpos) in &self.venue_terminals {
+            let gross: u32 = surplus
+                .iter()
+                .map(|&(k, c)| self.agent_ask_price(venue, k).saturating_mul(c))
+                .sum();
+            let net = gross.saturating_mul(100 - MARKET_FEE_PCT) / 100;
+            // Same distance/congestion shape route_service applies.
+            let dist = (tpos - pos).length();
+            let dist_factor = 1.0 / (1.0 + dist / SERVICE_TRAVEL_HALF);
+            let occ = self.service_load.get(&terminal).copied().unwrap_or(0) as f32;
+            let crowd_factor = SERVICE_CAPACITY / (SERVICE_CAPACITY + occ);
+            let appeal = dist_factor * crowd_factor;
+            let score = net as f32 * appeal;
+            if best.map(|(.., s)| score > s).unwrap_or(true) {
+                best = Some((terminal, tpos, appeal, net, score));
+            }
+        }
+        best.map(|(terminal, tpos, appeal, net, _)| (terminal, tpos, appeal, net))
     }
 
-    /// Evict one floor-priced agent listing to make room on a full book (the
-    /// escrowed items burn — dead stock nobody bought at the minimum price).
-    /// Returns false when the book is wall-to-wall player listings.
-    fn evict_stale_listing(&mut self) -> bool {
-        let Some(pos) = self
-            .market
-            .iter()
-            .position(|l| l.agent && l.price_each <= (base_value(l.kind) / 2).max(1))
-        else {
-            return false;
-        };
-        let l = self.market.remove(pos);
-        self.ledger.record(
-            TxKind::Burn,
-            self.market_party(),
-            TxParty::Burn,
-            TxAmount::Item { kind: l.kind, count: l.count },
-            0,
-        );
-        self.market_stats.mark_dirty(l.kind);
-        true
+    /// Reconcile the agent's resting-order notes against the exchange (fills
+    /// and cancels retire orders while the agent is away), then reprice its
+    /// stale asks at this venue: anything resting longer than
+    /// `AGENT_ASK_STALE_MS` cancels and relists ~5% cheaper (never below the
+    /// price floor). This is the event-driven replacement for the old global
+    /// ask decay — the walk-down only happens when the seller is physically
+    /// back at the book, which every market errand routes through.
+    fn reprice_stale_asks(&mut self, idx: usize, venue: VenueId, now_ms: u64) {
+        let owner = OrderOwner::Agent(self.agents[idx].agent_id);
+        let open = self.exchange.open_orders(owner);
+        self.agents[idx].resting_orders.retain(|id| open.iter().any(|o| o.id == *id));
+        for order in open {
+            if order.venue != venue || order.side != Side::Ask {
+                continue;
+            }
+            if now_ms.saturating_sub(order.placed_ms) < AGENT_ASK_STALE_MS {
+                continue;
+            }
+            let Asset::Item(kind) = order.asset else { continue };
+            let Some(price) = order.limit_price() else { continue };
+            let floor = (base_value(kind) / 2).max(1);
+            if price <= floor {
+                continue;
+            }
+            let qty = order.remaining();
+            if self.exchange_cancel(EconActor::Agent(idx), order.id).is_err() {
+                continue;
+            }
+            let next = (price.saturating_mul(95) / 100).clamp(floor, price - 1);
+            if let Ok(outcome) = self.exchange_place(
+                EconActor::Agent(idx),
+                venue,
+                order.asset,
+                Side::Ask,
+                OrderKind::Limit { price: next },
+                qty,
+                None,
+            ) {
+                if outcome.resting {
+                    self.agents[idx].resting_orders.push(outcome.order_id);
+                }
+            }
+        }
     }
 
     /// List the agent's sellable surplus (resources, valuables, and gear
-    /// above the personal kit reserve) on the market book at the current
-    /// floating market price.
+    /// above the personal kit reserve) as limit asks on the venue it is
+    /// standing at, priced off that venue's floating book. Arriving at the
+    /// terminal also claims any settled proceeds and reprices stale asks.
     fn agent_market_list(&mut self, idx: usize) {
-        let market_agent = self.market_party();
+        let actor = EconActor::Agent(idx);
+        let Some(venue) = self.venue_at(actor) else { return };
+        let _ = self.exchange_claim(actor, venue);
+        self.reprice_stale_asks(idx, venue, ledger::unix_ms());
         let carried = market_surplus(&self.agents[idx]);
         for (kind, count) in carried {
-            // Full book: scrap dead floor-priced agent stock to make room;
-            // if none exists the book really is full and listing stops.
-            if self.market.len() >= MARKET_BOOK_CAP && !self.evict_stale_listing() {
+            if self.agents[idx].resting_orders.len() >= AGENT_OPEN_ORDER_CAP {
                 break;
             }
-            let price_each = self.agent_ask_price(kind);
-            let removed = self.agents[idx].remove_item(kind, count);
-            if removed == 0 {
-                continue;
-            }
-            let seller_party = self.agents[idx].party();
-            self.ledger.record(
-                TxKind::MarketList,
-                seller_party,
-                market_agent.clone(),
-                TxAmount::Item { kind, count: removed },
-                0,
+            let price_each = self.agent_ask_price(venue, kind);
+            let placed = self.exchange_place(
+                actor,
+                venue,
+                Asset::Item(kind),
+                Side::Ask,
+                OrderKind::Limit { price: price_each },
+                count,
+                None,
             );
-            let listing = wilder_market::Listing {
-                id: self.next_listing_id,
-                // Agent listings key on the agent's uuid (same id space as
-                // CharacterId); buys credit the agent's wallet directly.
-                seller: self.agents[idx].agent_id,
-                seller_name: self.agents[idx].name.clone(),
-                kind,
-                count: removed,
-                price_each,
-                agent: true,
-            };
-            self.next_listing_id += 1;
-            self.market.push(listing);
+            let Ok(outcome) = placed else { continue };
+            if outcome.resting {
+                self.agents[idx].resting_orders.push(outcome.order_id);
+            }
             if self.agents[idx].owner.is_some() {
                 let aid = self.agents[idx].agent_id;
                 self.push_agent_log(
                     aid,
                     format!(
-                        "Listed {removed} {} at {price_each} MILD each",
+                        "Listed {count} {} at {price_each} MILD each",
                         kind.display_name()
                     ),
                 );
             }
         }
-        self.save_market();
     }
 
-    /// Buy up to `count` of `kind` off the market book at `max_each` or
-    /// better. Mirrors the player MarketBuy constraints and ledger legs:
-    /// the agent must be standing at a MarketTerminal (5 m / interior, same
-    /// range players trade at — no more remote fills) and sellers (player
-    /// or agent) are credited identically.
+    /// Buy up to `count` of `kind` off the book at the venue the agent is
+    /// standing at, paying `max_each` or better. Urgent consumables
+    /// (medkits, ammo) go in as market orders with a spend budget — fill
+    /// whatever the book offers right now; everything else is a limit bid
+    /// at the agent's ceiling, which crosses like the old instant buy and
+    /// leaves any remainder resting as real bid-side liquidity. Fills land
+    /// in the settlement inbox and are claimed on the spot. Returns whether
+    /// anything filled.
     fn agent_market_buy(&mut self, idx: usize, kind: ItemKind, count: u32, max_each: u32) -> bool {
+        let actor = EconActor::Agent(idx);
         // Range parity: the goal routing walks agents to a terminal before
         // Act fires; enforce it at execution too so no path can fill
         // remotely.
-        let Some(terminal_pos) = self.market_terminal_near(EconActor::Agent(idx)) else {
-            return false;
-        };
-        let market_agent = self.market_party();
-        let Some(pos) = self
-            .market
-            .iter()
-            .position(|l| l.kind == kind && l.price_each <= max_each && l.count > 0)
-        else {
-            return false;
-        };
-        let (listing_seller, seller_name, price_each, available) = {
-            let l = &self.market[pos];
-            (l.seller, l.seller_name.clone(), l.price_each, l.count)
-        };
-        // Never buy from yourself (relisting loops).
-        if listing_seller == self.agents[idx].agent_id {
+        let Some(venue) = self.venue_at(actor) else { return false };
+        let _ = self.exchange_claim(actor, venue);
+        self.reprice_stale_asks(idx, venue, ledger::unix_ms());
+        if count == 0 || max_each == 0 {
             return false;
         }
         let wallet = self.agents[idx].wallet();
-        let affordable = (wallet / price_each.max(1)).min(count).min(available);
+        let affordable = (wallet / max_each.max(1)).min(count);
         if affordable == 0 {
             return false;
         }
-        let cost = price_each * affordable;
-        self.agents[idx].purse.debit(Currency::Wild, cost);
-        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, affordable);
-        if leftover > 0 {
-            // Couldn't haul it all: the overflow spills to the ground as the
-            // buyer's loot (mirrors the player market-buy path) rather than
-            // silently vanishing from supply.
-            let pos = self.agents[idx].position;
-            let buyer = self.agents[idx].party();
-            self.spawn_loot(pos, vec![ItemStack { kind, count: leftover }], Some(buyer), true);
+        let urgent = matches!(kind, ItemKind::Medkit | ItemKind::Ammo9mm);
+        let (order_kind, max_spend) = if urgent {
+            (OrderKind::Market, Some((max_each as u64 * affordable as u64).min(wallet as u64)))
+        } else {
+            (OrderKind::Limit { price: max_each }, None)
+        };
+        let placed = self.exchange_place(
+            actor,
+            venue,
+            Asset::Item(kind),
+            Side::Bid,
+            order_kind,
+            affordable,
+            max_spend,
+        );
+        let Ok(outcome) = placed else { return false };
+        if outcome.resting
+            && self.agents[idx].resting_orders.len() < AGENT_OPEN_ORDER_CAP
+        {
+            self.agents[idx].resting_orders.push(outcome.order_id);
         }
+        if outcome.fills.is_empty() {
+            return false;
+        }
+        // Bought goods sit in the inbox until claimed — we're standing at
+        // the terminal, so collect them now (mirrors the old instant buy).
+        let _ = self.exchange_claim(actor, venue);
         self.agents[idx].equip_best_gear();
-        let fee = cost * MARKET_FEE_PCT / 100;
-        let proceeds = cost - fee;
-        let buyer_party = self.agents[idx].party();
-        let seller_party = self.credit_market_seller(listing_seller, proceeds);
-        // Leaderboards: both sides of a fill count a trade.
-        let buyer_actor = self.agent_actor_ref(idx);
-        self.stats.add_trade(&buyer_actor);
-        if let Some(s) = party_actor(&seller_party) {
-            self.stats.add_trade(&s);
+        if self.agents[idx].owner.is_some() {
+            let units: u32 = outcome.fills.iter().map(|(f, _)| f.qty).sum();
+            let aid = self.agents[idx].agent_id;
+            self.push_agent_log(aid, format!("Bought {units} {}", kind.display_name()));
         }
-        self.ledger.record(
-            TxKind::MarketBuy,
-            market_agent.clone(),
-            buyer_party.clone(),
-            TxAmount::Item { kind, count: affordable },
-            fee,
-        );
-        self.ledger.record(
-            TxKind::MarketBuy,
-            buyer_party.clone(),
-            seller_party,
-            TxAmount::Wild { amount: proceeds },
-            fee,
-        );
-        if fee > 0 {
-            self.ledger.record(
-                TxKind::Fee,
-                buyer_party,
-                market_agent.clone(),
-                TxAmount::Wild { amount: fee },
-                0,
-            );
-        }
-        // Fee parity with the player path: the terminal's territory holder
-        // skims the market fee (distribute_commerce burns it on neutral
-        // ground) — agent fills stopped burning it unconditionally.
-        self.distribute_commerce(terminal_pos, fee, market_agent, false);
-        self.ledger.trades += 1;
-        let buyer_name = self.agents[idx].name.clone();
-        self.market_stats.record_fill(kind, price_each, affordable, buyer_name, seller_name);
-        let l = &mut self.market[pos];
-        l.count -= affordable;
-        if l.count == 0 {
-            self.market.remove(pos);
-        }
-        self.save_market();
         true
     }
 
-    /// Credit a market seller's wallet by id — online player, offline
-    /// player, or agent — and return the ledger party to attribute.
-    fn credit_market_seller(&mut self, seller: CharacterId, proceeds: u32) -> TxParty {
-        if let Some(sp) = self.players.values_mut().find(|p| p.character.id == seller) {
-            sp.purse.credit(Currency::Wild, proceeds);
-            let account = sp.character.account_id;
-            let wallet = sp.purse.carried(Currency::Wild);
-            let party = player_party(sp);
-            let _ = self.store.update_wallet(account, wallet);
-            return party;
-        }
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.agent_id == seller) {
-            agent.purse.credit(Currency::Wild, proceeds);
-            // Reinforce the channel: realized market proceeds teach Trade,
-            // so sellers whose listings actually fill keep working the book.
-            agent.learn(Activity::Trade, proceeds as f32);
-            return agent.party();
-        }
-        if let Ok(ch) = self.store.character(seller) {
-            if let Ok(account) = self.store.account_by_id(ch.account_id) {
-                let _ = self.store.update_wallet(account.id, account.wallet + proceeds);
-                return TxParty::Player { id: seller, name: ch.name, faction: ch.faction };
-            }
-        }
-        TxParty::Burn
-    }
-
-    /// Trader arbitrage at a terminal: buy the best underpriced listing,
-    /// then relist it at the floating market price.
+    /// Trader arbitrage at the venue the agent is standing at: claim any
+    /// settled proceeds, buy the most underpriced ask on this book (vs the
+    /// cross-venue reference), then flip the goods back onto the book at
+    /// the floating price. Cross-venue routing happens upstream: the Sell
+    /// scorer already hauls surplus to the venue paying dearest.
     fn agent_trade(&mut self, idx: usize) {
         self.agents[idx].goal = Goal::Idle;
+        let actor = EconActor::Agent(idx);
+        let Some(venue) = self.venue_at(actor) else { return };
+        let _ = self.exchange_claim(actor, venue);
+        self.reprice_stale_asks(idx, venue, ledger::unix_ms());
         let wallet = self.agents[idx].wallet();
-        let me = self.agents[idx].agent_id;
         // Best bargain: largest absolute discount vs the live market price.
-        let pick = self
-            .market
-            .iter()
-            .filter(|l| {
-                l.seller != me
-                    && l.price_each <= wallet
-                    && l.price_each.saturating_mul(10)
-                        <= self.market_ref_price(l.kind).saturating_mul(7)
-            })
-            .max_by_key(|l| self.market_ref_price(l.kind).saturating_sub(l.price_each))
-            .map(|l| (l.kind, l.price_each));
-        let Some((kind, price_each)) = pick else { return };
+        // Self-match prevention in the book means an agent's own asks never
+        // fill its bid, so no self-dealing loop exists.
+        let mut pick: Option<(ItemKind, u32, u32)> = None;
+        for asset in Asset::all() {
+            let Asset::Item(kind) = asset else { continue };
+            let Some(ask) = self.exchange.best_ask(venue, asset) else { continue };
+            if ask > wallet {
+                continue;
+            }
+            let market_ref = self.market_ref_price(kind);
+            if ask.saturating_mul(10) > market_ref.saturating_mul(7) {
+                continue;
+            }
+            let spread = market_ref.saturating_sub(ask);
+            if pick.map(|(.., s)| spread > s).unwrap_or(true) {
+                pick = Some((kind, ask, spread));
+            }
+        }
+        let Some((kind, price_each, spread)) = pick else { return };
         let before = self.agents[idx].count_item(kind);
         if self.agent_market_buy(idx, kind, u32::MAX, price_each) {
             // Learning: the arbitrage spread captured on this flip.
             let got = self.agents[idx].count_item(kind).saturating_sub(before);
-            let spread = self.market_ref_price(kind).saturating_sub(price_each);
             self.agents[idx].learn(Activity::Trade, (spread * got) as f32);
             // Immediately flip the goods back onto the book at a margin.
             self.agent_market_list(idx);
@@ -7609,6 +7839,7 @@ impl World {
                     blueprints: Vec::new(),
                     stash: Vec::new(),
                     pending_jobs: Vec::new(),
+                    resting_orders: Vec::new(),
                     owner: None,
                     lifetime_owner_earnings: 0,
                     position,
@@ -7672,6 +7903,7 @@ impl World {
                     blueprints: Vec::new(),
                     stash: Vec::new(),
                     pending_jobs: Vec::new(),
+                    resting_orders: Vec::new(),
                     owner: None,
                     lifetime_owner_earnings: 0,
                     position,
@@ -8293,41 +8525,86 @@ impl World {
         }
     }
 
-    /// Build the market detail snapshot for one item kind: price series +
-    /// totals from `market_stats`, live book stats, ledger supply, and the
-    /// fixed vendor reference prices.
+    /// Build the market detail snapshot for one item kind, fed from the
+    /// exchange until the Phase 3 protocol replaces this message: cross-venue
+    /// rollup for last price and volumes, best ask / listed units summed over
+    /// every venue's book, and the busiest venue's candles mapped onto the
+    /// old bucket series. The tape carries prices/sizes but no counterparty
+    /// names (inboxes decouple fills from identities); names return with the
+    /// exchange-native protocol.
     fn item_market_state(&self, kind: ItemKind) -> ItemMarketState {
-        let (series, recent_fills, last_price, total_fills, total_units, total_wild) =
-            match self.market_stats.history(kind) {
-                Some(h) => (
-                    h.buckets.iter().copied().collect(),
-                    // Tape goes out newest-first: that's the render order.
-                    h.recent.iter().rev().cloned().collect(),
-                    h.last_price,
-                    h.total_fills,
-                    h.total_units,
-                    h.total_wild,
-                ),
-                None => (Vec::new(), Vec::new(), 0, 0, 0, 0),
-            };
+        let asset = Asset::Item(kind);
+        let now_ms = ledger::unix_ms();
+        let summary = self.exchange.asset_summary(asset, now_ms);
         let mut best_ask = 0u32;
         let mut listed_units = 0u32;
-        for l in self.market.iter().filter(|l| l.kind == kind && l.count > 0) {
-            listed_units += l.count;
-            if best_ask == 0 || l.price_each < best_ask {
-                best_ask = l.price_each;
+        for &(venue, ..) in &self.venue_terminals {
+            if let Some(ask) = self.exchange.best_ask(venue, asset) {
+                if best_ask == 0 || ask < best_ask {
+                    best_ask = ask;
+                }
             }
+            listed_units += self
+                .exchange
+                .depth(venue, asset, usize::MAX)
+                .1
+                .iter()
+                .map(|&(_, qty)| qty)
+                .sum::<u32>();
         }
+        // Series/tape from the venue that traded most recently.
+        let newest_venue = self
+            .venue_terminals
+            .iter()
+            .filter_map(|&(venue, ..)| {
+                let stats = self.exchange.stats(venue, asset, now_ms);
+                stats.last_trade_ms.map(|at| (venue, at))
+            })
+            .max_by_key(|&(_, at)| at)
+            .map(|(venue, _)| venue);
+        let (series, recent_fills) = match newest_venue {
+            Some(venue) => (
+                self.exchange
+                    .candles(venue, asset)
+                    .iter()
+                    .map(|c| PriceBucket {
+                        t: c.minute * 60_000,
+                        avg: (c.volume_wild / c.volume_units.max(1) as u64) as u32,
+                        min: c.low,
+                        max: c.high,
+                        units: c.volume_units,
+                        wild: c.volume_wild,
+                        fills: 0,
+                    })
+                    .collect(),
+                // Tape goes out newest-first: that's the render order.
+                self.exchange
+                    .tape(venue, asset)
+                    .iter()
+                    .rev()
+                    .map(|t| MarketFill {
+                        t: t.at_ms,
+                        price_each: t.price,
+                        count: t.qty,
+                        buyer: String::new(),
+                        seller: String::new(),
+                    })
+                    .collect(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
         let (vendor_buy, vendor_sell) = wilder_economy::reference_prices(kind);
         ItemMarketState {
             kind,
             series,
-            last_price,
+            last_price: summary.last_price.unwrap_or(0),
             best_ask,
             listed_units,
-            total_fills,
-            total_units,
-            total_wild,
+            // Lifetime totals retired with the listing market; the trailing
+            // 24 h window stands in until Phase 3 reshapes the message.
+            total_fills: 0,
+            total_units: summary.volume_24h_units,
+            total_wild: summary.volume_24h_wild,
             supply: self.ledger.item_supply(kind),
             vendor_buy,
             vendor_sell,
@@ -8340,10 +8617,10 @@ impl World {
     fn broadcast_item_markets(&mut self) {
         if self.item_subs.is_empty() {
             // Nobody watching: drop the dirty set so it can't grow unbounded.
-            self.market_stats.take_dirty();
+            self.item_market_dirty.clear();
             return;
         }
-        let dirty = self.market_stats.take_dirty();
+        let dirty = std::mem::take(&mut self.item_market_dirty);
         if dirty.is_empty() {
             return;
         }
@@ -9394,10 +9671,9 @@ impl World {
         if let Err(e) = self.store.save_meta("econ_ledger", &self.ledger.save()) {
             tracing::error!("ledger save failed: {e}");
         }
-        // Per-item market price history (dashboard charts).
-        if let Err(e) = self.store.save_meta("market_stats", &self.market_stats.save()) {
-            tracing::error!("market stats save failed: {e}");
-        }
+        // The exchange (books, escrow, inboxes, price history) also saves
+        // after every order event; this pass catches anything between.
+        self.save_exchange();
         // Faction agents persist separately in rotating shards (see
         // `tick_agent_saves`) so this pass never serializes the population.
         // Leaderboard stats book (competitor records + lifetime rollups).
@@ -9731,7 +10007,8 @@ pub mod bench {
         // Economy pulse: is the emergent market loop alive at this scale?
         let traders =
             world.agents.iter().filter(|a| a.traits.leans(Activity::Trade)).count();
-        let (fills, units, wild) = world.market_stats.totals();
+        let fills = world.ledger.trades;
+        let resting = world.exchange.resting_order_count();
         let mut goal_counts: HashMap<&'static str, usize> = HashMap::new();
         for a in &world.agents {
             let label = match a.goal {
@@ -9761,10 +10038,7 @@ pub mod bench {
         let goals =
             goals.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
         println!("econ: trade-leaning agents: {traders} / {}", world.agents.len());
-        println!(
-            "econ: market book listings={} fills={fills} units={units} wild={wild}",
-            world.market.len()
-        );
+        println!("econ: exchange resting orders={resting} trades={fills}");
         println!("econ: goals {goals}");
 
         // Economy health: is every stage of the loop (mine -> refine/build ->
@@ -9974,10 +10248,11 @@ mod tests {
         let world = World {
             store: store.clone(),
             chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
-            market: Vec::new(),
+            exchange: Exchange::default(),
+            venue_terminals: Vec::new(),
+            item_market_dirty: HashSet::new(),
             vendor_stock: HashMap::new(),
             vendor_stock_dirty: false,
-            next_listing_id: 1,
             next_job_id: 1,
             production: HashMap::new(),
             production_outputs: HashMap::new(),
@@ -10005,7 +10280,6 @@ mod tests {
             region_casualties: HashMap::new(),
             zone_clock: ZoneClock::new(districts::district_defs().len()),
             ledger: Ledger::new(LedgerSave::default()),
-            market_stats: MarketStats::default(),
             stats: StatsBook::default(),
             econ_subs: HashSet::new(),
             item_subs: HashMap::new(),
@@ -10057,6 +10331,7 @@ mod tests {
                 blueprints: Vec::new(),
                 stash: Vec::new(),
                 pending_jobs: Vec::new(),
+                resting_orders: Vec::new(),
                 owner: None,
                 lifetime_owner_earnings: 0,
                 position,
@@ -10721,14 +10996,17 @@ mod tests {
     fn agent_market_fees_route_to_territory_holders() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
+        world.init_exchange();
         let contested = district_anchor("NEXUS");
-        let seller = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
-        world.agents[seller].add_item(ItemKind::Iron, 30);
-        world.agent_market_list(seller);
-        let listing_price =
-            world.market.iter().find(|l| l.kind == ItemKind::Iron).expect("listed").price_each;
         let (_, terminal_pos) =
             world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let seller =
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), terminal_pos);
+        world.agents[seller].add_item(ItemKind::Iron, 30);
+        world.agent_market_list(seller);
+        let venue = world.venue_at(EconActor::Agent(seller)).expect("at a venue");
+        let listing_price =
+            world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)).expect("listed");
         let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), terminal_pos);
         // Forum holds the ground under the terminal, with one member on it;
         // the rebel counterparties get no share of their own fee.
@@ -10875,6 +11153,7 @@ mod tests {
             blueprints: Vec::new(),
             stash: Vec::new(),
             pending_jobs: Vec::new(),
+            resting_orders: Vec::new(),
             owner: None,
             lifetime_owner_earnings: 0,
             // Far off the baked map: open water (pre-fix drift artifacts).
@@ -11511,60 +11790,66 @@ mod tests {
     fn agents_trade_through_the_real_market_book() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
+        world.init_exchange();
         let contested = district_anchor("NEXUS");
-        let seller = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
+        let (_, terminal_pos) = world
+            .nearest_service(contested, EntityKind::MarketTerminal)
+            .expect("market terminal seeded");
+        let seller =
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), terminal_pos);
         let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), contested);
         world.agents[seller].add_item(ItemKind::Iron, 30);
         world.agent_market_list(seller);
-        assert!(!world.market.is_empty(), "trader should have listed its haul");
-        let listing_price = world
-            .market
-            .iter()
-            .find(|l| l.kind == ItemKind::Iron)
-            .expect("iron listed")
-            .price_each;
+        let venue = world.venue_at(EconActor::Agent(seller)).expect("at a venue");
+        // Listing escrows the goods on the book: out of the pack, one
+        // resting ask, order id bookkept on the agent.
+        assert_eq!(world.agents[seller].count_item(ItemKind::Iron), 0);
+        assert_eq!(world.agents[seller].resting_orders.len(), 1);
+        let listing_price =
+            world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)).expect("iron listed");
         let seller_wallet = world.agents[seller].wallet();
         let buyer_wallet = world.agents[buyer].wallet();
         // Fills execute at the terminal now: out past 5 m the book refuses,
         // walking up unlocks it (same range rule players live under).
         assert!(!world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
-        let (_, terminal_pos) = world
-            .nearest_service(contested, EntityKind::MarketTerminal)
-            .expect("market terminal seeded");
         world.agents[buyer].position = terminal_pos;
         assert!(world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
         let cost = listing_price * 10;
         let fee = cost * MARKET_FEE_PCT / 100;
         assert_eq!(world.agents[buyer].wallet(), buyer_wallet - cost);
-        assert_eq!(world.agents[seller].wallet(), seller_wallet + cost - fee);
         assert_eq!(world.agents[buyer].count_item(ItemKind::Iron), 10);
-        // The fill landed on the per-item price history at the fill price.
-        let hist = world.market_stats.history(ItemKind::Iron).expect("iron history");
-        assert_eq!(hist.last_price, listing_price);
-        assert_eq!(hist.total_units, 10);
-        assert_eq!(hist.total_fills, 1);
-        // ...and the drill-in snapshot reflects book + history + vendor refs.
+        // Proceeds wait in the seller's settlement inbox until claimed at
+        // the venue; the next terminal visit collects them.
+        assert_eq!(world.agents[seller].wallet(), seller_wallet);
+        let owner = OrderOwner::Agent(world.agents[seller].agent_id);
+        assert_eq!(world.exchange.inbox(owner, venue).expect("inbox").mild, (cost - fee) as u64);
+        world.exchange_claim(EconActor::Agent(seller), venue).unwrap();
+        assert_eq!(world.agents[seller].wallet(), seller_wallet + cost - fee);
+        // The drill-in snapshot reflects book + exchange history + vendor refs.
         let state = world.item_market_state(ItemKind::Iron);
         assert_eq!(state.last_price, listing_price);
         assert_eq!(state.listed_units, 20);
         assert_eq!(state.best_ask, listing_price);
         assert_eq!(state.vendor_sell, 2); // Bodega floor
         assert_eq!(state.series.len(), 1);
-        // The trade tape carries the fill with both counterparties named.
+        // The trade tape carries the fill (names return with the Phase 3
+        // exchange protocol; inboxes decouple fills from identities).
         assert_eq!(state.recent_fills.len(), 1);
         let tape = &state.recent_fills[0];
         assert_eq!(tape.price_each, listing_price);
         assert_eq!(tape.count, 10);
-        assert_eq!(tape.buyer, world.agents[buyer].name);
-        assert_eq!(tape.seller, world.agents[seller].name);
     }
 
     #[test]
     fn agents_list_surplus_gear_but_keep_their_kit() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
+        world.init_exchange();
         let contested = district_anchor("NEXUS");
-        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), terminal_pos);
+        let venue = world.venue_at(EconActor::Agent(idx)).expect("at a venue");
         // Two SMGs: the best goes to the equip slot (kit), the spare is cargo.
         world.agents[idx].add_item(ItemKind::Smg, 2);
         world.agents[idx].equip_best_gear();
@@ -11573,7 +11858,13 @@ mod tests {
         world.agent_market_list(idx);
 
         let listed = |world: &World, k: ItemKind| {
-            world.market.iter().filter(|l| l.kind == k).map(|l| l.count).sum::<u32>()
+            world
+                .exchange
+                .depth(venue, Asset::Item(k), usize::MAX)
+                .1
+                .iter()
+                .map(|&(_, qty)| qty)
+                .sum::<u32>()
         };
         // The spare SMG, ammo above the 90-round reserve and the third medkit
         // hit the book; the fighting kit never does.
@@ -11589,6 +11880,7 @@ mod tests {
     fn weaponless_agents_arm_off_the_book_before_the_armory() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
+        world.init_exchange();
         let contested = district_anchor("NEXUS");
         // Haul leaning damps the capture multiplier so the errand comparison
         // (market ask vs Armory counter) is what the test exercises.
@@ -11597,19 +11889,27 @@ mod tests {
         world.agents[idx].remove_item(ItemKind::Pipe, 1);
         world.agents[idx].inventory.equipped_weapon = None;
         world.agents[idx].purse.credit(Currency::Wild, 300); // 400 total
-        // An SMG ask under the Armory's 320 counter price is the bargain path.
-        world.market.push(wilder_market::Listing {
-            id: 900,
-            seller: uuid::Uuid::new_v4(),
-            seller_name: "VEX".into(),
-            kind: ItemKind::Smg,
-            count: 1,
-            price_each: 300,
-            agent: true,
-        });
-        assert_eq!(world.market_bargain(ItemKind::Smg, 400), Some(300));
+        // An SMG ask under the Armory's 320 counter price is the bargain
+        // path (a resting ask someone left on the nearest venue's book).
+        let (venue, _) = world.nearest_venue(contested).expect("venue seeded");
+        let stranger = OrderOwner::Agent(uuid::Uuid::new_v4());
+        let placed = world
+            .exchange
+            .place(
+                stranger,
+                venue,
+                Asset::Item(ItemKind::Smg),
+                Side::Ask,
+                OrderKind::Limit { price: 300 },
+                1,
+                None,
+                MARKET_FEE_PCT,
+                0,
+            )
+            .unwrap();
+        assert_eq!(world.market_bargain(venue, ItemKind::Smg, 400), Some(300));
         // Too poor to take the ask -> no bargain.
-        assert_eq!(world.market_bargain(ItemKind::Smg, 200), None);
+        assert_eq!(world.market_bargain(venue, ItemKind::Smg, 200), None);
         world.decide_agent(idx);
         assert!(
             matches!(
@@ -11620,27 +11920,48 @@ mod tests {
             world.agents[idx].goal
         );
         // An ask above the vendor's counter price never qualifies.
-        world.market[0].price_each = 350;
-        assert_eq!(world.market_bargain(ItemKind::Smg, 400), None);
+        world.exchange.cancel(stranger, placed.order_id).unwrap();
+        world
+            .exchange
+            .place(
+                stranger,
+                venue,
+                Asset::Item(ItemKind::Smg),
+                Side::Ask,
+                OrderKind::Limit { price: 350 },
+                1,
+                None,
+                MARKET_FEE_PCT,
+                0,
+            )
+            .unwrap();
+        assert_eq!(world.market_bargain(venue, ItemKind::Smg, 400), None);
     }
 
     #[test]
     fn crafters_restock_intermediates_off_the_book() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
+        world.init_exchange();
         let contested = district_anchor("NEXUS");
         let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), contested);
         // A fairly priced intermediate (SteelPlate, ref 13: fair up to 26) is
         // wanted craft input now, not just the four raw resources.
-        world.market.push(wilder_market::Listing {
-            id: 901,
-            seller: uuid::Uuid::new_v4(),
-            seller_name: "VEX".into(),
-            kind: ItemKind::SteelPlate,
-            count: 4,
-            price_each: 20,
-            agent: true,
-        });
+        let (venue, _) = world.nearest_venue(contested).expect("venue seeded");
+        world
+            .exchange
+            .place(
+                OrderOwner::Agent(uuid::Uuid::new_v4()),
+                venue,
+                Asset::Item(ItemKind::SteelPlate),
+                Side::Ask,
+                OrderKind::Limit { price: 20 },
+                4,
+                None,
+                MARKET_FEE_PCT,
+                0,
+            )
+            .unwrap();
         world.decide_agent(idx);
         assert!(
             matches!(
@@ -11655,72 +11976,301 @@ mod tests {
     #[test]
     fn agent_ask_price_floats_with_the_book() {
         let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        let venue = world.venue_terminals[0].0;
         let base = base_value(ItemKind::Iron).max(1);
+        let iron = Asset::Item(ItemKind::Iron);
+        let a = OrderOwner::Agent(uuid::Uuid::new_v4());
+        let b = OrderOwner::Agent(uuid::Uuid::new_v4());
+        let ask = |world: &mut World, owner, price, qty| {
+            world
+                .exchange
+                .place(
+                    owner,
+                    venue,
+                    iron,
+                    Side::Ask,
+                    OrderKind::Limit { price },
+                    qty,
+                    None,
+                    MARKET_FEE_PCT,
+                    0,
+                )
+                .unwrap()
+                .order_id
+        };
+        let bid = |world: &mut World, owner, price, qty| {
+            world
+                .exchange
+                .place(
+                    owner,
+                    venue,
+                    iron,
+                    Side::Bid,
+                    OrderKind::Limit { price },
+                    qty,
+                    None,
+                    MARKET_FEE_PCT,
+                    0,
+                )
+                .unwrap();
+        };
 
         // Virgin market: list at ~110% of base value, rounded up so cheap
         // items still leave the floor (iron: ceil(2.2) = 3).
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), (base * 11).div_ceil(10));
+        assert_eq!(world.agent_ask_price(venue, ItemKind::Iron), (base * 11).div_ceil(10));
 
         // Competition on the book: undercut the cheapest ask by ~5%.
-        world.market.push(wilder_market::Listing {
-            id: 900,
-            seller: uuid::Uuid::nil(),
-            seller_name: "Vex".into(),
-            kind: ItemKind::Iron,
-            count: 5,
-            price_each: 5,
-            agent: true,
-        });
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), 4); // 5 * 95 / 100
+        let id = ask(&mut world, a, 5, 5);
+        assert_eq!(world.agent_ask_price(venue, ItemKind::Iron), 4); // 5 * 95 / 100
         // An overpriced ask is undercut but stays inside the clamp band.
-        world.market[0].price_each = 500;
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), base * 3);
-        world.market.clear();
+        world.exchange.cancel(a, id).unwrap();
+        let id = ask(&mut world, a, 500, 5);
+        assert_eq!(world.agent_ask_price(venue, ItemKind::Iron), base * 3);
+        world.exchange.cancel(a, id).unwrap();
 
         // Demand cleared the book: next ask marks up over the last fill,
         // clamped to the [base/2, base*3] band.
-        world.market_stats.record_fill(ItemKind::Iron, 5, 10, "B".into(), "S".into());
+        ask(&mut world, a, 5, 10);
+        bid(&mut world, b, 5, 10);
         assert_eq!(world.market_ref_price(ItemKind::Iron), 5);
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), (5u32 * 11).div_ceil(10).min(base * 3));
+        assert_eq!(
+            world.agent_ask_price(venue, ItemKind::Iron),
+            (5u32 * 11).div_ceil(10).min(base * 3)
+        );
         // A pathological fill price is clamped before it steers pricing.
-        world.market_stats.record_fill(ItemKind::Iron, 10_000, 1, "B".into(), "S".into());
+        ask(&mut world, a, 10_000, 1);
+        bid(&mut world, b, 10_000, 1);
         assert_eq!(world.market_ref_price(ItemKind::Iron), base * 3);
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), base * 3);
+        assert_eq!(world.agent_ask_price(venue, ItemKind::Iron), base * 3);
     }
 
     #[test]
-    fn agent_asks_decay_and_stale_stock_evicts() {
+    fn stale_agent_asks_reprice_at_the_venue() {
         let (mut world, _dir) = test_world();
-        let mk = |id: u64, kind: ItemKind, price: u32, agent: bool| wilder_market::Listing {
-            id,
-            seller: uuid::Uuid::nil(),
-            seller_name: "X".into(),
-            kind,
-            count: 3,
-            price_each: price,
-            agent,
-        };
-        // Knife base 38 -> floor 19. An overpriced agent ask walks down 5%
-        // per decay tick; the player ask never moves.
-        world.market.push(mk(1, ItemKind::Knife, 41, true));
-        world.market.push(mk(2, ItemKind::Knife, 41, false));
-        world.tick_market_decay();
-        assert_eq!(world.market[0].price_each, 38); // 41 * 95 / 100
-        assert_eq!(world.market[1].price_each, 41);
-        // Repeated decay bottoms out at the floor and stays there.
-        for _ in 0..64 {
-            world.tick_market_decay();
-        }
-        let floor = (base_value(ItemKind::Knife) / 2).max(1);
-        assert_eq!(world.market[0].price_each, floor);
-        assert_eq!(world.market[1].price_each, 41);
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        let contested = district_anchor("NEXUS");
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), terminal_pos);
+        let venue = world.venue_at(EconActor::Agent(idx)).expect("at a venue");
+        // Knife base 38 -> floor 19. An overpriced ask rests on the book.
+        world.agents[idx].add_item(ItemKind::Knife, 3);
+        let outcome = world
+            .exchange_place(
+                EconActor::Agent(idx),
+                venue,
+                Asset::Item(ItemKind::Knife),
+                Side::Ask,
+                OrderKind::Limit { price: 41 },
+                3,
+                None,
+            )
+            .unwrap();
+        world.agents[idx].resting_orders.push(outcome.order_id);
+        let now = ledger::unix_ms();
 
-        // Eviction scraps the floor-priced agent listing (burned on the
-        // ledger) but never touches player stock.
-        assert!(world.evict_stale_listing());
-        assert_eq!(world.market.len(), 1);
-        assert!(!world.market[0].agent);
-        assert!(!world.evict_stale_listing());
+        // Fresh asks never reprice; a stale one walks down ~5% per visit
+        // (cancel-and-replace at the terminal), floored at base/2.
+        world.reprice_stale_asks(idx, venue, now);
+        assert_eq!(world.exchange.best_ask(venue, Asset::Item(ItemKind::Knife)), Some(41));
+        world.reprice_stale_asks(idx, venue, now + AGENT_ASK_STALE_MS + 1);
+        assert_eq!(
+            world.exchange.best_ask(venue, Asset::Item(ItemKind::Knife)),
+            Some(38) // 41 * 95 / 100
+        );
+        // The replacement keeps the goods escrowed (nothing bounced back to
+        // the pack) and the bookkeeping tracks the new order id.
+        assert_eq!(world.agents[idx].count_item(ItemKind::Knife), 0);
+        assert_eq!(world.agents[idx].resting_orders.len(), 1);
+        assert_ne!(world.agents[idx].resting_orders[0], outcome.order_id);
+    }
+
+    #[test]
+    fn exchange_enforces_terminal_presence_and_escrow() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        let contested = district_anchor("NEXUS");
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let (venue, _) = world.nearest_venue(contested).expect("venue seeded");
+        let entity = spawn_test_player(&mut world, contested);
+        let actor = EconActor::Player(entity);
+        inv::add_items(
+            &mut world.players.get_mut(&entity).unwrap().inventory.slots,
+            ItemKind::Iron,
+            10,
+        );
+        // Remote placement is refused: the book only trades at its terminal.
+        assert!(world
+            .exchange_place(
+                actor,
+                venue,
+                Asset::Item(ItemKind::Iron),
+                Side::Ask,
+                OrderKind::Limit { price: 4 },
+                10,
+                None,
+            )
+            .is_err());
+        assert_eq!(
+            inv::count_items(&world.players[&entity].inventory.slots, ItemKind::Iron),
+            10,
+            "refused placement must not touch holdings"
+        );
+        // At the terminal the ask escrows the goods out of the pack.
+        world.players.get_mut(&entity).unwrap().character.position = terminal_pos;
+        let outcome = world
+            .exchange_place(
+                actor,
+                venue,
+                Asset::Item(ItemKind::Iron),
+                Side::Ask,
+                OrderKind::Limit { price: 4 },
+                10,
+                None,
+            )
+            .unwrap();
+        assert!(outcome.resting);
+        assert_eq!(
+            inv::count_items(&world.players[&entity].inventory.slots, ItemKind::Iron),
+            0
+        );
+        assert_eq!(world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)), Some(4));
+        // Cancel refunds the escrowed remainder back to the pack.
+        world.exchange_cancel(actor, outcome.order_id).unwrap();
+        assert_eq!(
+            inv::count_items(&world.players[&entity].inventory.slots, ItemKind::Iron),
+            10
+        );
+        assert_eq!(world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)), None);
+    }
+
+    #[test]
+    fn settlement_claims_require_the_venue_terminal() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        let contested = district_anchor("NEXUS");
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let entity = spawn_test_player(&mut world, terminal_pos);
+        let actor = EconActor::Player(entity);
+        let venue = world.venue_at(actor).expect("at a venue");
+        inv::add_items(
+            &mut world.players.get_mut(&entity).unwrap().inventory.slots,
+            ItemKind::Iron,
+            10,
+        );
+        world
+            .exchange_place(
+                actor,
+                venue,
+                Asset::Item(ItemKind::Iron),
+                Side::Ask,
+                OrderKind::Limit { price: 4 },
+                10,
+                None,
+            )
+            .unwrap();
+        // An agent walks up and buys the lot; the seller's proceeds land in
+        // the settlement inbox, not the wallet.
+        let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), terminal_pos);
+        assert!(world.agent_market_buy(buyer, ItemKind::Iron, 10, 4));
+        let owner = OrderOwner::Player(world.players[&entity].character.id);
+        let fee = 40 * MARKET_FEE_PCT / 100;
+        assert_eq!(world.exchange.inbox(owner, venue).expect("inbox").mild, (40 - fee) as u64);
+        // Claiming needs the seller back at THAT venue's terminal.
+        world.players.get_mut(&entity).unwrap().character.position =
+            terminal_pos + Vec3::new(50.0, 0.0, 0.0);
+        assert!(world.exchange_claim(actor, venue).is_err());
+        world.players.get_mut(&entity).unwrap().character.position = terminal_pos;
+        let wallet_before = world.players[&entity].purse.carried(Currency::Wild);
+        world.exchange_claim(actor, venue).unwrap();
+        assert_eq!(
+            world.players[&entity].purse.carried(Currency::Wild),
+            wallet_before + 40 - fee
+        );
+        assert!(world.exchange.inbox(owner, venue).is_none_or(|i| i.is_empty()));
+    }
+
+    #[test]
+    fn venues_price_independently() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        assert!(world.venue_terminals.len() >= 2, "hub + districts expected");
+        let va = world.venue_terminals[0].0;
+        let vb = world.venue_terminals[1].0;
+        let iron = Asset::Item(ItemKind::Iron);
+        for (venue, price) in [(va, 3), (vb, 6)] {
+            world
+                .exchange
+                .place(
+                    OrderOwner::Agent(uuid::Uuid::new_v4()),
+                    venue,
+                    iron,
+                    Side::Ask,
+                    OrderKind::Limit { price },
+                    5,
+                    None,
+                    MARKET_FEE_PCT,
+                    0,
+                )
+                .unwrap();
+        }
+        // Each venue's book stands alone: different best asks, and the
+        // floating agent price undercuts each book locally.
+        assert_eq!(world.exchange.best_ask(va, iron), Some(3));
+        assert_eq!(world.exchange.best_ask(vb, iron), Some(6));
+        assert_ne!(
+            world.agent_ask_price(va, ItemKind::Iron),
+            world.agent_ask_price(vb, ItemKind::Iron)
+        );
+    }
+
+    #[test]
+    fn exchange_state_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RocksStore::open(dir.path()).unwrap());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        std::mem::forget(_tx);
+        let mut world = new_world(store.clone(), rx);
+        let venue = world.venue_terminals[0].0;
+        let venues = world.venue_terminals.len();
+        let iron = Asset::Item(ItemKind::Iron);
+        let seller = OrderOwner::Agent(uuid::Uuid::new_v4());
+        let buyer = OrderOwner::Agent(uuid::Uuid::new_v4());
+        // A fill (price history + a settlement inbox) and a resting ask.
+        world
+            .exchange
+            .place(seller, venue, iron, Side::Ask, OrderKind::Limit { price: 5 }, 8, None, MARKET_FEE_PCT, 1_000)
+            .unwrap();
+        world
+            .exchange
+            .place(buyer, venue, iron, Side::Bid, OrderKind::Limit { price: 5 }, 3, None, MARKET_FEE_PCT, 2_000)
+            .unwrap();
+        world.save_all();
+
+        // Restart: books, inboxes and price history come back; venues are
+        // re-derived off the same deterministic terminals.
+        let (_tx2, rx2) = mpsc::unbounded_channel();
+        std::mem::forget(_tx2);
+        let world2 = new_world(store, rx2);
+        assert_eq!(world2.venue_terminals.len(), venues);
+        assert_eq!(world2.exchange.best_ask(venue, iron), Some(5));
+        assert_eq!(world2.exchange.open_orders(seller).len(), 1);
+        assert_eq!(world2.exchange.open_orders(seller)[0].remaining(), 5);
+        let fee = 15 * MARKET_FEE_PCT as u64 / 100;
+        assert_eq!(world2.exchange.inbox(seller, venue).expect("inbox").mild, 15 - fee);
+        assert_eq!(world2.exchange.inbox(buyer, venue).expect("inbox").assets, vec![(iron, 3)]);
+        assert_eq!(
+            world2.exchange.asset_summary(iron, 3_000).last_price,
+            Some(5)
+        );
     }
 
     /// Sanity benchmark: 2,000 cold agents ticking for 100 world ticks must

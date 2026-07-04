@@ -279,6 +279,17 @@ impl Exchange {
         self.settlement.inbox(venue, owner)
     }
 
+    /// Merge inbox contents back after a partial claim (the actor's pack
+    /// couldn't hold everything the claim drained).
+    pub fn return_to_inbox(&mut self, owner: OrderOwner, venue: VenueId, inbox: Inbox) {
+        self.settlement.restore(venue, owner, inbox);
+    }
+
+    /// Total resting orders across every book (diagnostics).
+    pub fn resting_order_count(&self) -> usize {
+        self.books.values().map(|b| b.iter().count()).sum()
+    }
+
     /// All of an owner's resting orders across every venue and asset.
     pub fn open_orders(&self, owner: OrderOwner) -> Vec<Order> {
         let mut orders: Vec<Order> = self

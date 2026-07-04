@@ -16,7 +16,7 @@ wilder-replication = { workspace = true }
 wilder-combat = { workspace = true }
 wilder-economy = { workspace = true }
 wilder-crafting = { workspace = true }
-wilder-market = { workspace = true }
+wilder-exchange = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

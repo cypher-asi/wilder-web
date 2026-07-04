@@ -13,6 +13,7 @@
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
+import { gpuTimer } from "./gpuTimer";
 import { perf } from "./perf";
 
 export function PerfTracker() {
@@ -21,12 +22,14 @@ export function PerfTracker() {
 
   useEffect(() => {
     perf.gl = gl;
+    gpuTimer.init(gl);
     // Let renderer.info accumulate across all passes in a frame (scene,
     // reflections, post); the registry resets it manually at frame rotation.
     const prevAutoReset = gl.info.autoReset;
     gl.info.autoReset = false;
     return () => {
       gl.info.autoReset = prevAutoReset;
+      gpuTimer.dispose();
       if (perf.gl === gl) perf.gl = null;
     };
   }, [gl]);
@@ -36,6 +39,8 @@ export function PerfTracker() {
     if (last.current > 0) perf.rotate(now - last.current);
     last.current = now;
     perf.begin("cpu.scripts");
+    // GPU query brackets the whole frame's command stream (scene + post).
+    if (perf.enabled) gpuTimer.beginFrame();
   }, -1e9);
 
   useFrame(() => {
@@ -45,6 +50,7 @@ export function PerfTracker() {
 
   useFrame(() => {
     perf.end("cpu.render");
+    gpuTimer.endFrame();
   }, 1e9);
 
   return null;

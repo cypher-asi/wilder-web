@@ -1,12 +1,20 @@
 // Performance panel: closed by default, opened with F3 or the corner chip.
-// Shows FPS + frame-time sparkline, renderer counters, and a live table of
-// every instrumented per-frame system, sorted most-expensive first. Reads the
-// perf registry at 4 Hz so the panel itself stays out of its own numbers.
+// Shows FPS + frame-time sparkline, renderer counters, and two tabs:
+//  - systems: frame time grouped by engine system (animation, rigs, shaders,
+//    world streaming, ...) with %-of-frame bars, plus whole-frame GPU time —
+//    the "what is eating the framerate" view.
+//  - sections: the raw instrumented section table, sorted most-expensive
+//    first, for drilling into a specific system.
+// Reads the perf registry at 4 Hz so the panel itself stays out of its own
+// numbers.
 
 import { useEffect, useState } from "react";
 import { perf, type PerfSnapshot } from "../perf/perf";
 
 const OPEN_KEY = "wilder.perfPanel";
+const TAB_KEY = "wilder.perfTab";
+
+type PerfTab = "systems" | "sections";
 
 function fmt(ms: number): string {
   return ms >= 10 ? ms.toFixed(1) : ms.toFixed(2);
@@ -38,7 +46,17 @@ export function PerfPanel() {
   const [open, setOpen] = useState(
     () => typeof localStorage !== "undefined" && localStorage.getItem(OPEN_KEY) === "1",
   );
+  const [tab, setTab] = useState<PerfTab>(() =>
+    typeof localStorage !== "undefined" && localStorage.getItem(TAB_KEY) === "sections"
+      ? "sections"
+      : "systems",
+  );
   const [snap, setSnap] = useState<PerfSnapshot | null>(null);
+
+  const pickTab = (next: PerfTab) => {
+    setTab(next);
+    if (typeof localStorage !== "undefined") localStorage.setItem(TAB_KEY, next);
+  };
 
   useEffect(() => {
     perf.enabled = open;
@@ -107,25 +125,86 @@ export function PerfPanel() {
             <span>dpr {snap.dpr.toFixed(2)}</span>
             <span>tier {snap.qualityTier}</span>
           </div>
-          <table className="perf-table">
-            <tbody>
-              {snap.sections.map((s) => (
-                <tr key={s.name}>
-                  <td className="perf-sec-name">{s.name}</td>
-                  <td className="perf-sec-ms">{fmt(s.avgMs)}</td>
-                  <td className="perf-sec-max">{fmt(s.maxMs)}</td>
-                </tr>
-              ))}
-              {snap.sections.length === 0 && (
-                <tr>
-                  <td className="perf-sec-name">collecting…</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          <div className="perf-foot">section ms: avg / worst</div>
+          <div className="perf-tabs">
+            <button
+              className={tab === "systems" ? "perf-tab perf-tab-on" : "perf-tab"}
+              onClick={() => pickTab("systems")}
+            >
+              systems
+            </button>
+            <button
+              className={tab === "sections" ? "perf-tab perf-tab-on" : "perf-tab"}
+              onClick={() => pickTab("sections")}
+            >
+              sections
+            </button>
+          </div>
+          {tab === "systems" ? <SystemsTab snap={snap} /> : <SectionsTab snap={snap} />}
         </>
       )}
     </div>
+  );
+}
+
+/** Frame time grouped by engine system, with %-of-frame bars + GPU readout. */
+function SystemsTab({ snap }: { snap: PerfSnapshot }) {
+  const cpuMs = snap.systems.reduce((sum, s) => sum + s.avgMs, 0);
+  return (
+    <>
+      <div className="perf-gpu-row">
+        <span>cpu {fmt(cpuMs)} ms</span>
+        <span>gpu {snap.gpuMs != null ? `${fmt(snap.gpuMs)} ms` : "n/a"}</span>
+      </div>
+      <table className="perf-table">
+        <tbody>
+          {snap.systems.map((s) => (
+            <tr key={s.name}>
+              <td className="perf-sec-name">{s.name}</td>
+              <td className="perf-sys-bar-cell">
+                <div className="perf-sys-bar">
+                  <div
+                    className="perf-sys-bar-fill"
+                    style={{ width: `${Math.min(100, s.pctOfFrame * 100).toFixed(1)}%` }}
+                  />
+                </div>
+              </td>
+              <td className="perf-sec-ms">{fmt(s.avgMs)}</td>
+              <td className="perf-sys-pct">{(s.pctOfFrame * 100).toFixed(0)}%</td>
+            </tr>
+          ))}
+          {snap.systems.length === 0 && (
+            <tr>
+              <td className="perf-sec-name">collecting…</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      <div className="perf-foot">system ms: avg / share of cpu frame</div>
+    </>
+  );
+}
+
+/** The raw instrumented section table (per begin/end site). */
+function SectionsTab({ snap }: { snap: PerfSnapshot }) {
+  return (
+    <>
+      <table className="perf-table">
+        <tbody>
+          {snap.sections.map((s) => (
+            <tr key={s.name}>
+              <td className="perf-sec-name">{s.name}</td>
+              <td className="perf-sec-ms">{fmt(s.avgMs)}</td>
+              <td className="perf-sec-max">{fmt(s.maxMs)}</td>
+            </tr>
+          ))}
+          {snap.sections.length === 0 && (
+            <tr>
+              <td className="perf-sec-name">collecting…</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      <div className="perf-foot">section ms: avg / worst</div>
+    </>
   );
 }

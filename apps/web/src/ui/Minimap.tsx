@@ -22,6 +22,7 @@ import {
 import { POI_STYLES } from "../game/poi";
 import { allRegions, MY_FACTION, REGION_SIZE, syncTerritoryUniforms } from "../game/territory";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { game, useGame } from "../state/game";
 import { RED_HEX } from "./colors";
 
@@ -151,6 +152,7 @@ export function Minimap() {
     let lastTerrSync = 0;
     const draw = (now: number) => {
       raf = requestAnimationFrame(draw);
+      perf.begin("ui.minimap");
       // The ground shader's red-tint budget follows the player: re-pick the
       // nearest hostile regions once a second as they move across the map.
       if (now - lastTerrSync > 1000) {
@@ -308,6 +310,7 @@ export function Minimap() {
       ctx.font = "700 10px dDin, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("N", SIZE / 2, 13);
+      perf.end("ui.minimap");
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);

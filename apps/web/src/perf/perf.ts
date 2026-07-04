@@ -34,6 +34,40 @@ export interface PerfSectionSnapshot {
   maxMs: number;
 }
 
+export interface PerfSystemSnapshot {
+  name: string;
+  avgMs: number;
+  maxMs: number;
+  /** share of the CPU frame (scripts + render dispatch), 0..1. */
+  pctOfFrame: number;
+}
+
+// Section -> system classification for the panel's grouped "systems" tab.
+// Sections not listed here (and the gap between cpu.scripts and its known
+// children) roll up into "other" so unattributed work stays visible.
+const SECTION_SYSTEM: Record<string, string> = {
+  "entities.anim": "animation",
+  "entities.rig": "rigs",
+  "entities.move": "movement",
+  "entities.impostors": "movement",
+  "ocean.tick": "shaders",
+  "shaders.misc": "shaders",
+  "chunks.build": "world",
+  cityProxy: "world",
+  facades: "world",
+  combatFx: "vfx",
+  camera: "camera",
+  input: "input",
+  "cpu.render": "render",
+  "ui.minimap": "ui",
+};
+
+// Sections that run outside the cpu.scripts bracket (the render dispatch, and
+// the HUD minimap which draws in its own rAF loop), so they must not be
+// subtracted when computing the "other" remainder — instead they extend the
+// frame envelope.
+const OUTSIDE_SCRIPTS = new Set(["cpu.render", "ui.minimap"]);
+
 export interface PerfSnapshot {
   fps: number;
   avgMs: number;
@@ -48,7 +82,10 @@ export interface PerfSnapshot {
   dpr: number;
   qualityTier: string;
   sections: PerfSectionSnapshot[];
+  systems: PerfSystemSnapshot[];
   sectionsEnabled: boolean;
+  /** whole-frame GPU time (EXT_disjoint_timer_query_webgl2), null if unsupported. */
+  gpuMs: number | null;
 }
 
 class Perf {
@@ -58,6 +95,10 @@ class Perf {
   gl: THREE.WebGLRenderer | null = null;
   /** Quality tier label, written by the adaptive-quality system. */
   qualityTier = "high";
+  /** Set by the GPU timer once the timer-query extension is confirmed. */
+  gpuSupported = false;
+
+  private gpuAvg = 0;
 
   private frames = new Float32Array(FRAME_WINDOW);
   private frameCount = 0;
@@ -85,6 +126,11 @@ class Perf {
       s.acc += performance.now() - s.openedAt;
       s.openedAt = 0;
     }
+  }
+
+  /** Resolved whole-frame GPU time from the timer-query pool (a few frames late). */
+  pushGpu(ms: number): void {
+    this.gpuAvg = this.gpuAvg === 0 ? ms : this.gpuAvg * SECTION_SMOOTH + ms * (1 - SECTION_SMOOTH);
   }
 
   /**
@@ -135,6 +181,46 @@ class Perf {
     }
     sections.sort((a, b) => b.avgMs - a.avgMs);
 
+    // Grouped rollup: fold each classified section into its system bucket.
+    // "other" is whatever part of the cpu.scripts envelope no classified
+    // script-side section accounts for (unmapped sections land there
+    // implicitly since they're never subtracted).
+    const buckets = new Map<string, { avg: number; max: number }>();
+    let scriptsAvg = 0;
+    let classifiedScriptsAvg = 0;
+    for (const [name, s] of this.sections) {
+      if (name === "cpu.scripts") {
+        scriptsAvg = s.avg;
+        continue;
+      }
+      const system = SECTION_SYSTEM[name];
+      if (!system) continue;
+      const b = buckets.get(system) ?? { avg: 0, max: 0 };
+      b.avg += s.avg;
+      b.max += s.max;
+      buckets.set(system, b);
+      if (!OUTSIDE_SCRIPTS.has(name)) classifiedScriptsAvg += s.avg;
+    }
+    const other = scriptsAvg - classifiedScriptsAvg;
+    if (other > 0.001) buckets.set("other", { avg: other, max: 0 });
+
+    let envelope = scriptsAvg;
+    for (const name of OUTSIDE_SCRIPTS) {
+      envelope += this.sections.get(name)?.avg ?? 0;
+    }
+    const systems: PerfSystemSnapshot[] = [];
+    for (const [name, b] of buckets) {
+      if (b.avg > 0.001 || b.max > 0.001) {
+        systems.push({
+          name,
+          avgMs: b.avg,
+          maxMs: b.max,
+          pctOfFrame: envelope > 0 ? b.avg / envelope : 0,
+        });
+      }
+    }
+    systems.sort((a, b) => b.avgMs - a.avgMs);
+
     const info = this.gl?.info;
     return {
       fps: avgMs > 0 ? 1000 / avgMs : 0,
@@ -149,7 +235,9 @@ class Perf {
       dpr: this.gl?.getPixelRatio() ?? 0,
       qualityTier: this.qualityTier,
       sections,
+      systems,
       sectionsEnabled: this.enabled,
+      gpuMs: this.gpuSupported && this.gpuAvg > 0 ? this.gpuAvg : null,
     };
   }
 }

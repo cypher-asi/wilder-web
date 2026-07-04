@@ -5,6 +5,7 @@ import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
+import { perf } from "../perf/perf";
 import { useGame } from "../state/game";
 import { mulberry, NEON_COLORS } from "./facade";
 import { groundHeightAt } from "./Ground";
@@ -52,11 +53,13 @@ export function NeonPlane({
   const phase = useMemo(() => (seed % 97) * 0.37, [seed]);
   useFrame(({ clock }) => {
     if (!mat.current) return;
+    perf.begin("shaders.misc");
     const t = clock.elapsedTime + phase;
     // Occasional dropout window (~5% of the time) plus a subtle 50Hz-ish buzz.
     const dropout = Math.sin(t * 0.7 + phase * 13) > 0.97 ? 0.15 : 1;
     const buzz = 0.92 + 0.08 * Math.sin(t * 37);
     mat.current.emissiveIntensity = 2.8 * dropout * buzz;
+    perf.end("shaders.misc");
   });
   return (
     <mesh>
@@ -193,6 +196,7 @@ function Steam({ seed }: { seed: number }) {
   useFrame(({ camera, clock }) => {
     const g = group.current;
     if (!g) return;
+    perf.begin("shaders.misc");
     for (let i = 0; i < g.children.length; i++) {
       const puff = g.children[i] as THREE.Mesh;
       const life = ((clock.elapsedTime * 0.45 + offsets[i]) % 4) / 4; // 0..1
@@ -202,6 +206,7 @@ function Steam({ seed }: { seed: number }) {
       (puff.material as THREE.MeshBasicMaterial).opacity = 0.18 * (1 - life);
       puff.quaternion.copy(camera.quaternion); // billboard
     }
+    perf.end("shaders.misc");
   });
   return (
     <group ref={group}>

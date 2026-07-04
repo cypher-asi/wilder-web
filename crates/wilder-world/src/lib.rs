@@ -909,15 +909,19 @@ struct Player {
     blueprints: HashSet<String>,
     /// Production queues per building entity (personal queues, Phase 3).
     production: HashMap<EntityId, Vec<ProductionJobState>>,
-    /// Cached account wallet (write-through to the store).
+    /// Cached account wallet (write-through to the store). At-risk: burns on
+    /// death, same as faction agents.
     wallet: u32,
+    /// Cached death-safe banked MILD (write-through to the store). Deposited
+    /// and withdrawn at a Bank; never lost on death.
+    bank: u32,
     /// Cached salvage currency (write-through to the store).
     shards: u32,
     /// Cached charge currency (write-through to the store).
     energy: u32,
-    /// Last (wild, shards, energy) sent as a WalletUpdate; None forces the
-    /// initial send after join. Checked once per tick in replicate().
-    wallet_sent: Option<(u32, u32, u32)>,
+    /// Last (wild, bank, shards, energy) sent as a WalletUpdate; None forces
+    /// the initial send after join. Checked once per tick in replicate().
+    wallet_sent: Option<(u32, u32, u32, u32)>,
     /// Quantized state last sent per entity: replicate() sends an entity in
     /// the tick snapshot only when this changed (delta replication). Loot,
     /// statics and idle actors cost nothing per tick.
@@ -1444,11 +1448,11 @@ impl World {
         }
 
         // One-time MILD grant per account (tracked in world meta).
-        let (mut wallet, shards, energy) = self
+        let (mut wallet, bank, shards, energy) = self
             .store
             .account_by_id(account)
-            .map(|a| (a.wallet, a.shards, a.energy))
-            .unwrap_or((0, 0, 0));
+            .map(|a| (a.wallet, a.bank, a.shards, a.energy))
+            .unwrap_or((0, 0, 0, 0));
         let grant_key = format!("wallet_granted_{account}");
         let granted: bool = self.store.meta(&grant_key).ok().flatten().unwrap_or(false);
         if !granted {
@@ -1501,6 +1505,7 @@ impl World {
             blueprints,
             production: HashMap::new(),
             wallet,
+            bank,
             shards,
             energy,
             wallet_sent: None,
@@ -3303,6 +3308,7 @@ impl World {
             kind: station.kind,
             offers,
             wallet: player.wallet,
+            bank: player.bank,
         });
     }
 
@@ -3468,6 +3474,44 @@ impl World {
                 );
                 // The bank's fee is the commerce that territory holders skim.
                 self.distribute_commerce(pos, fee, vendor_agent, true);
+                Ok(())
+            }
+            VendorAction::Deposit { amount } => {
+                if kind != EntityKind::Bank {
+                    return Err("only a Bank holds deposits".into());
+                }
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                let amount = amount.min(player.wallet);
+                if amount == 0 {
+                    return Err("no MILD to deposit".into());
+                }
+                player.wallet -= amount;
+                player.bank += amount;
+                let account = player.character.account_id;
+                let (wallet, bank) = (player.wallet, player.bank);
+                player.dirty = true;
+                // MILD stays in supply — it just moves from the at-risk wallet
+                // into the death-safe vault, so there's no mint/burn to record.
+                let _ = self.store.update_wallet(account, wallet);
+                let _ = self.store.update_bank(account, bank);
+                Ok(())
+            }
+            VendorAction::Withdraw { amount } => {
+                if kind != EntityKind::Bank {
+                    return Err("only a Bank holds deposits".into());
+                }
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                let amount = amount.min(player.bank);
+                if amount == 0 {
+                    return Err("nothing banked to withdraw".into());
+                }
+                player.bank -= amount;
+                player.wallet += amount;
+                let account = player.character.account_id;
+                let (wallet, bank) = (player.wallet, player.bank);
+                player.dirty = true;
+                let _ = self.store.update_wallet(account, wallet);
+                let _ = self.store.update_bank(account, bank);
                 Ok(())
             }
         }
@@ -7018,13 +7062,14 @@ impl World {
         for player in self.players.values_mut() {
             // Push currency balances whenever any of them changed (join,
             // vendor/market/bank flows, salvage, energy grants).
-            let balances = (player.wallet, player.shards, player.energy);
+            let balances = (player.wallet, player.bank, player.shards, player.energy);
             if player.wallet_sent != Some(balances) {
                 player.wallet_sent = Some(balances);
                 let _ = player.tx.send(S2C::WalletUpdate {
                     wild: balances.0,
-                    shards: balances.1,
-                    energy: balances.2,
+                    bank: balances.1,
+                    shards: balances.2,
+                    energy: balances.3,
                 });
             }
             let mut visible: Vec<EntitySnapshot> = Vec::new();
@@ -7800,6 +7845,7 @@ mod tests {
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
                 wallet: 0,
+                bank: 0,
                 shards: 0,
                 energy: 0,
                 wallet_sent: None,
@@ -8129,6 +8175,7 @@ mod tests {
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
                 wallet: 0,
+                bank: 0,
                 shards: 0,
                 energy: 0,
                 wallet_sent: None,

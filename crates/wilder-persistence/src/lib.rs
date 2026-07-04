@@ -30,8 +30,11 @@ pub struct Account {
     pub username: String,
     pub password_hash: String,
     pub created_unix: u64,
-    /// Soft currency wallet (Phase 3 market).
+    /// Soft currency wallet (Phase 3 market). At-risk: burns on death.
     pub wallet: u32,
+    /// Banked MILD: safe from death (deposited/withdrawn at a Bank).
+    #[serde(default)]
+    pub bank: u32,
     /// Salvage currency (earned by destroying items).
     #[serde(default)]
     pub shards: u32,
@@ -60,6 +63,8 @@ pub trait CharacterStore: Send + Sync {
     fn account_by_username(&self, username: &str) -> StoreResult<Account>;
     fn account_by_id(&self, id: AccountId) -> StoreResult<Account>;
     fn update_wallet(&self, id: AccountId, wallet: u32) -> StoreResult<()>;
+    /// Persist the banked (death-safe) MILD balance.
+    fn update_bank(&self, id: AccountId, bank: u32) -> StoreResult<()>;
     /// Persist the secondary currencies (Shards + Energy).
     fn update_currencies(&self, id: AccountId, shards: u32, energy: u32) -> StoreResult<()>;
 

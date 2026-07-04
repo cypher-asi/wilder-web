@@ -93,6 +93,11 @@ pub enum VendorAction {
     Sell { kind: ItemKind, count: u32 },
     /// Bank only: convert carried Cash into wallet MILD (minus the fee).
     Convert { count: u32 },
+    /// Bank only: move `amount` MILD from the at-risk wallet into the
+    /// death-safe bank balance.
+    Deposit { amount: u32 },
+    /// Bank only: move `amount` MILD from the bank back into the wallet.
+    Withdraw { amount: u32 },
     Refresh,
 }
 
@@ -134,8 +139,9 @@ pub enum S2C {
     /// XP/level progression changed (kills grant XP; sent on join too).
     XpUpdate { xp: u32, level: u32, next_level_xp: u32, gained: u32 },
     /// The receiving player's currency balances (sent on join and whenever
-    /// any of the three changes).
-    WalletUpdate { wild: u32, shards: u32, energy: u32 },
+    /// any of them change). `bank` is the death-safe stored MILD; `wild` is
+    /// the at-risk carried wallet.
+    WalletUpdate { wild: u32, bank: u32, shards: u32, energy: u32 },
     /// Authoritative ability state for the receiving player (on use + join).
     AbilityUpdate { ability: AbilityKind, cooldown: f32, active: f32 },
     Died { by: Option<String>, lost_items: bool },
@@ -152,7 +158,15 @@ pub enum S2C {
     MarketResult { ok: bool, error: Option<String> },
     /// A vendor's stock/prices plus the receiving player's wallet (sent on
     /// interact, refresh and after every vendor transaction).
-    VendorState { vendor: EntityId, kind: EntityKind, offers: Vec<VendorOffer>, wallet: u32 },
+    VendorState {
+        vendor: EntityId,
+        kind: EntityKind,
+        offers: Vec<VendorOffer>,
+        wallet: u32,
+        /// Death-safe banked MILD (relevant for the Bank deposit/withdraw UI).
+        #[serde(default)]
+        bank: u32,
+    },
     VendorResult { ok: bool, error: Option<String> },
     /// Persistent points of interest (service buildings) and named resource
     /// zones. Sent once on join so the map can label the world beyond the

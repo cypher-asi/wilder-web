@@ -27,6 +27,9 @@ Thumbs.db
 
 tools/screens/
 
+# Scratch scripts + screenshots from debugging/probing sessions
+tools/.tmp-*
+
 # City map bake source GLBs (downloaded, large)
 tools/citymap/cache/
 

@@ -17,8 +17,13 @@ projects:
         services:
           - type: web
             name: wilder-gibson
-            runtime: docker
-            dockerfilePath: ./Dockerfile
+            # Deploy a PREBUILT image, not a Dockerfile. RocksDB compiles from
+            # C++ source and exhausts Render's build machines, so all the heavy
+            # lifting happens locally (see tools/deploy/build-and-push.ps1) and
+            # Render only pulls + boots the finished image.
+            runtime: image
+            image:
+              url: ghcr.io/cypher-asi/wilder-gibson:latest
             # Real-time 20 Hz sim wants a dedicated core. `standard` (1 CPU) is
             # the minimum; `pro` (2 CPU / 4 GB) is the recommended launch size.
             # Bump to `pro plus` / `pro max` as players and agents grow.

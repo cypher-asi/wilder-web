@@ -141,3 +141,331 @@ body,
   text-transform: uppercase;
   color: rgba(151, 183, 211, 0.7);
 }
+
+/* ---------------------------------------------------------------------------
+   Agents tab (home screen): roster cards, detail drill-in, hire sheet.
+   Shares the ag-* widget styles from theme.css; m-ag-* is mobile layout only.
+--------------------------------------------------------------------------- */
+
+.m-ag {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #05060a;
+}
+
+.m-ag-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+
+.m-ag-title {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  color: var(--accent);
+  text-shadow: 0 0 12px var(--accent-dim);
+}
+
+.m-ag-count {
+  margin-left: 10px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+}
+
+.m-ag-hire-btn {
+  min-height: 44px;
+  padding: 0 16px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 12px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.m-ag-hire-btn:disabled {
+  color: var(--text-dim);
+  border-color: var(--steel-border);
+  background: transparent;
+}
+
+.m-ag-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 16px;
+}
+
+.m-ag-note {
+  padding: 16px 4px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+/* --- Roster card ----------------------------------------------------------- */
+
+.m-ag-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  min-height: 44px;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font-family: var(--font-display);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.m-ag-card:active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.m-ag-card-activity {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+/* --- Empty state ------------------------------------------------------------- */
+
+.m-ag-empty {
+  margin: auto 6px;
+  padding: 34px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch, none);
+}
+
+.m-ag-empty-glyph {
+  font-size: 34px;
+  color: var(--accent);
+  text-shadow: 0 0 18px var(--accent-dim);
+}
+
+.m-ag-empty-sub {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 260px;
+}
+
+.m-ag-cta {
+  margin-top: 6px;
+  min-height: 48px;
+  padding: 0 34px;
+  background: linear-gradient(180deg, #ffffff, #cfe4f5);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  clip-path: var(--clip-notch-sm);
+  box-shadow: 0 0 18px rgba(233, 245, 255, 0.25);
+  font: 800 13px/1 var(--font-display);
+  letter-spacing: 0.2em;
+  color: #0a141f;
+  cursor: pointer;
+}
+
+/* --- Detail page ---------------------------------------------------------------- */
+
+.m-ag-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 10px 14px 20px;
+}
+
+.m-ag-detail-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.m-ag-back {
+  min-height: 44px;
+  padding: 0 14px 0 6px;
+  background: none;
+  border: none;
+  font: 700 13px/1 var(--font-display);
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.m-ag-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.m-ag-detail-name {
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: var(--white);
+  margin-bottom: 6px;
+}
+
+.m-ag-detail-org {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.m-ag-detail-guild {
+  color: var(--text-dim);
+}
+
+.m-ag-watch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 0 14px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.m-ag-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* --- Bottom sheet ------------------------------------------------------------------ */
+
+.m-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(1, 4, 9, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  animation: m-sheet-fade 0.18s ease-out;
+}
+
+.m-sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: 85dvh;
+  background: var(--panel-solid);
+  border: 1px solid var(--panel-border);
+  border-bottom: none;
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.6);
+  animation: m-sheet-up 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
+  transition: transform 0.18s ease-out;
+  touch-action: none;
+}
+
+.m-sheet-grab {
+  flex: none;
+  padding: 10px 16px 8px;
+  cursor: grab;
+}
+
+.m-sheet-handle {
+  width: 42px;
+  height: 4px;
+  margin: 0 auto 10px;
+  border-radius: 2px;
+  background: rgba(151, 183, 211, 0.4);
+}
+
+.m-sheet-title {
+  text-align: center;
+  font: 800 13px/1 var(--font-display);
+  letter-spacing: 0.26em;
+  color: var(--accent);
+  text-shadow: 0 0 10px var(--accent-dim);
+}
+
+.m-sheet-body {
+  flex: 1;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 16px calc(16px + env(safe-area-inset-bottom));
+  touch-action: pan-y;
+}
+
+@keyframes m-sheet-up {
+  from {
+    transform: translateY(40%);
+    opacity: 0.4;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes m-sheet-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* --- Hire offers in the sheet ---------------------------------------------------- */
+
+.m-ag-offer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+}
+
+.m-ag-offer-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}

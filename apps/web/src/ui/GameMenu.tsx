@@ -40,6 +40,7 @@ const SELF_HANDLED_ESCAPE: ReadonlySet<MenuTab> = new Set([
 
 const TABS: { id: MenuTab; label: string; keycap?: string }[] = [
   { id: "map", label: "Map", keycap: "M" },
+  { id: "agents", label: "Agents" },
   { id: "leaderboard", label: "Leaderboard" },
   { id: "economy", label: "Economy", keycap: "K" },
   { id: "inventory", label: "Inventory", keycap: "B" },

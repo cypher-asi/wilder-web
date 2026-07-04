@@ -4202,3 +4202,593 @@ body {
   }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Agents (shared ag-* widgets used by the desktop AgentsScreen and the mobile
+ * Agents tab, plus the desktop two-pane screen layout).
+ * Rides on .map-overlay for the fullscreen backdrop, like the econ dashboard.
+ * ------------------------------------------------------------------------- */
+
+.ag-overlay {
+  display: flex;
+  padding: 62px 26px 16px;
+  font-family: var(--font-body);
+  cursor: default;
+}
+
+.ag-screen {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 12px;
+}
+
+.ag-roster-panel,
+.ag-detail-panel {
+  min-height: 0;
+}
+
+.ag-hire-toggle {
+  flex: none;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.ag-hire-toggle:disabled {
+  color: var(--text-dim);
+  border-color: var(--steel-border);
+  background: transparent;
+  cursor: default;
+}
+
+.ag-roster-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-roster-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  background: rgba(233, 245, 255, 0.03);
+  border: 1px solid var(--steel-border);
+  cursor: pointer;
+}
+
+.ag-roster-row:hover {
+  border-color: var(--accent-dim);
+}
+
+.ag-roster-row.active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+  box-shadow: 0 0 12px rgba(79, 195, 255, 0.15) inset;
+}
+
+.ag-roster-empty {
+  padding: 22px 10px;
+  text-align: center;
+}
+
+.ag-roster-empty-sub {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.ag-offer-row {
+  cursor: default;
+}
+
+/* --- Card / row shared bits ---------------------------------------------- */
+
+.ag-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ag-card-name {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-bright);
+}
+
+.ag-chip {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent-dim);
+  padding: 2px 7px;
+  clip-path: var(--clip-notch-sm);
+  background: var(--accent-faint);
+}
+
+.ag-card-org {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ag-card-money {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.ag-card-wild {
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.ag-card-banked {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.ag-card-cur {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+}
+
+.ag-card-earned {
+  color: #7be0c2;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* --- HP bar ---------------------------------------------------------------- */
+
+.ag-hp {
+  height: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--steel-border);
+  overflow: hidden;
+}
+
+.ag-hp-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1f7fc4, var(--accent));
+  transition: width 0.25s;
+}
+
+.ag-hp-fill.low {
+  background: linear-gradient(90deg, #7a2530, var(--alert));
+}
+
+/* --- Detail pane (desktop) -------------------------------------------------- */
+
+.ag-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ag-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ag-detail-name {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--white);
+  text-shadow: var(--rgb-split);
+  margin-bottom: 5px;
+}
+
+.ag-detail-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ag-detail-vitals {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-detail-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 22px;
+}
+
+.ag-detail-col {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-sec-title {
+  margin-top: 6px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  color: var(--text-dim);
+}
+
+.ag-goal {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(79, 195, 255, 0.35);
+}
+
+/* --- Dismiss (destructive, confirm step) ----------------------------------- */
+
+.ag-dismiss {
+  padding: 6px 10px;
+  min-height: 30px;
+  background: transparent;
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  font: 700 9px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ag-dismiss:hover {
+  color: var(--alert);
+  border-color: rgba(255, 106, 124, 0.5);
+}
+
+.ag-dismiss.yes {
+  color: var(--alert);
+  border-color: rgba(255, 106, 124, 0.6);
+  background: rgba(255, 106, 124, 0.1);
+}
+
+.ag-dismiss-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--alert);
+}
+
+/* --- Wallet strip ----------------------------------------------------------- */
+
+.ag-wallet {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.ag-wallet-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: rgba(233, 245, 255, 0.03);
+  border: 1px solid var(--steel-border);
+}
+
+.ag-wallet-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent-bright);
+}
+
+.ag-wallet-cell.earned .ag-wallet-val {
+  color: #7be0c2;
+}
+
+.ag-wallet-label {
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+}
+
+/* --- Stats grid -------------------------------------------------------------- */
+
+.ag-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.ag-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px;
+  background: rgba(233, 245, 255, 0.03);
+  border: 1px solid var(--steel-border);
+}
+
+.ag-stat-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent-bright);
+}
+
+.ag-stat-label {
+  font-size: 7px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+/* --- Trait bars --------------------------------------------------------------- */
+
+.ag-traits {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ag-trait {
+  display: grid;
+  grid-template-columns: 62px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.ag-trait-name {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-trait-bar {
+  height: 7px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--steel-border);
+  overflow: hidden;
+}
+
+.ag-trait-fill {
+  display: block;
+  height: 100%;
+  background: rgba(79, 195, 255, 0.4);
+  transition: width 0.3s;
+}
+
+.ag-trait-val {
+  text-align: right;
+  color: var(--text-dim);
+}
+
+.ag-trait.top .ag-trait-name {
+  color: var(--accent);
+}
+
+.ag-trait.top .ag-trait-fill {
+  background: linear-gradient(90deg, #1f7fc4, var(--accent));
+  box-shadow: 0 0 8px rgba(79, 195, 255, 0.6);
+}
+
+.ag-trait.top .ag-trait-val {
+  color: var(--accent-bright);
+}
+
+/* --- Inventory ------------------------------------------------------------------ */
+
+.ag-inv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-inv-equipped {
+  display: flex;
+  gap: 6px;
+}
+
+.ag-inv-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ag-inv-slot {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(233, 245, 255, 0.03);
+  border: 1px solid var(--steel-border);
+}
+
+.ag-inv-slot.equipped {
+  border-color: var(--accent-dim);
+  background: var(--accent-faint);
+  box-shadow: 0 0 8px rgba(79, 195, 255, 0.2) inset;
+}
+
+.ag-inv-slot.empty {
+  opacity: 0.45;
+}
+
+.ag-inv-dash {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ag-inv-tag {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.ag-inv-count {
+  position: absolute;
+  bottom: 1px;
+  right: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent-bright);
+  text-shadow: 0 0 4px #000;
+}
+
+/* --- Activity feed / transactions --------------------------------------------- */
+
+.ag-feed,
+.ag-txs {
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-feed-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 2px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.1);
+  font-size: 11px;
+}
+
+.ag-feed-text {
+  color: var(--text);
+}
+
+.ag-feed-age,
+.ag-tx-age {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.ag-tx-row {
+  display: grid;
+  grid-template-columns: 82px 1fr auto 34px;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.1);
+  font-size: 10.5px;
+}
+
+.ag-tx-kind {
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.ag-tx-amount.in {
+  color: #7be0c2;
+}
+
+.ag-tx-amount.out {
+  color: var(--alert);
+}
+
+.ag-tx-party {
+  color: var(--text);
+  text-align: right;
+}
+
+.ag-tx-age {
+  text-align: right;
+}
+
+.ag-empty-note {
+  padding: 8px 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* --- Hire flow (shared with the mobile sheet) ----------------------------------- */
+
+.ag-hire-banner {
+  padding: 8px 10px;
+  text-align: center;
+  font: 700 10px/1 var(--font-display);
+  letter-spacing: 0.24em;
+  color: #7be0c2;
+  border: 1px solid rgba(123, 224, 194, 0.4);
+  background: rgba(123, 224, 194, 0.08);
+  clip-path: var(--clip-notch-sm);
+}
+
+.ag-hire-error {
+  padding: 7px 10px;
+  font-size: 11px;
+  color: var(--alert);
+  border: 1px solid rgba(255, 106, 124, 0.45);
+  background: rgba(255, 106, 124, 0.08);
+}
+
+.ag-offer-btn {
+  flex: none;
+  padding: 10px 14px;
+  min-height: 44px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ag-offer-btn.free {
+  color: #7be0c2;
+  border-color: rgba(123, 224, 194, 0.5);
+  background: rgba(123, 224, 194, 0.08);
+}
+
+.ag-offer-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ag-empty-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  color: var(--accent);
+  text-shadow: 0 0 12px var(--accent-dim);
+}
+

@@ -4,12 +4,19 @@ import { ROLL_COOLDOWN } from "../game/collision";
 import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { nearestDoor } from "../render/Interior";
-import { RECIPES, RESEARCH_ENERGY, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
+import {
+  RECIPES,
+  RESEARCH_ENERGY,
+  RESEARCH_FRAGMENTS,
+  RESEARCH_RESOURCES,
+  STATION_ENERGY_CAPS,
+} from "../game/recipes";
 import { allRegions, MY_FACTION, regionOf, territoryControl } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, Currency, ItemKind } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
+import { AgentsScreen } from "./AgentsScreen";
 import { ChatWindow } from "./ChatWindow";
 import { RED_HEX } from "./colors";
 import { EconomyDashboard } from "./EconomyDashboard";
@@ -67,6 +74,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <DoorPrompt />
           <HoloMap connection={connection} />
           <EconomyDashboard connection={connection} />
+          <AgentsScreen connection={connection} />
           <PerfPanel />
           <DeathScreen />
         </>
@@ -593,6 +601,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
   const inventory = useGame((s) => s.inventory);
   const blueprints = useGame((s) => s.blueprints);
   const production = useGame((s) => s.production);
+  const wallet = useGame((s) => s.wallet);
   const set = useGame((s) => s.set);
   const [, force] = useState(0);
 
@@ -638,10 +647,22 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
   const count = (kind: string) => invCount(inventory, kind);
   const queueState = production[nearStation.id];
   const jobs = queueState?.jobs ?? [];
+  const buffered = queueState?.buffered ?? [];
+  const carriedEnergy = wallet?.energy ?? 0;
+  const energyCap = queueState?.energyCap || STATION_ENERGY_CAPS[nearStation.kind];
+  const energyUsed = queueState?.energyUsed ?? 0;
 
   const header = (
     <h3>
       {nearStation.kind}
+      {!isLab && (
+        <span
+          style={{ marginLeft: 10, fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em" }}
+          title="Building energy throughput: summed Energy of running jobs / cap. Jobs past the cap wait unpowered."
+        >
+          ⚡ POWER {energyUsed}/{energyCap}
+        </span>
+      )}
       <span
         style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }}
         onClick={() => set({ craftOpen: false })}
@@ -661,7 +682,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           Research unlocks blueprints. Cost per unlock: {RESEARCH_FRAGMENTS}x Blueprint
           Fragment ({fragments} held)
           {RESEARCH_RESOURCES.map(([k, n]) => ` · ${n}x ${shortName(k)}`).join("")}
-          {` · ${RESEARCH_ENERGY} Energy`}
+          {` · ${RESEARCH_ENERGY} Energy (${carriedEnergy} carried)`}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {locked.length === 0 && (
@@ -670,9 +691,13 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
             </div>
           )}
           {locked.map((r) => {
-            const canResearch =
-              fragments >= RESEARCH_FRAGMENTS &&
-              RESEARCH_RESOURCES.every(([k, n]) => count(k) >= n);
+            const missing: string[] = [];
+            if (fragments < RESEARCH_FRAGMENTS) missing.push("fragments");
+            for (const [k, n] of RESEARCH_RESOURCES) {
+              if (count(k) < n) missing.push(shortName(k).toLowerCase());
+            }
+            if (carriedEnergy < RESEARCH_ENERGY) missing.push("Energy");
+            const canResearch = missing.length === 0;
             return (
               <div
                 key={r.id}
@@ -693,7 +718,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                   cursor: canResearch ? "pointer" : "default",
                   opacity: canResearch ? 1 : 0.55,
                 }}
-                title={canResearch ? "Click to research" : "Missing fragments/resources"}
+                title={canResearch ? "Click to research" : `Missing: ${missing.join(", ")}`}
               >
                 <div>
                   <div style={{ fontSize: 12, color: "var(--text)" }}>{shortName(r.output[0])}</div>
@@ -720,32 +745,57 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
       {header}
       {jobs.length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>QUEUE</div>
-          {jobs.map((job, i) => {
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
+            QUEUE — SHARED
+          </div>
+          {jobs.map((job) => {
             const recipe = RECIPES.find((r) => r.id === job.recipe);
             const seconds = recipe?.seconds ?? 1;
-            const head = i === 0;
-            // Interpolate the head job's countdown between server updates.
-            const elapsed = head && job.powered ? (now - (queueState?.at ?? now)) / 1000 : 0;
+            const mine = job.mine ?? true;
+            // Interpolate powered jobs' countdowns between server updates.
+            const elapsed = job.powered ? (now - (queueState?.at ?? now)) / 1000 : 0;
             const remaining = Math.max(0, Math.min(job.remaining - elapsed, seconds));
-            const unitPct = head ? 1 - remaining / seconds : 0;
+            const unitPct = job.powered ? 1 - remaining / seconds : 0;
             const pct = (job.done + unitPct) / job.count;
+            const label = recipe ? shortName(recipe.output[0]) : job.recipe;
             return (
-              <div key={job.id} style={{ marginBottom: 6 }}>
+              <div key={job.id} style={{ marginBottom: 6, opacity: mine ? 1 : 0.55 }}>
                 <div
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 6,
                     fontSize: 11,
                     color: "var(--text)",
                   }}
                 >
                   <span>
-                    {recipe ? shortName(recipe.output[0]) : job.recipe} {job.done}/{job.count}
+                    {mine ? label : `${job.owner || "OTHER"} job — ${label}`} {job.done}/
+                    {job.count}
                   </span>
-                  <span style={{ color: job.powered || !head ? "var(--accent)" : "var(--alert)" }}>
-                    {head ? (job.powered ? "POWERED" : "NO POWER — WAITING") : "QUEUED"}
+                  <span
+                    style={{
+                      marginLeft: "auto",
+                      color: job.powered ? "var(--accent)" : "var(--alert)",
+                    }}
+                  >
+                    {job.powered ? "POWERED" : "WAITING FOR POWER"}
                   </span>
+                  {mine && (
+                    <span
+                      title="Cancel — refunds inputs + Energy for uncompleted units"
+                      style={{ color: "var(--alert)", cursor: "pointer", padding: "0 2px" }}
+                      onClick={() =>
+                        connection.send({
+                          t: "CancelProduction",
+                          d: { building: nearStation.id, job_id: job.id },
+                        })
+                      }
+                    >
+                      ✕
+                    </span>
+                  )}
                 </div>
                 <div className="hp-bar" style={{ height: 6 }}>
                   <div
@@ -764,10 +814,49 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           })}
         </div>
       )}
+      {buffered.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            padding: "6px 8px",
+            marginBottom: 12,
+            border: "1px solid var(--accent-dim)",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>
+              OUTPUT BUFFER
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text)" }}>
+              {buffered.map((s) => `${s.count}x ${shortName(s.kind)}`).join(" · ")}
+            </div>
+          </div>
+          <div
+            title="Collect finished goods into your backpack"
+            style={{
+              fontSize: 10,
+              color: "var(--accent)",
+              border: "1px solid var(--accent-dim)",
+              padding: "2px 8px",
+              cursor: "pointer",
+            }}
+            onClick={() =>
+              connection.send({ t: "CollectProduction", d: { building: nearStation.id } })
+            }
+          >
+            COLLECT
+          </div>
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {recipes.map((r) => {
           const known = blueprints.includes(r.id);
-          const canQueue = known && r.inputs.every(([kind, n]) => count(kind) >= n);
+          const hasInputs = r.inputs.every(([kind, n]) => count(kind) >= n);
+          const hasEnergy = carriedEnergy >= r.energy;
+          const canQueue = known && hasInputs && hasEnergy;
           return (
             <div
               key={r.id}
@@ -783,9 +872,11 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
               title={
                 !known
                   ? "Blueprint not researched (Laboratory)"
-                  : canQueue
-                    ? "Queue production"
-                    : "Missing inputs"
+                  : !hasInputs
+                    ? "Missing inputs"
+                    : !hasEnergy
+                      ? `Not enough Energy (${carriedEnergy}/${r.energy} carried)`
+                      : "Queue production"
               }
             >
               <div>
@@ -799,30 +890,44 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
                     .map(([kind, n]) => `${shortName(kind)} ${count(kind)}/${n}`)
                     .join(" · ")}
                   {` · ${r.seconds}s`}
+                  <span style={{ color: hasEnergy ? "var(--text-dim)" : "var(--alert)" }}>
+                    {` · ⚡${r.energy}/unit`}
+                  </span>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                {[1, 5].map((n) => (
-                  <div
-                    key={n}
-                    onClick={() => {
-                      if (!canQueue) return;
-                      connection.send({
-                        t: "QueueProduction",
-                        d: { building: nearStation.id, recipe: r.id, count: n },
-                      });
-                    }}
-                    style={{
-                      fontSize: 10,
-                      color: canQueue ? "var(--accent)" : "var(--text-dim)",
-                      border: `1px solid ${canQueue ? "var(--accent-dim)" : "var(--steel-border)"}`,
-                      padding: "2px 6px",
-                      cursor: canQueue ? "pointer" : "default",
-                    }}
-                  >
-                    x{n}
-                  </div>
-                ))}
+                {[1, 5].map((n) => {
+                  const batchOk =
+                    canQueue &&
+                    carriedEnergy >= r.energy * n &&
+                    r.inputs.every(([kind, c]) => count(kind) >= c * n);
+                  return (
+                    <div
+                      key={n}
+                      onClick={() => {
+                        if (!batchOk) return;
+                        connection.send({
+                          t: "QueueProduction",
+                          d: { building: nearStation.id, recipe: r.id, count: n },
+                        });
+                      }}
+                      title={
+                        batchOk
+                          ? `Queue x${n} (${r.energy * n} Energy)`
+                          : `Need inputs + ${r.energy * n} Energy for x${n}`
+                      }
+                      style={{
+                        fontSize: 10,
+                        color: batchOk ? "var(--accent)" : "var(--text-dim)",
+                        border: `1px solid ${batchOk ? "var(--accent-dim)" : "var(--steel-border)"}`,
+                        padding: "2px 6px",
+                        cursor: batchOk ? "pointer" : "default",
+                      }}
+                    >
+                      x{n}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           );
@@ -1263,7 +1368,9 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
         {offers.map((offer) => {
           const held = invCount(inventory, offer.kind);
           const canBuy = offer.buy > 0 && offer.stock > 0 && (wallet ?? 0) >= offer.buy;
-          const canSell = offer.sell > 0 && held > 0;
+          // Mirror of wilder-economy VENDOR_STOCK_CAP: full shelves refuse buys.
+          const shelfFull = offer.stock >= 200;
+          const canSell = offer.sell > 0 && held > 0 && !shelfFull;
           return (
             <div
               key={offer.kind}
@@ -1287,7 +1394,14 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
                       : "sold out"
                     : ""}
                   {offer.buy > 0 && offer.sell > 0 ? " · " : ""}
-                  {offer.sell > 0 ? `sell ${offer.sell}` : ""}
+                  {offer.sell > 0
+                    ? shelfFull
+                      ? `sell ${offer.sell} · vendor full`
+                      : `sell ${offer.sell}`
+                    : ""}
+                  {offer.buy === 0 && offer.sell > 0 && !shelfFull && offer.stock > 0
+                    ? ` · ${offer.stock} on shelf`
+                    : ""}
                   {held > 0 ? ` · ${held} held` : ""}
                 </div>
               </div>
@@ -1315,6 +1429,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
                     onClick={() => {
                       if (canSell) sendVendor({ t: "Sell", d: { kind: offer.kind, count: held } });
                     }}
+                    title={shelfFull ? "Vendor shelf is full — sell elsewhere" : undefined}
                     style={{
                       fontSize: 10,
                       color: canSell ? "#ffcc66" : "var(--text-dim)",
@@ -1323,7 +1438,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
                       cursor: canSell ? "pointer" : "default",
                     }}
                   >
-                    SELL ALL
+                    {shelfFull ? "FULL" : "SELL ALL"}
                   </div>
                 )}
               </div>

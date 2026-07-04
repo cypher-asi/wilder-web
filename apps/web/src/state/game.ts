@@ -435,6 +435,7 @@ export const initialAbilities = (): Record<AbilityKind, AbilityUiState> => ({
  */
 export type MenuTab =
   | "map"
+  | "agents"
   | "leaderboard"
   | "economy"
   | "inventory"
@@ -479,8 +480,19 @@ interface UiState {
   craftOpen: boolean;
   /** Known blueprint recipe ids (server-authoritative). */
   blueprints: string[];
-  /** Production queues per building entity id (+ receive time for interpolation). */
-  production: Record<number, { jobs: ProductionJob[]; at: number }>;
+  /** Production state per building entity id: shared queue, the player's own
+   * uncollected output buffer, the building's energy cap/usage, and the
+   * receive time (interpolates the head job's countdown between pushes). */
+  production: Record<
+    number,
+    {
+      jobs: ProductionJob[];
+      buffered: ItemStack[];
+      energyCap: number;
+      energyUsed: number;
+      at: number;
+    }
+  >;
   /** Market snapshot (listings + wallet), refreshed by the server. */
   market: { listings: MarketListing[]; wallet: number } | null;
   /** Near the market terminal (enables the market panel). */
@@ -525,6 +537,8 @@ interface UiState {
   agentHireOffers: AgentSummary[] | null;
   /** Last hire/dismiss/detail-sub result (at = receive time, ms). */
   agentResult: { ok: boolean; error: string | null; at: number } | null;
+  /** Agent the Watch tab should follow ("Watch live" hand-off; Phase 4 reads). */
+  watchAgentId: string | null;
   /** Central full-screen game menu (Escape). Hosts every full-screen section
    * (map, leaderboard, economy, inventory, settings, exit) as a tab. */
   menuOpen: boolean;
@@ -649,6 +663,7 @@ export const useGame: import("zustand").UseBoundStore<
   agentDetail: null,
   agentHireOffers: null,
   agentResult: null,
+  watchAgentId: null,
   menuOpen: false,
   menuTab: "map",
   mobileTab: "agents",

@@ -8794,6 +8794,99 @@ mod tests {
     }
 
     #[test]
+    fn agents_list_surplus_gear_but_keep_their_kit() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
+        // Two SMGs: the best goes to the equip slot (kit), the spare is cargo.
+        world.agents[idx].add_item(ItemKind::Smg, 2);
+        world.agents[idx].equip_best_gear();
+        world.agents[idx].add_item(ItemKind::Ammo9mm, 100);
+        world.agents[idx].add_item(ItemKind::Medkit, 3);
+        world.agent_market_list(idx);
+
+        let listed = |world: &World, k: ItemKind| {
+            world.market.iter().filter(|l| l.kind == k).map(|l| l.count).sum::<u32>()
+        };
+        // The spare SMG, ammo above the 90-round reserve and the third medkit
+        // hit the book; the fighting kit never does.
+        assert_eq!(listed(&world, ItemKind::Smg), 1);
+        assert_eq!(listed(&world, ItemKind::Ammo9mm), 10);
+        assert_eq!(listed(&world, ItemKind::Medkit), 1);
+        assert_eq!(world.agents[idx].inventory.equipped_weapon, Some(ItemKind::Smg));
+        assert_eq!(world.agents[idx].count_item(ItemKind::Ammo9mm), 90);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Medkit), 2);
+    }
+
+    #[test]
+    fn weaponless_agents_arm_off_the_book_before_the_armory() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        // Haul leaning damps the capture multiplier so the errand comparison
+        // (market ask vs Armory counter) is what the test exercises.
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::hauler(), contested);
+        // Fully disarm: the spawn Pipe may sit in the pack or the equip slot.
+        world.agents[idx].remove_item(ItemKind::Pipe, 1);
+        world.agents[idx].inventory.equipped_weapon = None;
+        world.agents[idx].purse.credit(Currency::Wild, 300); // 400 total
+        // An SMG ask under the Armory's 320 counter price is the bargain path.
+        world.market.push(wilder_market::Listing {
+            id: 900,
+            seller: uuid::Uuid::new_v4(),
+            seller_name: "VEX".into(),
+            kind: ItemKind::Smg,
+            count: 1,
+            price_each: 300,
+            agent: true,
+        });
+        assert_eq!(world.market_bargain(ItemKind::Smg, 400), Some(300));
+        // Too poor to take the ask -> no bargain.
+        assert_eq!(world.market_bargain(ItemKind::Smg, 200), None);
+        world.decide_agent(idx);
+        assert!(
+            matches!(
+                world.agents[idx].goal,
+                Goal::BuyMarket { kind: ItemKind::Smg, max_each: 300, .. }
+            ),
+            "expected a market-first weapon buy, got {:?}",
+            world.agents[idx].goal
+        );
+        // An ask above the vendor's counter price never qualifies.
+        world.market[0].price_each = 350;
+        assert_eq!(world.market_bargain(ItemKind::Smg, 400), None);
+    }
+
+    #[test]
+    fn crafters_restock_intermediates_off_the_book() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), contested);
+        // A fairly priced intermediate (SteelPlate, ref 13: fair up to 26) is
+        // wanted craft input now, not just the four raw resources.
+        world.market.push(wilder_market::Listing {
+            id: 901,
+            seller: uuid::Uuid::new_v4(),
+            seller_name: "VEX".into(),
+            kind: ItemKind::SteelPlate,
+            count: 4,
+            price_each: 20,
+            agent: true,
+        });
+        world.decide_agent(idx);
+        assert!(
+            matches!(
+                world.agents[idx].goal,
+                Goal::BuyMarket { kind: ItemKind::SteelPlate, .. }
+            ),
+            "expected an intermediate-material restock, got {:?}",
+            world.agents[idx].goal
+        );
+    }
+
+    #[test]
     fn agent_ask_price_floats_with_the_book() {
         let (mut world, _dir) = test_world();
         let base = base_value(ItemKind::Iron).max(1);

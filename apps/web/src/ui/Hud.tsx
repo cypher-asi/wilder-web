@@ -5,7 +5,7 @@ import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { nearestDoor } from "../render/Interior";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
-import { regionOf, territoryControl } from "../game/territory";
+import { allRegions, MY_FACTION, regionOf, territoryControl } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
@@ -48,6 +48,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <div className="minimap-panel">
             <Minimap />
             <ZoneReadout />
+            <TerritoryTally />
             <PositionReadout />
           </div>
           <div className="comms-panel">
@@ -1366,10 +1367,13 @@ const SCRAMBLE_CHARS = "!<>-_\\/[]{}#%$&*+=?";
  * (CSS RGB-split + a JS character scramble) and the glitch cue plays a single
  * time - subtle, not repetitive.
  */
+const RESPAWN_LOCKOUT_MS = 5000;
+
 function DeathScreen() {
   const death = useGame((s) => s.death);
   const [title, setTitle] = useState(TITLE_TEXT);
   const [shown, setShown] = useState(0);
+  const [remainingMs, setRemainingMs] = useState(RESPAWN_LOCKOUT_MS);
 
   // Assemble the BSOD body as one string; the typewriter reveals a prefix.
   const body = death ? buildDeathBody(death) : "";
@@ -1415,9 +1419,25 @@ function DeathScreen() {
     playGlitch(0.28);
   }, [death?.at]);
 
+  // Respawn lockout: a 5s countdown must elapse before any key will reboot us.
+  // This prevents a mashed key from instantly skipping the death screen and
+  // gives the moment room to land.
+  useEffect(() => {
+    if (!death) return;
+    const start = performance.now();
+    setRemainingMs(RESPAWN_LOCKOUT_MS);
+    const timer = setInterval(() => {
+      const left = Math.max(0, RESPAWN_LOCKOUT_MS - (performance.now() - start));
+      setRemainingMs(left);
+      if (left <= 0) clearInterval(timer);
+    }, 100);
+    return () => clearInterval(timer);
+  }, [death?.at]);
+
   // A keyboard key respawns: first press finishes the typewriter, the next
-  // dismisses. Mouse clicks are intentionally ignored so a stray click during
-  // combat can't skip the death screen - the player must reboot deliberately.
+  // dismisses - but only once the lockout countdown has elapsed. Mouse clicks
+  // are intentionally ignored so a stray click during combat can't skip the
+  // death screen - the player must reboot deliberately.
   useEffect(() => {
     if (!death) return;
     const dismiss = () => useGame.getState().set({ death: null });
@@ -1425,17 +1445,19 @@ function DeathScreen() {
       e.preventDefault();
       e.stopPropagation();
       if (shown < body.length) setShown(body.length);
-      else dismiss();
+      else if (remainingMs <= 0) dismiss();
     };
     window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [death, shown, body.length]);
+  }, [death, shown, body.length, remainingMs]);
 
   if (!death) return null;
 
   const done = shown >= body.length;
+  const locked = remainingMs > 0;
+  const secondsLeft = Math.ceil(remainingMs / 1000);
   return (
     <div className="bsod" key={death.at}>
       <div className="bsod-inner">
@@ -1444,7 +1466,19 @@ function DeathScreen() {
         </div>
         <pre className="bsod-body">
           {body.slice(0, shown)}
-          {done && <span className="bsod-cursor">_</span>}
+          {done && (
+            <>
+              {"\n\n"}
+              {locked ? (
+                <span className="bsod-lockout">
+                  {`* Rebooting in ${secondsLeft}\u2026`}
+                </span>
+              ) : (
+                <span className="bsod-ready">* Press any key to respawn.</span>
+              )}
+              <span className="bsod-cursor">_</span>
+            </>
+          )}
         </pre>
       </div>
     </div>
@@ -1471,7 +1505,6 @@ function buildDeathBody(death: import("../state/game").DeathInfo): string {
     "",
     death.errorCode,
     "",
-    "* Press any key to respawn.",
     "* If this screen reappears, the extraction network is down.",
   ].join("\n");
 }
@@ -1583,6 +1616,80 @@ function ZoneReadout() {
       <span className="hud-zone-owner" style={{ color }}>
         {faction ? faction.name.toUpperCase() : "UNCLAIMED"}
       </span>
+    </div>
+  );
+}
+
+/**
+ * Live territory tally under the minimap: how many squares (regions) your
+ * faction holds, then a per-faction breakdown sorted by who is holding the
+ * most, for an at-a-glance read on who is winning. Counts come from the
+ * client-side control cache (`allRegions`), so no menu/subscription needed.
+ */
+function TerritoryTally() {
+  const factions = useGame((s) => s.factions);
+  const [counts, setCounts] = useState<Record<number, number>>({});
+  useEffect(() => {
+    const read = () => {
+      const next: Record<number, number> = {};
+      for (const r of allRegions()) next[r.faction] = (next[r.faction] ?? 0) + 1;
+      setCounts((prev) => {
+        const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+        for (const k of keys) {
+          if (prev[Number(k)] !== next[Number(k)]) return next;
+        }
+        return prev;
+      });
+    };
+    read();
+    const timer = setInterval(read, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const total = Object.values(counts).reduce((a, n) => a + n, 0);
+  const mine = counts[MY_FACTION] ?? 0;
+  const rows = Object.entries(counts)
+    .map(([id, n]) => ({ id: Number(id), n }))
+    .filter((r) => r.n > 0)
+    .sort((a, b) => b.n - a.n);
+
+  return (
+    <div className="hud-terr">
+      <div className="hud-terr-you">
+        <span className="hud-terr-label">SECURED (YOU)</span>
+        <span className="hud-terr-count">{mine}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="hud-terr-empty">No territory held</div>
+      ) : (
+        <div className="hud-terr-list">
+          {rows.map((r) => {
+            const faction = factions.find((f) => f.id === r.id);
+            const color = faction
+              ? `#${faction.color.toString(16).padStart(6, "0")}`
+              : "var(--text-dim)";
+            const pct = total > 0 ? (r.n / total) * 100 : 0;
+            return (
+              <div
+                key={r.id}
+                className={r.id === MY_FACTION ? "hud-terr-row you" : "hud-terr-row"}
+              >
+                <span className="hud-terr-dot" style={{ background: color }} />
+                <span className="hud-terr-name" style={{ color }}>
+                  {faction ? faction.name.toUpperCase() : "UNALIGNED"}
+                </span>
+                <span className="hud-terr-bar">
+                  <span
+                    className="hud-terr-bar-fill"
+                    style={{ width: `${pct}%`, background: color }}
+                  />
+                </span>
+                <span className="hud-terr-count">{r.n}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

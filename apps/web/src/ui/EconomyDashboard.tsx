@@ -14,11 +14,13 @@ import {
   FactionId,
   FactionInfo,
   ItemKind,
+  PriceBucket,
   TxAmount,
   TxKind,
   TxParty,
 } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
+import { allRegions, MY_FACTION } from "../game/territory";
 import { useGame } from "../state/game";
 import { ITEM_INFO, ItemCategory, ItemIcon, itemLabel } from "./ItemIcon";
 
@@ -162,7 +164,7 @@ const CATEGORY_LABEL: Record<ItemCategory | "all", string> = {
 
 const ALL_KINDS = Object.keys(ITEM_INFO) as ItemKind[];
 
-function SupplyPanel() {
+function SupplyPanel({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
   const economy = useGame((s) => s.economy);
   const [category, setCategory] = useState<ItemCategory | "all">("all");
 
@@ -182,7 +184,10 @@ function SupplyPanel() {
 
   return (
     <div className="econ-panel econ-supply">
-      <div className="econ-panel-title">ITEM SUPPLY</div>
+      <div className="econ-panel-title">
+        ITEM SUPPLY
+        <span className="econ-panel-sub">CLICK AN ITEM FOR ITS MARKET</span>
+      </div>
       <div className="econ-tabs">
         {CATEGORY_ORDER.map((c) => (
           <div
@@ -202,7 +207,12 @@ function SupplyPanel() {
       </div>
       <div className="econ-supply-list">
         {rows.map((r) => (
-          <div key={r.kind} className="econ-supply-row">
+          <div
+            key={r.kind}
+            className="econ-supply-row econ-supply-row-link"
+            onClick={() => onSelect(r.kind)}
+            title={`View the ${itemLabel(r.kind)} market`}
+          >
             <span className="econ-supply-item">
               <i
                 className="econ-supply-tick"
@@ -210,6 +220,7 @@ function SupplyPanel() {
               />
               <ItemIcon kind={r.kind} size={18} />
               {itemLabel(r.kind)}
+              <span className="econ-supply-ticker">{ITEM_INFO[r.kind].ticker}</span>
             </span>
             <span className="num">{r.minted.toLocaleString()}</span>
             <span className="num econ-burned">{r.burned.toLocaleString()}</span>
@@ -417,6 +428,313 @@ function TxFeed() {
 }
 
 // ---------------------------------------------------------------------------
+// Item market drill-in (ItemMarketSub / ItemMarketState)
+// ---------------------------------------------------------------------------
+
+type RangeId = "1h" | "6h" | "24h" | "all";
+
+const RANGES: { id: RangeId; label: string; ms: number | null }[] = [
+  { id: "1h", label: "1H", ms: 60 * 60 * 1000 },
+  { id: "6h", label: "6H", ms: 6 * 60 * 60 * 1000 },
+  { id: "24h", label: "24H", ms: 24 * 60 * 60 * 1000 },
+  { id: "all", label: "ALL", ms: null },
+];
+
+const CHART_UP = "#7be0c2";
+const CHART_DOWN = "#ff6a7c";
+const CHART_LINE = "#4fc3ff";
+const CHART_DIM = "#7f8ea0";
+
+function formatClock(t: number, longRange: boolean): string {
+  const d = new Date(t);
+  if (longRange) {
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Custom SVG price chart: volume-weighted average line with a min/max fill
+ * band, volume bars along the bottom, price gridlines and a hover crosshair.
+ * No chart library — pure SVG on the dashboard palette.
+ */
+function PriceChart({ buckets, rangeMs }: { buckets: PriceBucket[]; rangeMs: number | null }) {
+  const [hover, setHover] = useState<number | null>(null);
+
+  // Fixed virtual canvas; the SVG scales to its container.
+  const W = 760;
+  const H = 300;
+  const PAD_T = 12;
+  const PAD_R = 56;
+  const VOL_H = 36;
+  const AXIS_H = 20;
+  const plotW = W - PAD_R;
+  const plotH = H - PAD_T - VOL_H - AXIS_H - 8;
+  const volTop = PAD_T + plotH + 6;
+
+  const now = Date.now();
+  const t1 = now;
+  const t0 = rangeMs !== null ? now - rangeMs : Math.min(buckets[0]?.t ?? now - 3_600_000, now - 60_000);
+  const pts = useMemo(() => buckets.filter((b) => b.t >= t0), [buckets, t0]);
+
+  if (pts.length === 0) {
+    return <div className="econ-empty econ-chart-empty">No trades in this window yet.</div>;
+  }
+
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (const b of pts) {
+    yMin = Math.min(yMin, b.min);
+    yMax = Math.max(yMax, b.max);
+  }
+  const pad = Math.max((yMax - yMin) * 0.12, Math.max(1, yMax * 0.06));
+  yMin = Math.max(0, yMin - pad);
+  yMax = yMax + pad;
+
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * plotW;
+  const y = (v: number) => PAD_T + (1 - (v - yMin) / Math.max(1e-6, yMax - yMin)) * plotH;
+
+  const line = pts.map((b, i) => `${i === 0 ? "M" : "L"}${x(b.t).toFixed(1)},${y(b.avg).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(pts[pts.length - 1].t).toFixed(1)},${(PAD_T + plotH).toFixed(1)} L${x(pts[0].t).toFixed(1)},${(PAD_T + plotH).toFixed(1)} Z`;
+  const band =
+    pts.map((b, i) => `${i === 0 ? "M" : "L"}${x(b.t).toFixed(1)},${y(b.max).toFixed(1)}`).join(" ") +
+    " " +
+    [...pts].reverse().map((b) => `L${x(b.t).toFixed(1)},${y(b.min).toFixed(1)}`).join(" ") +
+    " Z";
+
+  const maxVol = Math.max(...pts.map((b) => b.wild), 1);
+  const barW = Math.min(14, Math.max(2, (plotW / pts.length) * 0.6));
+
+  // 4 horizontal price gridlines.
+  const gridLevels = [0, 1 / 3, 2 / 3, 1].map((f) => yMin + f * (yMax - yMin));
+  // 4 time axis labels.
+  const longRange = t1 - t0 > 24 * 60 * 60 * 1000;
+  const timeMarks = [0, 1 / 3, 2 / 3, 1].map((f) => t0 + f * (t1 - t0));
+
+  const rising = pts[pts.length - 1].avg >= pts[0].avg;
+  const lineColor = pts.length > 1 ? (rising ? CHART_UP : CHART_DOWN) : CHART_LINE;
+  const h = hover !== null ? pts[hover] : null;
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(x(pts[i].t) - vx);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    setHover(best);
+  };
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="econ-chart"
+      onMouseMove={onMove}
+      onMouseLeave={() => setHover(null)}
+    >
+      <defs>
+        <linearGradient id="econ-chart-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={lineColor} stopOpacity="0.28" />
+          <stop offset="100%" stopColor={lineColor} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+
+      {gridLevels.map((v, i) => (
+        <g key={i}>
+          <line x1={0} y1={y(v)} x2={plotW} y2={y(v)} stroke="rgba(159,180,200,0.14)" strokeWidth="1" />
+          <text x={plotW + 8} y={y(v) + 3.5} fill={CHART_DIM} fontSize="11" fontFamily="inherit">
+            {Math.round(v).toLocaleString()}
+          </text>
+        </g>
+      ))}
+
+      {/* min/max fill band under the average line */}
+      <path d={band} fill={lineColor} opacity="0.10" />
+      <path d={area} fill="url(#econ-chart-fill)" />
+      <path d={line} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" />
+      {pts.length === 1 && <circle cx={x(pts[0].t)} cy={y(pts[0].avg)} r="3.5" fill={lineColor} />}
+
+      {/* volume bars */}
+      {pts.map((b, i) => (
+        <rect
+          key={b.t}
+          x={Math.min(Math.max(x(b.t) - barW / 2, 0), plotW - barW)}
+          y={volTop + (1 - b.wild / maxVol) * VOL_H}
+          width={barW}
+          height={Math.max(1.5, (b.wild / maxVol) * VOL_H)}
+          fill={hover === i ? lineColor : "rgba(79,195,255,0.30)"}
+        />
+      ))}
+
+      {/* time axis */}
+      {timeMarks.map((t, i) => (
+        <text
+          key={i}
+          x={Math.min(x(t), plotW - 4)}
+          y={H - 5}
+          fill={CHART_DIM}
+          fontSize="11"
+          textAnchor={i === 0 ? "start" : i === timeMarks.length - 1 ? "end" : "middle"}
+        >
+          {formatClock(t, longRange)}
+        </text>
+      ))}
+
+      {/* hover crosshair + readout */}
+      {h && (
+        <g pointerEvents="none">
+          <line x1={x(h.t)} y1={PAD_T} x2={x(h.t)} y2={volTop + VOL_H} stroke="rgba(234,247,255,0.35)" strokeWidth="1" strokeDasharray="3 3" />
+          <circle cx={x(h.t)} cy={y(h.avg)} r="4" fill={lineColor} stroke="#0a1118" strokeWidth="1.5" />
+          <g transform={`translate(${Math.min(Math.max(x(h.t) - 92, 2), plotW - 186)}, ${PAD_T})`}>
+            <rect width="184" height="34" rx="2" fill="rgba(8,14,20,0.92)" stroke="rgba(79,195,255,0.35)" strokeWidth="1" />
+            <text x="8" y="14" fill="#eaf7ff" fontSize="11.5" fontWeight="700">
+              {h.avg.toLocaleString()} WILD
+              {h.min !== h.max ? `  (${h.min.toLocaleString()}–${h.max.toLocaleString()})` : ""}
+            </text>
+            <text x="8" y="27" fill={CHART_DIM} fontSize="10.5">
+              {h.units.toLocaleString()} units · {h.fills} fill{h.fills === 1 ? "" : "s"} · {formatClock(h.t, longRange)}
+            </text>
+          </g>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+function ItemStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="econ-item-stat">
+      <span className="econ-item-stat-label">{label}</span>
+      <span className="num econ-item-stat-value" style={tone ? { color: tone } : undefined}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * CoinMarketCap-style drill-in for one item kind: header (icon, name, ticker,
+ * description, live price + range change), the price/volume chart and the
+ * market detail stats. Data streams via ItemMarketSub while open.
+ */
+function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }) {
+  const data = useGame((s) => (s.itemMarket?.kind === kind ? s.itemMarket : null));
+  const [range, setRange] = useState<RangeId>("6h");
+  const info = ITEM_INFO[kind];
+  const rangeMs = RANGES.find((r) => r.id === range)?.ms ?? null;
+
+  const series = data?.series ?? [];
+  const inRange = useMemo(() => {
+    if (rangeMs === null) return series;
+    const t0 = Date.now() - rangeMs;
+    return series.filter((b) => b.t >= t0);
+  }, [series, rangeMs]);
+
+  // Change over the visible window (first vs last bucket average).
+  const change =
+    inRange.length >= 2 && inRange[0].avg > 0
+      ? ((inRange[inRange.length - 1].avg - inRange[0].avg) / inRange[0].avg) * 100
+      : null;
+  const rangeVolume = inRange.reduce((n, b) => n + b.wild, 0);
+  const rangeUnits = inRange.reduce((n, b) => n + b.units, 0);
+  const rangeFills = inRange.reduce((n, b) => n + b.fills, 0);
+
+  const n = (v: number | undefined) => (v ?? 0).toLocaleString();
+  const wildOrDash = (v: number | undefined) => (v ? `${v.toLocaleString()} WILD` : "—");
+  const circulating = (data?.supply.minted ?? 0) - (data?.supply.burned ?? 0);
+
+  return (
+    <div className="econ-item">
+      <div className="econ-item-head">
+        <div className="econ-tab econ-item-back" onClick={onBack}>
+          ◀ ALL ITEMS
+        </div>
+        <span
+          className="econ-item-glyph"
+          style={{ borderColor: ECON_CAT_COLOR[info.category] }}
+        >
+          <ItemIcon kind={kind} size={40} />
+        </span>
+        <div className="econ-item-id">
+          <div className="econ-item-name">
+            {info.label}
+            <span className="econ-item-ticker">{info.ticker}</span>
+            <span className="econ-item-cat" style={{ color: ECON_CAT_COLOR[info.category] }}>
+              {CATEGORY_LABEL[info.category]}
+            </span>
+          </div>
+          <div className="econ-item-desc">{info.desc}</div>
+        </div>
+        <div className="econ-item-price">
+          <div className="econ-item-price-value">
+            {data && data.last_price > 0 ? `${n(data.last_price)} WILD` : "NO TRADES"}
+          </div>
+          {change !== null && (
+            <div
+              className="econ-item-change"
+              style={{ color: change >= 0 ? CHART_UP : CHART_DOWN }}
+            >
+              {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(1)}% ({RANGES.find((r) => r.id === range)?.label})
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="econ-item-body">
+        <div className="econ-panel econ-item-chart-panel">
+          <div className="econ-panel-title">
+            PRICE
+            <span className="econ-panel-sub">
+              {data === null ? "LOADING…" : `MARKET FILLS · ${n(rangeFills)} IN WINDOW`}
+            </span>
+          </div>
+          <div className="econ-tabs">
+            {RANGES.map((r) => (
+              <div
+                key={r.id}
+                className={`econ-tab ${range === r.id ? "active" : ""}`}
+                onClick={() => setRange(r.id)}
+              >
+                {r.label}
+              </div>
+            ))}
+          </div>
+          <PriceChart buckets={series} rangeMs={rangeMs} />
+        </div>
+
+        <div className="econ-panel econ-item-stats">
+          <div className="econ-panel-title">MARKET DETAILS</div>
+          <ItemStat label="LAST PRICE" value={wildOrDash(data?.last_price)} tone="#8fd6ff" />
+          <ItemStat label="BEST ASK" value={wildOrDash(data?.best_ask)} />
+          <ItemStat label="LISTED ON BOOK" value={`${n(data?.listed_units)} units`} />
+          <ItemStat
+            label={`VOLUME (${RANGES.find((r) => r.id === range)?.label})`}
+            value={`${n(rangeVolume)} WILD`}
+          />
+          <ItemStat label={`UNITS (${RANGES.find((r) => r.id === range)?.label})`} value={n(rangeUnits)} />
+          <div className="econ-item-stat-gap" />
+          <ItemStat label="TRADES (ALL TIME)" value={n(data?.total_fills)} />
+          <ItemStat label="UNITS TRADED" value={n(data?.total_units)} />
+          <ItemStat label="WILD VOLUME" value={`${n(data?.total_wild)} WILD`} />
+          <div className="econ-item-stat-gap" />
+          <ItemStat label="ISSUED" value={n(data?.supply.minted)} />
+          <ItemStat label="BURNED" value={n(data?.supply.burned)} tone="#ff6a7c" />
+          <ItemStat label="CIRCULATING" value={circulating.toLocaleString()} tone="#7be0c2" />
+          <div className="econ-item-stat-gap" />
+          <ItemStat label="VENDOR SELLS AT" value={wildOrDash(data?.vendor_buy)} />
+          <ItemStat label="VENDOR PAYS" value={wildOrDash(data?.vendor_sell)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Leaderboards (LeaderboardState pushes while subscribed)
 // ---------------------------------------------------------------------------
 
@@ -586,45 +904,127 @@ function ZoneStandings() {
     <div className="econ-panel econ-lb-zones">
       <div className="econ-panel-title">
         TERRITORY
-        <span className="econ-panel-sub">ZONE SECONDS · LAST 60 MIN</span>
+        <span className="econ-panel-sub">OWNERS · LIVE CONTROL</span>
       </div>
-      <div className="econ-lb-list">
-        {zones.length === 0 && (
-          <div className="econ-empty">No territory held yet.</div>
-        )}
-        {zones.map((z) => {
-          const total = z.seconds.reduce((a, s) => a + s.seconds, 0);
-          const color = factionColor(factions, z.control);
-          return (
-            <div key={z.district} className="econ-lb-zone">
-              <div className="econ-lb-zone-head">
-                <span className="econ-lb-zone-name">{z.district}</span>
-                <span className="econ-lb-zone-owner" style={{ color }}>
-                  {z.control === 0
-                    ? "UNCLAIMED"
-                    : factionName(factions, z.control).toUpperCase()}
-                </span>
-              </div>
-              <div className="econ-lb-zone-bar">
-                {z.seconds
-                  .filter((s) => s.seconds > 0)
-                  .map((s) => (
-                    <span
-                      key={s.faction}
-                      className="econ-lb-zone-seg"
-                      style={{
-                        width: total > 0 ? `${(s.seconds / total) * 100}%` : "0%",
-                        background: factionColor(factions, s.faction),
-                      }}
-                      title={`${factionName(factions, s.faction)}: ${formatZoneSeconds(s.seconds)}`}
-                    />
-                  ))}
-                {total === 0 && <span className="econ-lb-zone-empty" />}
-              </div>
-            </div>
-          );
-        })}
+      <div className="econ-lb-terr-cols">
+        <div className="econ-lb-terr-col">
+          <div className="econ-lb-terr-subhead">OWNERS · ZONE SECONDS (60 MIN)</div>
+          <div className="econ-lb-list">
+            {zones.length === 0 && (
+              <div className="econ-empty">No territory held yet.</div>
+            )}
+            {zones.map((z) => {
+              const total = z.seconds.reduce((a, s) => a + s.seconds, 0);
+              const color = factionColor(factions, z.control);
+              return (
+                <div key={z.district} className="econ-lb-zone">
+                  <div className="econ-lb-zone-head">
+                    <span className="econ-lb-zone-name">{z.district}</span>
+                    <span className="econ-lb-zone-owner" style={{ color }}>
+                      {z.control === 0
+                        ? "UNCLAIMED"
+                        : factionName(factions, z.control).toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="econ-lb-zone-bar">
+                    {z.seconds
+                      .filter((s) => s.seconds > 0)
+                      .map((s) => (
+                        <span
+                          key={s.faction}
+                          className="econ-lb-zone-seg"
+                          style={{
+                            width: total > 0 ? `${(s.seconds / total) * 100}%` : "0%",
+                            background: factionColor(factions, s.faction),
+                          }}
+                          title={`${factionName(factions, s.faction)}: ${formatZoneSeconds(s.seconds)}`}
+                        />
+                      ))}
+                    {total === 0 && <span className="econ-lb-zone-empty" />}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="econ-lb-terr-col">
+          <div className="econ-lb-terr-subhead">LIVE CONTROL · EVERY SQUARE</div>
+          <LiveSquaresGrid factions={factions} />
+        </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Spatial grid of every controlled region ("square"), colored by the faction
+ * that holds it right now. Polls the client-side territory cache (`allRegions`)
+ * on an interval, since control state lives outside the reactive store.
+ */
+function LiveSquaresGrid({ factions }: { factions: FactionInfo[] }) {
+  const [cells, setCells] = useState(() => allRegions());
+  useEffect(() => {
+    const poll = () => {
+      const next = allRegions();
+      setCells((prev) =>
+        prev.length === next.length &&
+        prev.every(
+          (p, i) => p.rx === next[i].rx && p.rz === next[i].rz && p.faction === next[i].faction,
+        )
+          ? prev
+          : next,
+      );
+    };
+    poll();
+    const timer = setInterval(poll, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const grid = useMemo(() => {
+    if (cells.length === 0) return null;
+    let minRx = Infinity;
+    let maxRx = -Infinity;
+    let minRz = Infinity;
+    let maxRz = -Infinity;
+    for (const c of cells) {
+      if (c.rx < minRx) minRx = c.rx;
+      if (c.rx > maxRx) maxRx = c.rx;
+      if (c.rz < minRz) minRz = c.rz;
+      if (c.rz > maxRz) maxRz = c.rz;
+    }
+    const cols = maxRx - minRx + 1;
+    const rows = maxRz - minRz + 1;
+    const byKey = new Map<number, number>();
+    for (const c of cells) byKey.set((c.rz - minRz) * cols + (c.rx - minRx), c.faction);
+    return { cols, rows, byKey, minRx, minRz };
+  }, [cells]);
+
+  if (!grid) return <div className="econ-empty">No territory held yet.</div>;
+
+  const squares = [];
+  for (let i = 0; i < grid.cols * grid.rows; i++) {
+    const faction = grid.byKey.get(i);
+    const rx = grid.minRx + (i % grid.cols);
+    const rz = grid.minRz + Math.floor(i / grid.cols);
+    squares.push(
+      <span
+        key={i}
+        className={faction ? "econ-lb-sq held" : "econ-lb-sq"}
+        style={faction ? { background: factionColor(factions, faction) } : undefined}
+        title={
+          faction
+            ? `${rx},${rz} — ${factionName(factions, faction)}`
+            : `${rx},${rz} — unclaimed`
+        }
+      />,
+    );
+  }
+  return (
+    <div
+      className="econ-lb-terr-grid"
+      style={{ gridTemplateColumns: `repeat(${grid.cols}, 1fr)` }}
+    >
+      {squares}
     </div>
   );
 }
@@ -670,6 +1070,10 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
   // LeaderboardState alongside the economy snapshot while subscribed).
   const open = useGame((s) => s.menuOpen && (s.menuTab === "economy" || s.menuTab === "leaderboard"));
   const isLedger = useGame((s) => s.menuTab === "economy");
+  // Item market drill-in: which kind's detail page is showing (ledger tab).
+  const [selected, setSelected] = useState<ItemKind | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   // Closing spends the Escape/click: suppress the pointer-lock bounce so it does
   // not read as an "open game menu" Escape (see CameraRig).
@@ -683,7 +1087,11 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
     connection.send({ t: "EconomySub", d: { on: true } });
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-      if (e.code === "Escape") close();
+      // Escape backs out of an item detail page first, then closes the menu.
+      if (e.code === "Escape") {
+        if (selectedRef.current) setSelected(null);
+        else close();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -692,16 +1100,31 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
     };
   }, [open, connection]);
 
+  // Watch the selected item's market while its detail page is up: the server
+  // answers with a full ItemMarketState and re-pushes on new fills.
+  useEffect(() => {
+    if (!open || !isLedger || !selected) return;
+    connection.send({ t: "ItemMarketSub", d: { kind: selected } });
+    return () => {
+      connection.send({ t: "ItemMarketSub", d: { kind: null } });
+      useGame.getState().set({ itemMarket: null });
+    };
+  }, [open, isLedger, selected, connection]);
+
   if (!open) return null;
 
   return (
     <div className="map-overlay econ-overlay">
       <KpiStrip />
       {isLedger ? (
-        <div className="econ-body">
-          <TxFeed />
-          <SupplyPanel />
-        </div>
+        selected ? (
+          <ItemMarketView kind={selected} onBack={() => setSelected(null)} />
+        ) : (
+          <div className="econ-body">
+            <TxFeed />
+            <SupplyPanel onSelect={setSelected} />
+          </div>
+        )
       ) : (
         <LeaderboardView />
       )}

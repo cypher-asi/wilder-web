@@ -694,16 +694,47 @@ export class GameConnection {
         for (const n of near) {
           game.fx.push({ type: "capture", x: n.x, z: n.z, color: factionCss(n.c.to), at: now });
         }
-        // Neighborhood ownership changes: gain/loss notifications for the
-        // player's faction, a subtle cue for churn elsewhere nearby.
+        // Per-square capture notices: the squares WE just secured near the
+        // player, labeled by the neighborhood they sit in. Squares are
+        // unnamed regions, so we resolve each to its nearest district anchor
+        // and dedupe (a single push often flips several adjacent squares).
+        const nearestDistrict = (x: number, z: number): string => {
+          let best = "ZONE";
+          let bestD = Infinity;
+          for (const d of ui.districts) {
+            const dd = (d.x - x) ** 2 + (d.z - z) ** 2;
+            if (dd < bestD) {
+              bestD = dd;
+              best = d.name;
+            }
+          }
+          return best.toUpperCase();
+        };
+        const CAPTURE_NEAR = (3 * REGION_SIZE) ** 2;
+        const secured = update.cells
+          .filter((c) => c.to === MY_FACTION && c.from !== MY_FACTION)
+          .map((c) => {
+            const x = (c.rx + 0.5) * REGION_SIZE;
+            const z = (c.rz + 0.5) * REGION_SIZE;
+            return { x, z, d2: (x - px) ** 2 + (z - pz) ** 2 };
+          })
+          .filter((c) => c.d2 <= CAPTURE_NEAR)
+          .sort((a, b) => a.d2 - b.d2);
         let gained = 0;
+        const seen = new Set<string>();
+        for (const c of secured) {
+          const name = nearestDistrict(c.x, c.z);
+          if (seen.has(name)) continue;
+          seen.add(name);
+          gained++;
+          ui.pushPickup({ kind: null, text: `ZONE SECURED — ${name}` });
+          if (seen.size >= 3) break;
+        }
+        // Neighborhood losses stay at district granularity (a bigger event).
         let lost = 0;
         for (const d of update.districts) {
-          const name = (ui.districts[d.index]?.name ?? "ZONE").toUpperCase();
-          if (d.to === MY_FACTION && d.from !== MY_FACTION) {
-            gained++;
-            ui.pushPickup({ kind: null, text: `ZONE CAPTURED — ${name}` });
-          } else if (d.from === MY_FACTION && d.to !== MY_FACTION) {
+          if (d.from === MY_FACTION && d.to !== MY_FACTION) {
+            const name = (ui.districts[d.index]?.name ?? "ZONE").toUpperCase();
             lost++;
             ui.pushPickup({ kind: null, text: `ZONE LOST — ${name}`, alert: true });
           }
@@ -724,6 +755,10 @@ export class GameConnection {
         ui.set({
           economy: { stats: msg.d.stats, feed: [...msg.d.recent].reverse() },
         });
+        break;
+      }
+      case "ItemMarketState": {
+        ui.set({ itemMarket: msg.d });
         break;
       }
       case "EconomyTxs": {

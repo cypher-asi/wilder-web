@@ -71,6 +71,15 @@ const AGENT_SEED_LAYOUT: u32 = 2;
 const SAFE_RADIUS: i32 = 1;
 /// Seconds an extraction channel takes.
 const EXTRACT_SECONDS: f32 = 5.0;
+/// Congestion model for service routing (Bodega/Armory/craft stations).
+/// A storefront comfortably serves this many agents at once; each peer
+/// already committed there past that softens its appeal, so a cohort splits
+/// across services and, once every sink is jammed, the errand loses out to
+/// gathering/crafting entirely (agents defer instead of piling on a door).
+const SERVICE_CAPACITY: f32 = 5.0;
+/// Travel distance (m) at which a service's appeal halves. Agents prefer a
+/// near service but will detour to a much emptier one farther away.
+const SERVICE_TRAVEL_HALF: f32 = 120.0;
 /// NPC respawn delay after death, seconds.
 const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
@@ -431,6 +440,17 @@ fn station_power(station: wilder_crafting::Station) -> f32 {
 
 pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
     coord.x.abs() <= SAFE_RADIUS && coord.z.abs() <= SAFE_RADIUS
+}
+
+/// Service entity an agent's goal is queued at, if any. These are the errands
+/// that physically crowd a storefront (vendor sell/buy, craft station), so
+/// they feed the congestion counter that spreads agents across services.
+fn goal_service_target(goal: Goal) -> Option<EntityId> {
+    match goal {
+        Goal::Sell { store, .. } | Goal::Buy { store, .. } => Some(store),
+        Goal::Craft { station, .. } => Some(station),
+        _ => None,
+    }
 }
 
 /// Zone kind of the octant at index `oct`, where octant 0 points along +X
@@ -896,6 +916,11 @@ pub struct World {
     agent_grid: HashMap<ChunkCoord, SmallVec<[u32; 4]>>,
     /// Budgeted A* queue: agent indices waiting for a `find_path` grant.
     agent_path_queue: std::collections::VecDeque<usize>,
+    /// Service entity -> count of agents currently committed to it (Sell/Buy
+    /// vendor errands, craft stations). Drives congestion-aware routing so a
+    /// cohort self-distributes across storefronts instead of funneling to the
+    /// nearest one. Rebuilt each tick, then mutated as agents re-decide.
+    service_load: HashMap<EntityId, u32>,
     /// (attacker, victim) pairs from recent damage; grants the victim's side
     /// retaliation rights in Guarded districts. Values are seconds remaining.
     recent_attacks: HashMap<(EntityId, EntityId), f32>,
@@ -966,6 +991,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         agent_by_entity: HashMap::new(),
         agent_grid: HashMap::new(),
         agent_path_queue: std::collections::VecDeque::new(),
+        service_load: HashMap::new(),
         recent_attacks: HashMap::new(),
         district_spots: Vec::new(),
         timings: TickTimings::default(),
@@ -3863,12 +3889,21 @@ impl World {
 
         // Hot/cold classification: every chunk within HOT_RADIUS of any
         // connected player is hot ground. Iterate players, not agents.
+        // Hysteresis: an already-hot agent stays hot one ring further out
+        // (the exit set), so agents loitering at the boundary don't flap
+        // between tiers — every flap is a full entity spawn/despawn on the
+        // wire and a rig remount on every client.
         let mut hot_chunks: HashSet<ChunkCoord> = HashSet::new();
+        let mut hot_exit_chunks: HashSet<ChunkCoord> = HashSet::new();
         for p in self.players.values() {
             let c = ChunkCoord::from_world(p.character.position);
-            for dz in -HOT_RADIUS_CHUNKS..=HOT_RADIUS_CHUNKS {
-                for dx in -HOT_RADIUS_CHUNKS..=HOT_RADIUS_CHUNKS {
-                    hot_chunks.insert(ChunkCoord::new(c.x + dx, c.z + dz));
+            for dz in -(HOT_RADIUS_CHUNKS + 1)..=(HOT_RADIUS_CHUNKS + 1) {
+                for dx in -(HOT_RADIUS_CHUNKS + 1)..=(HOT_RADIUS_CHUNKS + 1) {
+                    let coord = ChunkCoord::new(c.x + dx, c.z + dz);
+                    hot_exit_chunks.insert(coord);
+                    if dx.abs() <= HOT_RADIUS_CHUNKS && dz.abs() <= HOT_RADIUS_CHUNKS {
+                        hot_chunks.insert(coord);
+                    }
                 }
             }
         }
@@ -3880,7 +3915,11 @@ impl World {
                 continue;
             }
             let chunk = agent.chunk();
-            agent.tier = if hot_chunks.contains(&chunk) { Tier::Hot } else { Tier::Cold };
+            agent.tier = match agent.tier {
+                Tier::Hot if hot_exit_chunks.contains(&chunk) => Tier::Hot,
+                _ if hot_chunks.contains(&chunk) => Tier::Hot,
+                _ => Tier::Cold,
+            };
             self.agent_grid.entry(chunk).or_default().push(i as u32);
         }
 
@@ -3959,6 +3998,10 @@ impl World {
                 _ => {}
             }
         }
+        // Snapshot how many agents are committed to each service before the
+        // batch re-decides; `decide_agent` keeps it live as it reassigns, so
+        // the cohort self-distributes across storefronts (congestion game).
+        self.rebuild_service_load();
         for idx in decisions {
             self.decide_agent(idx);
         }
@@ -4203,6 +4246,53 @@ impl World {
             .map(|s| (s.entity, s.position))
     }
 
+    /// Congestion-aware routing: choose a service of `kind` by trading off
+    /// travel distance against how crowded it already is, and return an
+    /// **appeal** factor in `(0, 1]` for the caller to scale the errand's
+    /// utility by. A near, empty storefront scores ~1; a packed or distant one
+    /// scores low, so the whole errand can lose to gathering/crafting when
+    /// every sink is jammed. `self`'s own commitment must already be removed
+    /// from `service_load` (see `decide_agent`) so it doesn't count itself.
+    fn route_service(&self, pos: Vec3, kind: EntityKind) -> Option<(EntityId, Vec3, f32)> {
+        let mut best: Option<(EntityId, Vec3, f32)> = None;
+        for s in self.statics.values().filter(|s| s.kind == kind) {
+            let dist = (s.position - pos).length();
+            let dist_factor = 1.0 / (1.0 + dist / SERVICE_TRAVEL_HALF);
+            let occ = self.service_load.get(&s.entity).copied().unwrap_or(0) as f32;
+            let crowd_factor = SERVICE_CAPACITY / (SERVICE_CAPACITY + occ);
+            let appeal = dist_factor * crowd_factor;
+            if best.map(|(_, _, a)| appeal > a).unwrap_or(true) {
+                best = Some((s.entity, s.position, appeal));
+            }
+        }
+        best
+    }
+
+    /// Recount agents committed to each congestible service. Run once per tick
+    /// before the decision batch; `decide_agent` then keeps it live as agents
+    /// re-choose, so within-tick deciders see each other's fresh commitments
+    /// (no thundering herd onto whichever storefront happened to look empty).
+    fn rebuild_service_load(&mut self) {
+        self.service_load.clear();
+        for a in &self.agents {
+            if !a.alive() {
+                continue;
+            }
+            if let Some(e) = goal_service_target(a.goal) {
+                *self.service_load.entry(e).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Commit `idx` to `goal`, recording its load on any congestible service
+    /// so peers deciding later this tick route around it.
+    fn commit_goal(&mut self, idx: usize, goal: Goal) {
+        self.agents[idx].goal = goal;
+        if let Some(e) = goal_service_target(goal) {
+            *self.service_load.entry(e).or_insert(0) += 1;
+        }
+    }
+
     /// Utility-AI: score candidate goals for one agent and commit to the best.
     fn decide_agent(&mut self, idx: usize) {
         use rand::Rng;
@@ -4224,10 +4314,19 @@ impl World {
         self.agents[idx].decision_timer =
             self.rng.random_range(agents::DECISION_SECONDS.0..agents::DECISION_SECONDS.1);
 
+        // Drop this agent's current commitment from the congestion counter so
+        // it doesn't count itself when routing, and so whatever it commits to
+        // below is the only thing peers see it queued at.
+        if let Some(e) = goal_service_target(self.agents[idx].goal) {
+            if let Some(c) = self.service_load.get_mut(&e) {
+                *c = c.saturating_sub(1);
+            }
+        }
+
         // Safety overrides: hurt or flush agents fall back to a sanctuary.
         if health_frac < RETREAT_HEALTH_PCT || (wallet > WEALTH_RETREAT && retreat_cd <= 0.0) {
             let to = self.nearest_sanctuary_spot(pos);
-            self.agents[idx].goal = Goal::Retreat { to };
+            self.commit_goal(idx, Goal::Retreat { to });
             return;
         }
 
@@ -4271,17 +4370,18 @@ impl World {
             _ => 1.0,
         };
         if carried >= 30 {
-            if let Some((store, store_pos)) = self.nearest_service(pos, EntityKind::Bodega) {
-                let score = carried as f32 * 0.08 * sell_mult;
+            // Traders prefer the market book; everyone else vendors at a
+            // Bodega. Either way the destination is chosen congestion-aware so
+            // a packed storefront pushes this errand's appeal (and score) down.
+            let want_market = role == Role::Trader && self.market.len() < 200;
+            let routed = want_market
+                .then(|| self.route_service(pos, EntityKind::MarketTerminal))
+                .flatten()
+                .map(|r| (true, r))
+                .or_else(|| self.route_service(pos, EntityKind::Bodega).map(|r| (false, r)));
+            if let Some((list_on_market, (store, store_pos, appeal))) = routed {
+                let score = carried as f32 * 0.08 * sell_mult * appeal;
                 if score > best.0 {
-                    // Traders prefer the market book; everyone else vendors.
-                    let list_on_market = role == Role::Trader && self.market.len() < 200;
-                    let (store, store_pos) = if list_on_market {
-                        self.nearest_service(pos, EntityKind::MarketTerminal)
-                            .unwrap_or((store, store_pos))
-                    } else {
-                        (store, store_pos)
-                    };
                     best = (score, Goal::Sell { store, store_pos, list_on_market });
                 }
             }
@@ -4352,7 +4452,7 @@ impl World {
             .iter()
             .any(|k| self.agents[idx].count_item(*k) > 0);
         if !has_weapon && wallet >= 30 {
-            if let Some((store, store_pos)) = self.nearest_service(pos, EntityKind::Armory) {
+            if let Some((store, store_pos, appeal)) = self.route_service(pos, EntityKind::Armory) {
                 let kind = if wallet >= 360 {
                     ItemKind::Smg
                 } else if wallet >= 170 {
@@ -4362,15 +4462,15 @@ impl World {
                 } else {
                     ItemKind::Pipe
                 };
-                let score = if role.is_combatant() { 40.0 } else { 15.0 };
+                let score = if role.is_combatant() { 40.0 } else { 15.0 } * appeal;
                 if score > best.0 {
                     best = (score, Goal::Buy { store, store_pos, kind, count: 1 });
                 }
             }
         }
         if self.agents[idx].count_item(ItemKind::Medkit) == 0 && wallet >= 60 && has_weapon {
-            if let Some((store, store_pos)) = self.nearest_service(pos, EntityKind::Bodega) {
-                let score = 8.0;
+            if let Some((store, store_pos, appeal)) = self.route_service(pos, EntityKind::Bodega) {
+                let score = 8.0 * appeal;
                 if score > best.0 {
                     best = (score, Goal::Buy { store, store_pos, kind: ItemKind::Medkit, count: 1 });
                 }
@@ -4408,8 +4508,8 @@ impl World {
                 wilder_crafting::Station::Refinery => EntityKind::Refinery,
                 _ => EntityKind::Factory,
             };
-            if let Some((station, station_pos)) = self.nearest_service(pos, station_kind) {
-                let score = margin * craft_mult;
+            if let Some((station, station_pos, appeal)) = self.route_service(pos, station_kind) {
+                let score = margin * craft_mult * appeal;
                 if score > best.0 {
                     best = (
                         score,
@@ -4492,7 +4592,7 @@ impl World {
             }
         }
 
-        self.agents[idx].goal = best.1;
+        self.commit_goal(idx, best.1);
     }
 
     /// Nearest hostile combatant within engagement range that current danger
@@ -6507,6 +6607,7 @@ mod tests {
             agent_by_entity: HashMap::new(),
             agent_grid: HashMap::new(),
             agent_path_queue: std::collections::VecDeque::new(),
+            service_load: HashMap::new(),
             recent_attacks: HashMap::new(),
             district_spots: Vec::new(),
             timings: TickTimings::default(),

@@ -575,7 +575,9 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const isAgent = entity.kind === "Agent";
   const isNpc = entity.kind === "Npc" || isAgent;
   const hostileStyle = entity.kind === "Npc";
-  const model = useAssetModel(CHARACTER_MODEL);
+  // Agents remount their rigs whenever they cross the render-LOD boundary,
+  // so their clones come from (and return to) the shared pool.
+  const model = useAssetModel(CHARACTER_MODEL, isAgent);
   const pistolModel = useAssetModel(isNpc ? undefined : PISTOL_MODEL);
   const mixer = useRef<THREE.AnimationMixer | null>(null);
   const actions = useRef<Record<string, THREE.AnimationAction>>({});
@@ -615,8 +617,11 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const animFrame = useRef(0);
   /** ms timestamp the fade-in reveal started (0 = not started yet). */
   const fadeStartAt = useRef(0);
-  /** True once the fade-in finished and material state was restored. */
-  const fadeDone = useRef(false);
+  /** True once the fade-in finished and material state was restored. Agents
+   * skip the reveal entirely: their rig replaces an already-visible impostor
+   * silhouette in place, so a 350 ms fade would read as the body blinking
+   * out and back at the LOD boundary. */
+  const fadeDone = useRef(isAgent);
 
   // Layout effect (not passive): R3F renders on rAF after commit, so setting
   // up the mixer here guarantees the rig is posed before its first visible

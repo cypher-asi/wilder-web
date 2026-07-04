@@ -103,29 +103,60 @@ export function preloadModels(ids: string[]): void {
 }
 
 /**
+ * Shelved rig clones per model id, reused across mounts. Skinned clones are
+ * expensive (SkeletonUtils walks the whole bone/mesh graph), and agents
+ * crossing the render-LOD boundary used to pay that price on every promote.
+ * Callers restyle materials and rebuild mixers on mount, so a pooled scene
+ * only needs its root transform reset.
+ */
+const rigPools = new Map<string, LoadedModel[]>();
+const RIG_POOL_MAX = 32;
+
+/**
  * Load a manifest model; returns a fresh clone per caller (null = use
  * procedural fallback). Uses SkeletonUtils so skinned/rigged models clone
  * correctly; animation clips are shared (they are immutable).
+ *
+ * With `pooled`, unmounting shelves the clone for the next mount of the same
+ * id (synchronous reuse, no re-clone) instead of dropping it.
  */
-export function useAssetModel(id: string | undefined): LoadedModel | null {
+export function useAssetModel(id: string | undefined, pooled = false): LoadedModel | null {
   const [model, setModel] = useState<LoadedModel | null>(null);
   useEffect(() => {
     if (!id) return;
     let alive = true;
-    getModel(id).then((loaded) => {
-      if (alive && loaded) {
-        setModel({
-          scene: cloneSkinned(loaded.scene) as THREE.Group,
-          animations: loaded.animations,
-          size: loaded.size,
-          minY: loaded.minY,
-        });
-      }
-    });
+    let acquired: LoadedModel | null = null;
+    const shelf = pooled ? (rigPools.get(id) ?? []) : null;
+    if (shelf && shelf.length > 0) {
+      acquired = shelf.pop()!;
+      acquired.scene.position.set(0, 0, 0);
+      acquired.scene.rotation.set(0, 0, 0);
+      setModel(acquired);
+    } else {
+      getModel(id).then((loaded) => {
+        if (alive && loaded) {
+          acquired = {
+            scene: cloneSkinned(loaded.scene) as THREE.Group,
+            animations: loaded.animations,
+            size: loaded.size,
+            minY: loaded.minY,
+          };
+          setModel(acquired);
+        }
+      });
+    }
     return () => {
       alive = false;
+      if (pooled && acquired) {
+        const pool = rigPools.get(id) ?? [];
+        if (pool.length < RIG_POOL_MAX) {
+          acquired.scene.removeFromParent();
+          pool.push(acquired);
+          rigPools.set(id, pool);
+        }
+      }
     };
-  }, [id]);
+  }, [id, pooled]);
   return model;
 }
 

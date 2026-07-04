@@ -73,7 +73,7 @@ const HUB_STAGE_REBELS: Vec3 = Vec3::new(180.0, 0.0, 180.0);
 const HUB_STAGE_FORUM: Vec3 = Vec3::new(-180.0, 0.0, -180.0);
 /// Version stamp for the seeded agent distribution. Bump when the seeding
 /// layout changes so persisted worlds discard the old population and reseed.
-const AGENT_SEED_LAYOUT: u32 = 3;
+const AGENT_SEED_LAYOUT: u32 = 4;
 /// Chunks with |x|<=SAFE_RADIUS and |z|<=SAFE_RADIUS are the safe hub.
 const SAFE_RADIUS: i32 = 1;
 /// Congestion model for service routing (Bodega/Armory/craft stations).
@@ -5884,9 +5884,9 @@ impl World {
     // -----------------------------------------------------------------------
 
     /// Restore the persisted agent population, or seed a fresh one (count
-    /// from `WILDER_AGENTS`, default 500). Populations saved under an older
-    /// seed layout are discarded and reseeded so distribution changes (like
-    /// the hub cohort) actually reach existing worlds.
+    /// from `WILDER_AGENTS`, default 25,000). Populations saved under an
+    /// older seed layout are discarded and reseeded so distribution changes
+    /// (like the hub cohort) actually reach existing worlds.
     fn load_or_seed_agents(&mut self) {
         let layout: u32 =
             self.store.meta("agent_seed_layout").ok().flatten().unwrap_or(0);
@@ -5937,7 +5937,7 @@ impl World {
         let total: usize = std::env::var("WILDER_AGENTS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(500);
+            .unwrap_or(25_000);
         self.seed_agents(total);
         let _ = self.store.save_meta("agent_seed_layout", &AGENT_SEED_LAYOUT);
         self.save_agent_shards_full();

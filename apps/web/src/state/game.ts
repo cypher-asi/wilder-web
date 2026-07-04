@@ -418,6 +418,7 @@ export type MenuTab =
   | "leaderboard"
   | "economy"
   | "inventory"
+  | "profile"
   | "settings"
   | "exit";
 

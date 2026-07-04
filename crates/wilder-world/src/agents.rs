@@ -281,6 +281,10 @@ pub struct FactionAgent {
     pub anim_hold: f32,
     /// Seconds left holding the Run pose after the last actual step.
     pub run_hold: f32,
+    /// Chunk this agent currently occupies in the world's `agent_grid`
+    /// (`None` = not in the grid, i.e. dead or never inserted). Maintained
+    /// by `World::regrid_agent`; runtime only, never persisted.
+    pub grid_chunk: Option<ChunkCoord>,
     /// Smoothed facing direction backing `yaw` (see `steer_yaw`).
     face: (f32, f32),
 }
@@ -462,6 +466,7 @@ impl FactionAgent {
             anim: AnimState::Idle,
             anim_hold: 0.0,
             run_hold: 0.0,
+            grid_chunk: None,
             face: (1.0, 0.0),
         }
     }

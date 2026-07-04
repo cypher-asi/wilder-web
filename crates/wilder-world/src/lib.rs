@@ -1100,8 +1100,17 @@ pub struct World {
     agents: Vec<FactionAgent>,
     /// Live entity id -> agents index, for combat/target lookups.
     agent_by_entity: HashMap<EntityId, usize>,
-    /// Spatial hash over alive agents, rebuilt every tick.
+    /// Spatial hash over alive agents, maintained incrementally: an agent's
+    /// bucket entry moves when it crosses a chunk boundary (`regrid_agent`)
+    /// instead of rebuilding the whole map every tick.
     agent_grid: HashMap<ChunkCoord, SmallVec<[u32; 4]>>,
+    /// Agent indices currently in the Hot tier, refreshed each tick by the
+    /// player-driven classification (promote via grid lookups around
+    /// players, demote from this list) — never a whole-population scan.
+    hot_agents: Vec<u32>,
+    /// Agent indices currently dead and awaiting respawn. Killing pushes
+    /// here; the respawn sweep walks only this list.
+    dead_agents: Vec<u32>,
     /// Budgeted A* queue: agent indices waiting for a `find_path` grant.
     agent_path_queue: std::collections::VecDeque<usize>,
     /// Service entity -> count of agents currently committed to it (Sell/Buy
@@ -1179,6 +1188,8 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         agents: Vec::new(),
         agent_by_entity: HashMap::new(),
         agent_grid: HashMap::new(),
+        hot_agents: Vec::new(),
+        dead_agents: Vec::new(),
         agent_path_queue: std::collections::VecDeque::new(),
         service_load: HashMap::new(),
         recent_attacks: HashMap::new(),
@@ -1662,15 +1673,17 @@ impl World {
 
         let broadcast_flash = stats.ranged;
 
-        // Attackable targets: NPCs plus embodied (hot) faction agents.
+        // Attackable targets: NPCs plus embodied (hot) faction agents (from
+        // the maintained hot list, not a population scan).
         let candidates: Vec<(EntityId, Vec3)> = self
             .npcs
             .values()
             .filter(|n| n.alive())
             .map(|n| (n.entity, n.position))
             .chain(
-                self.agents
+                self.hot_agents
                     .iter()
+                    .map(|&i| &self.agents[i as usize])
                     .filter(|a| a.tier == Tier::Hot && a.alive())
                     .map(|a| (a.entity, a.position)),
             )
@@ -1789,7 +1802,8 @@ impl World {
                     );
                     targets.push(npc.entity);
                 }
-                for agent in self.agents.iter_mut() {
+                for i in 0..self.agents.len() {
+                    let agent = &self.agents[i];
                     if agent.tier != Tier::Hot || !agent.alive() {
                         continue;
                     }
@@ -1802,6 +1816,7 @@ impl World {
                     } else {
                         Vec3::new(1.0, 0.0, 0.0)
                     };
+                    let agent = &mut self.agents[i];
                     agent.position = step_move_speed(
                         &self.chunks,
                         agent.position,
@@ -1811,6 +1826,7 @@ impl World {
                         1.0,
                     );
                     targets.push(agent.entity);
+                    self.regrid_agent(i);
                 }
                 for target in targets {
                     let impact = self
@@ -3592,9 +3608,12 @@ impl World {
         }
 
         let mut bodies: Vec<(Body, Vec3)> = Vec::new();
-        for (i, a) in self.agents.iter().enumerate() {
+        // Hot agents only — the maintained hot list keeps this from
+        // scanning the whole population every tick.
+        for &i in &self.hot_agents {
+            let a = &self.agents[i as usize];
             if a.tier == Tier::Hot && a.alive() {
-                bodies.push((Body::Agent(i), a.position));
+                bodies.push((Body::Agent(i as usize), a.position));
             }
         }
         for (id, npc) in self.npcs.iter() {
@@ -3682,7 +3701,10 @@ impl World {
             }
             let next = nudge(&self.chunks, *pos, px, pz);
             match body {
-                Body::Agent(i) => self.agents[*i].position = next,
+                Body::Agent(i) => {
+                    self.agents[*i].position = next;
+                    self.regrid_agent(*i);
+                }
                 Body::Npc(id) => {
                     if let Some(npc) = self.npcs.get_mut(id) {
                         npc.position = next;
@@ -4072,6 +4094,11 @@ impl World {
             let wallet = std::mem::take(&mut agent.wallet);
             (agent.entity, agent.position, items, wallet, agent.party())
         };
+        // Dead: out of the spatial grid, onto the respawn list.
+        self.regrid_agent(idx);
+        if !self.dead_agents.contains(&(idx as u32)) {
+            self.dead_agents.push(idx as u32);
+        }
         // Carried items burn out of supply on death (the physical drop is
         // salvage, re-minted by whoever picks it up — same as player deaths).
         for stack in &items {
@@ -4108,6 +4135,29 @@ impl World {
     // Autonomous faction agents
     // -----------------------------------------------------------------------
 
+    /// Keep `agent_grid` in sync with one agent's position/liveness. Call
+    /// after anything that moves, kills, revives or spawns an agent: the
+    /// bucket entry moves only when the occupied chunk actually changed, so
+    /// the grid never needs a whole-population rebuild.
+    fn regrid_agent(&mut self, idx: usize) {
+        let agent = &self.agents[idx];
+        let new_chunk = if agent.alive() { Some(agent.chunk()) } else { None };
+        if agent.grid_chunk == new_chunk {
+            return;
+        }
+        if let Some(old) = self.agents[idx].grid_chunk {
+            if let Some(bucket) = self.agent_grid.get_mut(&old) {
+                if let Some(pos) = bucket.iter().position(|&i| i == idx as u32) {
+                    bucket.swap_remove(pos);
+                }
+            }
+        }
+        if let Some(chunk) = new_chunk {
+            self.agent_grid.entry(chunk).or_default().push(idx as u32);
+        }
+        self.agents[idx].grid_chunk = new_chunk;
+    }
+
     fn tick_agents(&mut self) {
         // Retaliation flags decay in real time.
         self.recent_attacks.retain(|_, t| {
@@ -4136,81 +4186,74 @@ impl World {
             }
         }
 
-        // Rebuild the spatial hash and (re)classify tiers.
-        self.agent_grid.clear();
-        for (i, agent) in self.agents.iter_mut().enumerate() {
-            if !agent.alive() {
-                continue;
+        // Player-driven tier classification: sweep the previous hot set for
+        // demotions (left the exit zone, died) and promote cold agents found
+        // in the grid buckets of hot chunks. Work scales with players and
+        // hot agents, never the whole population.
+        let mut next_hot: Vec<u32> = Vec::with_capacity(self.hot_agents.len() + 64);
+        for i in std::mem::take(&mut self.hot_agents) {
+            let agent = &mut self.agents[i as usize];
+            if agent.alive() && hot_exit_chunks.contains(&agent.chunk()) {
+                next_hot.push(i);
+            } else {
+                agent.tier = Tier::Cold;
             }
-            let chunk = agent.chunk();
-            agent.tier = match agent.tier {
-                Tier::Hot if hot_exit_chunks.contains(&chunk) => Tier::Hot,
-                _ if hot_chunks.contains(&chunk) => Tier::Hot,
-                _ => Tier::Cold,
-            };
-            self.agent_grid.entry(chunk).or_default().push(i as u32);
         }
+        for coord in &hot_chunks {
+            let Some(bucket) = self.agent_grid.get(coord) else { continue };
+            for &i in bucket {
+                let agent = &mut self.agents[i as usize];
+                if agent.alive() && agent.tier == Tier::Cold {
+                    agent.tier = Tier::Hot;
+                    next_hot.push(i);
+                }
+            }
+        }
+        self.hot_agents = next_hot;
 
         // Respawns: dead agents come back as a fresh identity at their
-        // faction's Guarded home district.
-        for idx in 0..self.agents.len() {
+        // faction's Guarded home district. Only the dead list is walked.
+        let mut di = 0;
+        while di < self.dead_agents.len() {
+            let idx = self.dead_agents[di] as usize;
+            // Revived outside this sweep (tests drive respawn_agent
+            // directly): just drop the stale entry.
             if self.agents[idx].alive() {
+                self.dead_agents.swap_remove(di);
                 continue;
             }
             self.agents[idx].respawn_in -= TICK_DT;
             if self.agents[idx].respawn_in <= 0.0 {
                 self.respawn_agent(idx);
+                self.dead_agents.swap_remove(di);
+            } else {
+                di += 1;
             }
         }
 
-        // Simulation slices: hot every tick at TICK_DT, cold once a second
-        // from the bucket wheel.
+        // Simulation slices: hot agents every tick at TICK_DT, cold agents
+        // once a second from the bucket wheel. Iterate the hot list plus
+        // this tick's cold bucket stride — not every agent every tick.
         let cold_bucket = self.tick % COLD_BUCKETS;
         let mut events: Vec<(usize, AgentEvent)> = Vec::new();
         let mut decisions: Vec<usize> = Vec::new();
-        for idx in 0..self.agents.len() {
-            let (hot, dt) = match self.agents[idx].tier {
-                Tier::Hot => (true, TICK_DT),
-                Tier::Cold => {
-                    if idx as u64 % COLD_BUCKETS != cold_bucket {
-                        continue;
-                    }
-                    (false, COLD_BUCKETS as f32 * TICK_DT)
-                }
-            };
-            if !self.agents[idx].alive() {
-                continue;
+        let hot_now = self.hot_agents.clone();
+        for i in hot_now {
+            self.tick_one_agent(i as usize, true, TICK_DT, &mut events, &mut decisions);
+        }
+        let mut idx = cold_bucket as usize;
+        while idx < self.agents.len() {
+            // Hot agents in this stride already ticked from the hot list.
+            if self.agents[idx].tier == Tier::Cold {
+                self.tick_one_agent(
+                    idx,
+                    false,
+                    COLD_BUCKETS as f32 * TICK_DT,
+                    &mut events,
+                    &mut decisions,
+                );
             }
-            // Drop stale loot goals: someone else grabbed the container (or
-            // it expired) while the agent was still walking over.
-            if let Goal::Loot { container, .. } = self.agents[idx].goal {
-                if !self.loot.contains_key(&container) {
-                    self.agents[idx].goal = Goal::Idle;
-                }
-            }
-            // Resolve the Hunt target snapshot before handing off the tick.
-            let target = match self.agents[idx].goal {
-                Goal::Hunt { target } => {
-                    self.combatant(target).map(|(position, _, alive)| TargetInfo { position, alive })
-                }
-                _ => None,
-            };
-            let event = {
-                let agent = &mut self.agents[idx];
-                agent.tick(&self.chunks, dt, hot, target)
-            };
-            // Queue any path request the tick raised (hot agents only; cold
-            // macro movement never needs collision-accurate paths).
-            if self.agents[idx].path_request.is_some() && !self.agents[idx].path_queued {
-                self.agents[idx].path_queued = true;
-                self.agent_path_queue.push_back(idx);
-            }
-            match event {
-                AgentEvent::None => {}
-                AgentEvent::NeedsGoal => decisions.push(idx),
-                AgentEvent::Act => events.push((idx, event)),
-                AgentEvent::Attack { .. } => events.push((idx, event)),
-            }
+            idx += COLD_BUCKETS as usize;
         }
 
         for (idx, event) in events {
@@ -4239,6 +4282,54 @@ impl World {
         // Statistical cold-war resolution, once per territory tick.
         if self.tick % TERRITORY_TICK_INTERVAL == 0 {
             self.tick_cold_combat(&hot_chunks);
+        }
+    }
+
+    /// One agent's simulation slice: goal upkeep, the behavior tick itself,
+    /// path-queue bookkeeping and grid maintenance. Shared by the hot list
+    /// (every tick) and the cold bucket wheel (once a second each).
+    fn tick_one_agent(
+        &mut self,
+        idx: usize,
+        hot: bool,
+        dt: f32,
+        events: &mut Vec<(usize, AgentEvent)>,
+        decisions: &mut Vec<usize>,
+    ) {
+        if !self.agents[idx].alive() {
+            return;
+        }
+        // Drop stale loot goals: someone else grabbed the container (or
+        // it expired) while the agent was still walking over.
+        if let Goal::Loot { container, .. } = self.agents[idx].goal {
+            if !self.loot.contains_key(&container) {
+                self.agents[idx].goal = Goal::Idle;
+            }
+        }
+        // Resolve the Hunt target snapshot before handing off the tick.
+        let target = match self.agents[idx].goal {
+            Goal::Hunt { target } => {
+                self.combatant(target).map(|(position, _, alive)| TargetInfo { position, alive })
+            }
+            _ => None,
+        };
+        let event = {
+            let agent = &mut self.agents[idx];
+            agent.tick(&self.chunks, dt, hot, target)
+        };
+        // The tick moved the agent; keep the spatial grid current.
+        self.regrid_agent(idx);
+        // Queue any path request the tick raised (hot agents only; cold
+        // macro movement never needs collision-accurate paths).
+        if self.agents[idx].path_request.is_some() && !self.agents[idx].path_queued {
+            self.agents[idx].path_queued = true;
+            self.agent_path_queue.push_back(idx);
+        }
+        match event {
+            AgentEvent::None => {}
+            AgentEvent::NeedsGoal => decisions.push(idx),
+            AgentEvent::Act => events.push((idx, event)),
+            AgentEvent::Attack { .. } => events.push((idx, event)),
         }
     }
 
@@ -4365,6 +4456,8 @@ impl World {
         }
         self.agent_by_entity.remove(&old_entity);
         self.agent_by_entity.insert(entity, idx);
+        // Alive again at the staging ground: back into the spatial grid.
+        self.regrid_agent(idx);
         // Fresh identities start with a modest grubstake and role kit.
         self.grubstake_agent(idx);
     }
@@ -5424,8 +5517,10 @@ impl World {
                 }
                 let entity = self.alloc_entity();
                 let agent = FactionAgent::from_save(entity, save);
-                self.agent_by_entity.insert(entity, self.agents.len());
+                let idx = self.agents.len();
+                self.agent_by_entity.insert(entity, idx);
                 self.agents.push(agent);
+                self.regrid_agent(idx);
             }
             tracing::info!(agents = self.agents.len(), "faction agents restored");
             return;
@@ -5545,6 +5640,7 @@ impl World {
             let idx = self.agents.len();
             self.agent_by_entity.insert(entity, idx);
             self.agents.push(agent);
+            self.regrid_agent(idx);
             self.grubstake_agent(idx);
         }
     }
@@ -6339,8 +6435,9 @@ impl World {
         }
         // Hot faction agents replicate like NPCs (cold agents don't exist as
         // entities; tier flips drive spawn/despawn through the known-entity
-        // diff below).
-        for agent in self.agents.iter() {
+        // diff below). The hot list keeps this off the whole population.
+        for &i in &self.hot_agents {
+            let agent = &self.agents[i as usize];
             if agent.tier != Tier::Hot || !agent.alive() {
                 continue;
             }
@@ -6953,6 +7050,8 @@ mod tests {
             agents: Vec::new(),
             agent_by_entity: HashMap::new(),
             agent_grid: HashMap::new(),
+            hot_agents: Vec::new(),
+            dead_agents: Vec::new(),
             agent_path_queue: std::collections::VecDeque::new(),
             service_load: HashMap::new(),
             recent_attacks: HashMap::new(),
@@ -6990,6 +7089,7 @@ mod tests {
         let idx = world.agents.len();
         world.agent_by_entity.insert(entity, idx);
         world.agents.push(agent);
+        world.regrid_agent(idx);
         idx
     }
 
@@ -7109,6 +7209,8 @@ mod tests {
         );
         world.agents[a].tier = Tier::Hot;
         world.agents[b].tier = Tier::Hot;
+        world.hot_agents.push(a as u32);
+        world.hot_agents.push(b as u32);
         for _ in 0..40 {
             world.separate_characters();
         }
@@ -7122,6 +7224,7 @@ mod tests {
         let spot = world.nearest_walkable(district_anchor("NEXUS"));
         let a = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, spot);
         world.agents[a].tier = Tier::Hot;
+        world.hot_agents.push(a as u32);
 
         // A connected player standing exactly on the agent.
         let entity = world.alloc_entity();

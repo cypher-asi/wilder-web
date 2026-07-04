@@ -242,12 +242,12 @@ function VitalsPanel() {
   );
 }
 
-/** Currency chips under the vitals: WILD / Shards / Energy balances. */
+/** Currency chips under the vitals: MILD / Shards / Energy balances. */
 function CurrencyPanel() {
   const wallet = useGame((s) => s.wallet);
   return (
     <div className="currency-panel">
-      <div className="currency-chip wild" title="WILD — soft currency (market, vendors)">
+      <div className="currency-chip wild" title="MILD — soft currency (market, vendors)">
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
           <path
             d="M10 1.5 L17.5 6 v8 L10 18.5 L2.5 14 v-8 Z"
@@ -265,7 +265,7 @@ function CurrencyPanel() {
           />
         </svg>
         <span className="currency-value">{(wallet?.wild ?? 0).toLocaleString("en-US")}</span>
-        <span className="currency-name">WILD</span>
+        <span className="currency-name">MILD</span>
       </div>
       <div className="currency-chip shards" title="Shards — salvage from destroyed items">
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
@@ -879,7 +879,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
         </span>
       </h3>
       <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 10 }}>
-        Wallet: {market?.wallet ?? 0} WILD
+        Wallet: {market?.wallet ?? 0} MILD
       </div>
 
       <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>LISTINGS</div>
@@ -970,7 +970,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
           value={listPrice}
           onChange={(e) => setListPrice(e.target.value)}
           style={{ width: 50, background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px" }}
-          title="Price each (WILD)"
+          title="Price each (MILD)"
         />
         <button
           type="submit"
@@ -1047,10 +1047,10 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
       <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 360 }}>
         {header}
         <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 6 }}>
-          Wallet: {wallet ?? "…"} WILD
+          Wallet: {wallet ?? "…"} MILD
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
-          Cash converts 1:1 into WILD minus a 10% handling fee. Whoever holds
+          Cash converts 1:1 into MILD minus a 10% handling fee. Whoever holds
           this territory takes a cut of every conversion.
         </div>
         <div
@@ -1067,7 +1067,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
           <div>
             <div style={{ fontSize: 12, color: "var(--text)" }}>Cash x{cash}</div>
             <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
-              → {cash - Math.floor((cash * 10) / 100)} WILD after fee
+              → {cash - Math.floor((cash * 10) / 100)} MILD after fee
             </div>
           </div>
           <div
@@ -1094,7 +1094,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
     <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 380 }}>
       {header}
       <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 10 }}>
-        Wallet: {wallet ?? "…"} WILD
+        Wallet: {wallet ?? "…"} MILD
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {offers.length === 0 && (
@@ -1310,7 +1310,7 @@ function PickupFeedLine({
   );
 }
 
-/** Bouncy "+N WILD" coin toasts stacked above the bottom-right dock. */
+/** Bouncy "+N MILD" coin toasts stacked above the bottom-right dock. */
 function WalletToasts() {
   const toasts = useGame((s) => s.walletToasts);
   return (
@@ -1582,7 +1582,7 @@ const HUB_RING_M = 900;
 function ZoneReadout() {
   const districts = useGame((s) => s.districts);
   const factions = useGame((s) => s.factions);
-  const [state, setState] = useState({ zone: "—", control: 0 });
+  const [state, setState] = useState({ zone: "—", control: 0, safe: false });
   useEffect(() => {
     const read = () => {
       const px = game.predicted.x;
@@ -1602,8 +1602,12 @@ function ZoneReadout() {
       }
       const [rx, rz] = regionOf(px, pz);
       const control = territoryControl(rx, rz);
+      // Same central-chunk safe zone the position readout reports.
+      const safe = Math.abs(Math.floor(px / 32)) <= 1 && Math.abs(Math.floor(pz / 32)) <= 1;
       setState((prev) =>
-        prev.zone === zone && prev.control === control ? prev : { zone, control },
+        prev.zone === zone && prev.control === control && prev.safe === safe
+          ? prev
+          : { zone, control, safe },
       );
     };
     read();
@@ -1611,14 +1615,20 @@ function ZoneReadout() {
     return () => clearInterval(timer);
   }, [districts]);
   const faction = factions.find((f) => f.id === state.control);
-  const color = faction
-    ? `#${faction.color.toString(16).padStart(6, "0")}`
-    : "var(--text-dim)";
+  const color = state.safe
+    ? "var(--accent)"
+    : faction
+      ? `#${faction.color.toString(16).padStart(6, "0")}`
+      : "var(--text-dim)";
   return (
     <div className="hud-zone">
       <span className="hud-zone-name">{state.zone}</span>
       <span className="hud-zone-owner" style={{ color }}>
-        {faction ? faction.name.toUpperCase() : "UNCLAIMED"}
+        {state.safe
+          ? "SAFE ZONE"
+          : faction
+            ? faction.name.toUpperCase()
+            : "UNCLAIMED"}
       </span>
     </div>
   );
@@ -1632,6 +1642,7 @@ function ZoneReadout() {
  */
 function TerritoryTally() {
   const factions = useGame((s) => s.factions);
+  const mine = useGame((s) => s.zonesSecured);
   const [counts, setCounts] = useState<Record<number, number>>({});
   useEffect(() => {
     const read = () => {
@@ -1651,7 +1662,6 @@ function TerritoryTally() {
   }, []);
 
   const total = Object.values(counts).reduce((a, n) => a + n, 0);
-  const mine = counts[MY_FACTION] ?? 0;
   const rows = Object.entries(counts)
     .map(([id, n]) => ({ id: Number(id), n }))
     .filter((r) => r.n > 0)
@@ -1659,10 +1669,6 @@ function TerritoryTally() {
 
   return (
     <div className="hud-terr">
-      <div className="hud-terr-you">
-        <span className="hud-terr-label">SECURED (YOU)</span>
-        <span className="hud-terr-count">{mine}</span>
-      </div>
       {rows.length === 0 ? (
         <div className="hud-terr-empty">No territory held</div>
       ) : (
@@ -1694,6 +1700,10 @@ function TerritoryTally() {
           })}
         </div>
       )}
+      <div className="hud-terr-you">
+        <span className="hud-terr-label">SECURED BY YOU</span>
+        <span className="hud-terr-count">{mine}</span>
+      </div>
     </div>
   );
 }

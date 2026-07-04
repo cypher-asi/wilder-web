@@ -1,6 +1,6 @@
 //! Agent behaviors: raiders gather, refiners refine, crafters manufacture,
 //! traders arbitrage. Death and gear destruction are the item sinks; NPC
-//! bounties are the WILD faucet; market/crafting fees are the WILD burns.
+//! bounties are the MILD faucet; market/crafting fees are the MILD burns.
 
 use rand::Rng;
 use rand_pcg::Pcg64Mcg;
@@ -11,7 +11,7 @@ use wilder_types::ItemKind;
 use crate::market::Market;
 use crate::report::Report;
 
-/// WILD minted per successful raid (NPC bounty faucet).
+/// MILD minted per successful raid (NPC bounty faucet).
 const RAID_BOUNTY: f32 = 4.0;
 /// Chance a raid requires burning a medkit (consumable demand + sink).
 const MEDKIT_USE_CHANCE: f64 = 0.3;
@@ -21,7 +21,7 @@ const RAID_DEATH_CHANCE: f64 = 0.04;
 const GEAR_BREAK_ON_DEATH: f64 = 0.5;
 /// Per-raid chance the weapon wears out (durability sink).
 const WEAPON_WEAR_CHANCE: f64 = 0.02;
-/// Crafting station fee (burned WILD) per craft, scaled by output value.
+/// Crafting station fee (burned MILD) per craft, scaled by output value.
 const CRAFT_FEE_RATIO: f32 = 0.05;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -222,7 +222,7 @@ impl Agent {
             self.take(*kind, *need);
         }
 
-        // Craft: pay the station fee (WILD burn).
+        // Craft: pay the station fee (MILD burn).
         let fee = market.price(recipe.output.0) * recipe.output.1 as f32 * CRAFT_FEE_RATIO;
         if self.wild >= fee {
             self.wild -= fee;

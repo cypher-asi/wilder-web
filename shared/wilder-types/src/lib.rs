@@ -188,7 +188,7 @@ pub enum ItemKind {
     // Phase 3
     BlueprintFragment,
     PowerCell,
-    /// Looted street currency. Worthless until converted to WILD at a Bank.
+    /// Looted street currency. Worthless until converted to MILD at a Bank.
     Cash,
 }
 
@@ -359,7 +359,7 @@ pub enum EntityKind {
     ExtractionPoint,
     ResourceNode,
     /// Loose currency dropped on death (coins/shards/energy). The `variant`
-    /// field carries the currency type: 0 = WILD, 1 = Shards, 2 = Energy.
+    /// field carries the currency type: 0 = MILD, 1 = Shards, 2 = Energy.
     CurrencyPickup,
     /// Storage (stash) terminal.
     Building,
@@ -367,9 +367,9 @@ pub enum EntityKind {
     Factory,
     Laboratory,
     MarketTerminal,
-    /// Weapons & armor vendor (WILD buy/sell).
+    /// Weapons & armor vendor (MILD buy/sell).
     Armory,
-    /// Converts looted Cash into wallet WILD (minus a fee).
+    /// Converts looted Cash into wallet MILD (minus a fee).
     Bank,
     /// General store: sells consumables, buys raw resources cheap.
     Bodega,
@@ -535,7 +535,7 @@ impl ChunkData {
 // only moves between entities (players and agents); issuance and destruction
 // are explicit legs against the `Mint` / `Burn` system endpoints so total
 // supply stays auditable: circulating = minted - burned, per item and for
-// WILD.
+// MILD.
 // ---------------------------------------------------------------------------
 
 /// One side of an economy transaction.
@@ -592,7 +592,7 @@ pub enum TxKind {
     Drop,
     VendorBuy,
     VendorSell,
-    /// Bank: carried Cash burned, wallet WILD minted (minus the fee).
+    /// Bank: carried Cash burned, wallet MILD minted (minus the fee).
     BankConvert,
     /// Market escrow: items move from the seller to the market agent.
     MarketList,
@@ -621,7 +621,7 @@ pub struct EconTx {
     pub from: TxParty,
     pub to: TxParty,
     pub amount: TxAmount,
-    /// WILD fee attached to this tx (informational; fee flows get their own
+    /// MILD fee attached to this tx (informational; fee flows get their own
     /// `Fee` legs).
     pub fee: u32,
 }
@@ -634,6 +634,27 @@ pub struct ItemSupply {
     pub burned: u64,
 }
 
+/// One time bucket of market fill prices for an item kind (the price-over-time
+/// series behind the economy dashboard's item chart). Buckets are sparse:
+/// only minutes that saw at least one fill exist.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PriceBucket {
+    /// Bucket start, unix milliseconds.
+    pub t: u64,
+    /// Volume-weighted average fill price (MILD per unit).
+    pub avg: u32,
+    /// Cheapest fill in the bucket.
+    pub min: u32,
+    /// Priciest fill in the bucket.
+    pub max: u32,
+    /// Units traded.
+    pub units: u32,
+    /// MILD volume (sum of price x units).
+    pub wild: u64,
+    /// Number of fills.
+    pub fills: u32,
+}
+
 /// Aggregate economy snapshot pushed to dashboard subscribers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EconomyStats {
@@ -643,7 +664,7 @@ pub struct EconomyStats {
     pub tx_count: u64,
     pub wild_minted: u64,
     pub wild_burned: u64,
-    /// minted - burned (includes WILD held by vendor agents).
+    /// minted - burned (includes MILD held by vendor agents).
     pub wild_circulating: i64,
     #[serde(default)]
     pub shards_minted: u64,
@@ -653,7 +674,7 @@ pub struct EconomyStats {
     pub energy_minted: u64,
     #[serde(default)]
     pub energy_burned: u64,
-    /// Net WILD sitting on agent balances (vendors/market). Negative means
+    /// Net MILD sitting on agent balances (vendors/market). Negative means
     /// agents have paid out more than they took in (net faucet).
     pub wild_agent_held: i64,
     /// Per-item supply counters (only kinds that have seen activity).

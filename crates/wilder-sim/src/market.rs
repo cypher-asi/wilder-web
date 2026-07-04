@@ -1,6 +1,6 @@
 //! Simplified market: per-good price with supply/demand pressure, executed
 //! through a clearing pass each simulated hour. A percentage of every trade
-//! is burned (the WILD sink that fights inflation).
+//! is burned (the MILD sink that fights inflation).
 
 use rand::Rng;
 use rand_pcg::Pcg64Mcg;
@@ -26,7 +26,7 @@ pub struct GoodState {
 pub struct Market {
     goods: HashMap<ItemKind, GoodState>,
     /// Cash held by the clearing house. Buys pay in; sells pay out. Money is
-    /// conserved: only raid bounties mint WILD and only fees burn it.
+    /// conserved: only raid bounties mint MILD and only fees burn it.
     pub cash: f32,
 }
 
@@ -73,7 +73,7 @@ impl Market {
             .unwrap_or_else(|| base_price(kind))
     }
 
-    /// Offer `count` units for sale; returns WILD received (after burn).
+    /// Offer `count` units for sale; returns MILD received (after burn).
     /// Payout is limited by clearing-house cash, so sell income ultimately
     /// comes from other players' buys — money is conserved.
     pub fn sell(&mut self, kind: ItemKind, count: u32, report: &mut Report) -> f32 {

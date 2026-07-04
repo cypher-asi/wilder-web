@@ -113,9 +113,9 @@ fn main() {
     let last = report.days.last().unwrap();
     println!("--- final state ---");
     println!("price index:      {:.2} (1.0 = baseline)", last.price_index);
-    println!("money per agent:  {:.0} WILD", last.money_per_agent);
-    println!("faucet total:     {:.0} WILD", last.wild_minted);
-    println!("burned total:     {:.0} WILD ({:.0}%)", last.wild_burned, 100.0 * last.wild_burned / last.wild_minted.max(1.0));
+    println!("money per agent:  {:.0} MILD", last.money_per_agent);
+    println!("faucet total:     {:.0} MILD", last.wild_minted);
+    println!("burned total:     {:.0} MILD ({:.0}%)", last.wild_burned, 100.0 * last.wild_burned / last.wild_minted.max(1.0));
     println!("deaths:           {}", last.total_deaths);
     println!("items destroyed:  {}", last.items_destroyed);
     for kind in [ItemKind::Iron, ItemKind::SteelPlate, ItemKind::Pistol] {

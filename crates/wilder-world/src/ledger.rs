@@ -18,7 +18,7 @@ const RECENT_CAP: usize = 512;
 /// Server ticks per mock block (20 Hz -> ~5 s blocks).
 pub const TICKS_PER_BLOCK: u64 = 100;
 
-/// How a transaction affects item/WILD supply counters.
+/// How a transaction affects item/MILD supply counters.
 ///
 /// `Auto` derives the effect from the parties (`Mint` source mints, `Burn`
 /// sink burns, anything else is a neutral transfer). Vendor stock needs the
@@ -66,7 +66,7 @@ pub struct Ledger {
     items: HashMap<ItemKind, (u64, u64)>,
     wild_minted: u64,
     wild_burned: u64,
-    /// Net WILD sitting on agent balances (vendor takings minus payouts).
+    /// Net MILD sitting on agent balances (vendor takings minus payouts).
     wild_agent_held: i64,
     shards_minted: u64,
     shards_burned: u64,
@@ -186,7 +186,7 @@ impl Ledger {
                     None => {}
                 }
                 // Agent balance tracking: vendors/market accumulate takings
-                // and pay out proceeds from the same pool. Minted WILD leaves
+                // and pay out proceeds from the same pool. Minted MILD leaves
                 // an agent's books untouched (created, not paid out) and only
                 // lands on an agent when the agent is the recipient; burns
                 // mirror that on the source side.
@@ -246,6 +246,12 @@ impl Ledger {
     /// The recent-transaction ring, oldest first (dashboard snapshot).
     pub fn recent(&self) -> Vec<EconTx> {
         self.recent.iter().cloned().collect()
+    }
+
+    /// Supply counters for one kind (zeroes when it never saw activity).
+    pub fn item_supply(&self, kind: ItemKind) -> ItemSupply {
+        let (minted, burned) = self.items.get(&kind).copied().unwrap_or((0, 0));
+        ItemSupply { kind, minted, burned }
     }
 
     fn item_supplies(&self) -> Vec<ItemSupply> {
@@ -322,7 +328,7 @@ mod tests {
         let mut ledger = Ledger::new(LedgerSave::default());
         let wild = |amount| TxAmount::Wild { amount };
 
-        // Grant mints, vendor purchase moves WILD onto the agent, vendor
+        // Grant mints, vendor purchase moves MILD onto the agent, vendor
         // payout moves it back off.
         ledger.record(TxKind::Mint, TxParty::Mint, player(), wild(200), 0);
         ledger.record(TxKind::VendorBuy, player(), agent(), wild(50), 5);

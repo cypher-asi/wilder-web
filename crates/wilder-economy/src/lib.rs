@@ -68,8 +68,8 @@ pub fn zone_resource_index(zone: ZoneKind, roll: u32) -> usize {
 // NPC vendor price tables
 // ---------------------------------------------------------------------------
 
-/// A vendor's price line: `buy` = WILD the player pays per unit, `sell` =
-/// WILD the vendor pays the player per unit. 0 disables that direction.
+/// A vendor's price line: `buy` = MILD the player pays per unit, `sell` =
+/// MILD the vendor pays the player per unit. 0 disables that direction.
 pub struct VendorEntry {
     pub kind: ItemKind,
     pub buy: u32,
@@ -80,7 +80,7 @@ const fn entry(kind: ItemKind, buy: u32, sell: u32) -> VendorEntry {
     VendorEntry { kind, buy, sell }
 }
 
-/// Armory: weapons, armor and ammo in WILD. Buy prices sit above craft cost
+/// Armory: weapons, armor and ammo in MILD. Buy prices sit above craft cost
 /// so player manufacturing stays the cheap path; sell prices are the floor.
 const ARMORY: &[VendorEntry] = &[
     entry(ItemKind::Pipe, 30, 10),
@@ -113,6 +113,24 @@ pub fn vendor_offers(kind: EntityKind) -> &'static [VendorEntry] {
         EntityKind::Bodega => BODEGA,
         _ => &[],
     }
+}
+
+/// NPC reference prices for one item across every vendor table: the cheapest
+/// buy line and the best sell line, 0 where no vendor trades it that way.
+/// The market dashboard shows these as fixed reference prices next to the
+/// floating market series.
+pub fn reference_prices(kind: ItemKind) -> (u32, u32) {
+    let mut buy = 0u32;
+    let mut sell = 0u32;
+    for table in [ARMORY, BODEGA] {
+        for e in table.iter().filter(|e| e.kind == kind) {
+            if e.buy > 0 {
+                buy = if buy == 0 { e.buy } else { buy.min(e.buy) };
+            }
+            sell = sell.max(e.sell);
+        }
+    }
+    (buy, sell)
 }
 
 #[cfg(test)]
@@ -165,5 +183,17 @@ mod tests {
         }
         assert!(vendor_offers(EntityKind::Bank).is_empty());
         assert!(vendor_offers(EntityKind::Dealership).is_empty());
+    }
+
+    #[test]
+    fn reference_prices_merge_tables() {
+        // Ammo appears in both tables: cheapest buy wins.
+        assert_eq!(reference_prices(ItemKind::Ammo9mm), (1, 0));
+        // Armory-only gear.
+        assert_eq!(reference_prices(ItemKind::Pistol), (140, 45));
+        // Bodega buys resources but sells none.
+        assert_eq!(reference_prices(ItemKind::Iron), (0, 2));
+        // Untraded kinds are all-zero.
+        assert_eq!(reference_prices(ItemKind::SteelPlate), (0, 0));
     }
 }

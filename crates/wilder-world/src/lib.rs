@@ -9,6 +9,7 @@ pub mod districts;
 pub mod factions;
 pub mod interiors;
 mod ledger;
+pub mod market_stats;
 mod npc;
 pub mod stats;
 
@@ -38,12 +39,13 @@ use wilder_types::*;
 
 pub use chunks::ChunkCache;
 use agents::{
-    base_value, guild_for, mint_agent_name, AgentEvent, AgentSave, FactionAgent, Goal, Role,
-    TargetInfo, Tier, AGENT_RESPAWN_SECONDS, COLD_BUCKETS, COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS,
-    RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
+    activity_of, base_value, guild_for, mint_agent_name, Activity, AgentEvent, AgentSave,
+    FactionAgent, Goal, TargetInfo, Tier, Traits, AGENT_RESPAWN_SECONDS, COLD_BUCKETS,
+    COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS, RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
 };
 use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
+use market_stats::{MarketStats, MarketStatsSave};
 use npc::{mint_agent_identity, npc_spawns_for_chunk, Npc};
 use stats::{build_leaderboard, ActorRef, LiveActor, StatsBook};
 use smallvec::SmallVec;
@@ -52,6 +54,11 @@ pub const TICK_HZ: u32 = 20;
 pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
 /// Persist characters/chunks every this many ticks (10 s).
 const SAVE_INTERVAL_TICKS: u64 = 200;
+/// Agents per persisted shard. Shards save round-robin on their own cadence
+/// so agent persistence never serializes the whole population in one tick
+/// (a 50k-agent JSON blob is a multi-ms spike); the full population still
+/// cycles through roughly every `SAVE_INTERVAL_TICKS`.
+const AGENT_SAVE_SHARD: usize = 1024;
 /// Default spawn: on the road corner of chunk (0,0), always walkable.
 const SPAWN: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 /// Combat-patrol staging spot in the hub's contested combat ring: outside the
@@ -108,7 +115,13 @@ const POWER_BUDGET: f32 = 100.0;
 /// Market fee (percent) taken from every sale: routed to whoever holds the
 /// market's territory, burned otherwise.
 const MARKET_FEE_PCT: u32 = 5;
-/// WILD granted to every account once.
+/// Order book capacity (listings). Agents stop listing at the cap unless a
+/// dead floor-priced agent listing can be scrapped to make room.
+const MARKET_BOOK_CAP: usize = 200;
+/// Agent asks decay toward their price floor every this many ticks (~15 s):
+/// unsold stock walks down to meet demand instead of clogging the book.
+const MARKET_DECAY_TICKS: u64 = 300;
+/// MILD granted to every account once.
 const WALLET_GRANT: u32 = 200;
 /// Safehouse bubble radius (metres): hostiles ignore players inside and
 /// health regen applies as if in the safe hub.
@@ -140,6 +153,15 @@ const XP_RAIDER_KILL: u32 = 50;
 const TERRITORY_TAX_PCT: u32 = 25;
 /// Recompute territory occupancy every N ticks (20 Hz -> ~1 Hz).
 const TERRITORY_TICK_INTERVAL: u64 = 20;
+/// Field-intel strength attributed to a connected player (agents read this
+/// when weighing local force balance; roughly a pistol-armed fighter).
+const PLAYER_INTEL_STRENGTH: f32 = 20.0;
+/// Field-intel strength of one Wape NPC.
+const NPC_INTEL_STRENGTH: f32 = 6.0;
+/// Per-intel-tick (~1 s) decay of a region's observed commerce income.
+const INTEL_INCOME_DECAY: f32 = 0.99;
+/// Per-intel-tick decay of a region's recent-casualty signal.
+const INTEL_CASUALTY_DECAY: f32 = 0.95;
 /// Recount agents committed to each congestible service every N ticks; the
 /// count stays live between recounts as `decide_agent` reassigns agents.
 const SERVICE_LOAD_RECOUNT_INTERVAL: u64 = 20;
@@ -153,6 +175,8 @@ const ZONE_BUCKET_SECS: f64 = 60.0;
 const ZONE_BUCKETS: usize = (ZONE_WINDOW_SECS / ZONE_BUCKET_SECS) as usize;
 /// Refresh leaderboards for economy subscribers every N ticks (~5 s).
 const LEADERBOARD_TICK_INTERVAL: u64 = 100;
+/// Re-push watched item market detail (on new fills) every N ticks (~1 s).
+const ITEM_MARKET_TICK_INTERVAL: u64 = 20;
 /// Stream whole-map intel blips to map subscribers every N ticks (~5 Hz) so
 /// actor motion on the open map reads as smooth, live movement.
 const MAP_INTEL_TICK_INTERVAL: u64 = 4;
@@ -299,6 +323,84 @@ fn region_is_protected(r: (i32, i32)) -> bool {
 fn region_center(r: (i32, i32)) -> Vec3 {
     let side = REGION_CHUNKS as f32 * CHUNK_SIZE;
     Vec3::new((r.0 as f32 + 0.5) * side, 0.0, (r.1 as f32 + 0.5) * side)
+}
+
+/// Live per-region field intel, rebuilt once per territory tick (~1 Hz) from
+/// the same presence sweep that settles ownership. This is what agents "see"
+/// when they re-score goals: local force balance, who holds the ground, and
+/// how much commerce has recently flowed through it.
+#[derive(Debug, Clone, Copy, Default)]
+struct RegionIntel {
+    /// Current controller after this tick (FACTION_NEUTRAL = unheld).
+    controller: FactionId,
+    /// Alive bodies per side (players count as Rebel bodies).
+    rebels: u32,
+    forum: u32,
+    wapes: u32,
+    /// Summed combat strength per side (see `FactionAgent::strength`).
+    rebel_strength: f32,
+    forum_strength: f32,
+    wape_strength: f32,
+    /// Decaying accumulator of commerce MILD routed through this region —
+    /// the *observed* economic worth of holding the ground.
+    income: f32,
+    /// Decaying count of recent kills here (danger signal).
+    casualties: f32,
+}
+
+impl RegionIntel {
+    /// (friendly bodies, hostile bodies, friendly strength, hostile
+    /// strength) from `faction`'s point of view. Wapes are hostile to both
+    /// organized factions.
+    fn sides(&self, faction: FactionId) -> (u32, u32, f32, f32) {
+        match faction {
+            FACTION_REBELS => (
+                self.rebels,
+                self.forum + self.wapes,
+                self.rebel_strength,
+                self.forum_strength + self.wape_strength,
+            ),
+            FACTION_FORUM => (
+                self.forum,
+                self.rebels + self.wapes,
+                self.forum_strength,
+                self.rebel_strength + self.wape_strength,
+            ),
+            _ => (0, 0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Marginal value of one more friendly body pushing into a region we do
+/// NOT hold (Halo rules: the sole faction present claims the cell, standoffs
+/// don't flip). Highest for the first body into clean ground; decays as
+/// friendlies pile on (their presence is no longer pivotal).
+fn capture_pivotality(mine: u32, enemy: u32) -> f32 {
+    if enemy == 0 {
+        // Walk-in claim: the first body flips it, extras are redundant.
+        if mine == 0 {
+            1.0
+        } else {
+            0.35 / mine as f32
+        }
+    } else {
+        // Contested: bodies matter until the last enemy is cleared, but with
+        // diminishing returns as our side stacks up.
+        0.8 / (1.0 + mine as f32 * 0.5)
+    }
+}
+
+/// Marginal value of one more friendly body holding a region we DO hold.
+/// Empty-but-held ground persists (no defense needed); ground with enemies
+/// on it flips the moment our last body leaves, so thin defenses score high.
+fn defend_pivotality(mine: u32, enemy: u32) -> f32 {
+    if enemy == 0 {
+        0.0
+    } else if mine == 0 {
+        1.2 // about to flip: most urgent territory play there is
+    } else {
+        0.9 / mine as f32
+    }
 }
 
 /// Sliding-window accumulator of zone-seconds held per district and faction.
@@ -537,7 +639,7 @@ fn goal_service_target(goal: Goal) -> Option<EntityId> {
     }
 }
 
-/// WILD a vendor storefront of `store_kind` would actually pay for the
+/// MILD a vendor storefront of `store_kind` would actually pay for the
 /// agent's pack, per its price table. This — not raw carried value — is what
 /// prices a Sell errand: a Bodega pays nothing for an SMG, and an agent that
 /// values its own weapon at the counter walks into a sell-nothing loop at
@@ -1096,14 +1198,26 @@ pub struct World {
     territory: HashMap<(i32, i32), FactionId>,
     /// Territory changed since the last save.
     territory_dirty: bool,
+    /// Per-region field intel agents read when deciding (rebuilt ~1 Hz by
+    /// `tick_territory` from the same presence sweep that settles control).
+    field_intel: HashMap<(i32, i32), RegionIntel>,
+    /// Commerce MILD routed per region since the last intel rebuild.
+    region_income: HashMap<(i32, i32), u32>,
+    /// Kills per region since the last intel rebuild.
+    region_casualties: HashMap<(i32, i32), u32>,
     /// Rolling zone-seconds held per district/faction (dashboard momentum).
     zone_clock: ZoneClock,
     /// Economy transaction ledger + supply counters (K dashboard).
     ledger: Ledger,
+    /// Per-item market fill-price history (dashboard item charts + agent
+    /// pricing reference).
+    market_stats: MarketStats,
     /// Per-competitor stats + faction/guild lifetime totals (leaderboards).
     stats: StatsBook,
     /// Players subscribed to live ledger updates.
     econ_subs: HashSet<EntityId>,
+    /// Players watching one item's market detail (dashboard drill-in).
+    item_subs: HashMap<EntityId, ItemKind>,
     /// Autonomous faction agents (index-stable; identity swaps on respawn).
     agents: Vec<FactionAgent>,
     /// Live entity id -> agents index, for combat/target lookups.
@@ -1125,6 +1239,8 @@ pub struct World {
     /// re-score. A per-tick budget flattens decision bursts (a whole cold
     /// bucket going idle at once) into a steady, bounded per-tick cost.
     agent_decision_queue: std::collections::VecDeque<u32>,
+    /// Next agent-save shard to persist (round-robin, see `tick_agent_saves`).
+    agent_save_cursor: usize,
     /// Service entity -> count of agents currently committed to it (Sell/Buy
     /// vendor errands, craft stations). Drives congestion-aware routing so a
     /// cohort self-distributes across storefronts instead of funneling to the
@@ -1154,11 +1270,21 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         }
     };
 
-    let market: Vec<wilder_market::Listing> =
+    let mut market: Vec<wilder_market::Listing> =
         store.meta("market_listings").ok().flatten().unwrap_or_default();
+    // Saves predating the `agent` flag: any listing whose seller isn't a
+    // stored player character is agent stock (eligible for ask decay).
+    for l in market.iter_mut() {
+        if !l.agent {
+            l.agent = store.character(l.seller).is_err();
+        }
+    }
     let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
     // Ledger aggregates survive restarts; the recent-tx feed is in-memory.
     let ledger_save: LedgerSave = store.meta("econ_ledger").ok().flatten().unwrap_or_default();
+    // Per-item market price history survives restarts too.
+    let market_stats_save: MarketStatsSave =
+        store.meta("market_stats").ok().flatten().unwrap_or_default();
     // War map: which faction holds each region survives restarts too.
     let territory: HashMap<(i32, i32), FactionId> = store
         .meta::<Vec<(i32, i32, FactionId)>>("territory")
@@ -1194,10 +1320,15 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         rx,
         territory,
         territory_dirty: false,
+        field_intel: HashMap::new(),
+        region_income: HashMap::new(),
+        region_casualties: HashMap::new(),
         zone_clock: ZoneClock::new(districts::district_defs().len()),
         ledger: Ledger::new(ledger_save),
+        market_stats: MarketStats::new(market_stats_save),
         stats,
         econ_subs: HashSet::new(),
+        item_subs: HashMap::new(),
         agents: Vec::new(),
         agent_by_entity: HashMap::new(),
         agent_grid: HashMap::new(),
@@ -1205,6 +1336,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         dead_agents: Vec::new(),
         agent_path_queue: std::collections::VecDeque::new(),
         agent_decision_queue: std::collections::VecDeque::new(),
+        agent_save_cursor: 0,
         service_load: HashMap::new(),
         recent_attacks: HashMap::new(),
         district_spots: Vec::new(),
@@ -1325,7 +1457,7 @@ impl World {
             blueprints.insert((*id).to_string());
         }
 
-        // One-time WILD grant per account (tracked in world meta).
+        // One-time MILD grant per account (tracked in world meta).
         let (mut wallet, shards, energy) = self
             .store
             .account_by_id(account)
@@ -1461,6 +1593,7 @@ impl World {
                 }
             }
             self.econ_subs.remove(&entity);
+            self.item_subs.remove(&entity);
             self.persist_player(&player);
             tracing::info!(entity, name = %player.character.name, "player left");
         }
@@ -1550,6 +1683,7 @@ impl World {
             C2S::Market(action) => self.market_action(entity, action),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::EconomySub { on } => self.economy_sub(entity, on),
+            C2S::ItemMarketSub { kind } => self.item_market_sub(entity, kind),
             C2S::MapIntelSub { on } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.map_intel = on;
@@ -1914,7 +2048,7 @@ impl World {
             // agent until picked up or the containers expire.
             self.spawn_loot_scattered(drop_pos, items, Some(agent), true);
             // Loose currency spills out alongside the crate: a random handful
-            // of WILD coins (raiders carry more), plus an occasional shard and
+            // of MILD coins (raiders carry more), plus an occasional shard and
             // energy cell. These are walk-over collectibles (minted faucet).
             use rand::Rng;
             let coins = if is_raider {
@@ -2093,7 +2227,7 @@ impl World {
         let _ = self.store.update_currencies(account, shards, energy);
     }
 
-    /// Grant wallet WILD (minted faucet); see `grant_shards`. Used for the
+    /// Grant wallet MILD (minted faucet); see `grant_shards`. Used for the
     /// loose coin pickups dropped on death.
     fn grant_wild(&mut self, entity: EntityId, amount: u32) {
         if amount == 0 {
@@ -2682,9 +2816,11 @@ impl World {
         if self.tick % TERRITORY_TICK_INTERVAL != 0 {
             return;
         }
-        // (bodies, players) per faction per region.
-        let mut presence: HashMap<(i32, i32), HashMap<FactionId, (u32, u32)>> = HashMap::new();
-        let mut add = |pos: Vec3, faction: FactionId, is_player: bool| {
+        // (bodies, players, strength) per faction per region — one sweep
+        // feeds both the control math and the field intel agents decide on.
+        let mut presence: HashMap<(i32, i32), HashMap<FactionId, (u32, u32, f32)>> =
+            HashMap::new();
+        let mut add = |pos: Vec3, faction: FactionId, is_player: bool, strength: f32| {
             if faction == FACTION_NEUTRAL {
                 return;
             }
@@ -2692,23 +2828,26 @@ impl World {
                 .entry(region_of(pos))
                 .or_default()
                 .entry(faction)
-                .or_insert((0, 0));
+                .or_insert((0, 0, 0.0));
             entry.0 += 1;
             entry.1 += is_player as u32;
+            entry.2 += strength;
         };
         for p in self.players.values() {
             if p.character.health > 0.0 {
-                add(p.character.position, FACTION_REBELS, true);
+                add(p.character.position, FACTION_REBELS, true, PLAYER_INTEL_STRENGTH);
             }
         }
         for npc in self.npcs.values() {
             if npc.alive() {
-                add(npc.position, FACTION_WAPES, false);
+                add(npc.position, FACTION_WAPES, false, NPC_INTEL_STRENGTH);
             }
         }
         // Agents come off the maintained spatial grid: only living agents,
         // already grouped by chunk, with the region derived once per bucket
         // — not a scan of the whole (mostly irrelevant) population vec.
+        // Remember who stood where for the capture-payoff credits below.
+        let mut agent_where: Vec<((i32, i32), u32)> = Vec::new();
         for (chunk, bucket) in &self.agent_grid {
             if bucket.is_empty() {
                 continue;
@@ -2722,7 +2861,10 @@ impl World {
                 if !agent.alive() || agent.faction == FACTION_NEUTRAL {
                     continue;
                 }
-                counts.entry(agent.faction).or_insert((0, 0)).0 += 1;
+                let entry = counts.entry(agent.faction).or_insert((0, 0, 0.0));
+                entry.0 += 1;
+                entry.2 += agent.strength();
+                agent_where.push((region, i));
             }
         }
 
@@ -2731,6 +2873,8 @@ impl World {
         regions.extend(self.territory.keys().copied());
 
         let mut changed = false;
+        // Regions that just flipped to a faction (payoff credits below).
+        let mut flips: HashMap<(i32, i32), FactionId> = HashMap::new();
         for r in regions {
             let cur = self.territory.get(&r).copied().unwrap_or(FACTION_NEUTRAL);
             let empty = HashMap::new();
@@ -2745,7 +2889,7 @@ impl World {
                     // and no other faction can ever take it.
                     DangerLevel::Guarded => {
                         let home = districts::home_faction_at(center);
-                        if counts.get(&home).map(|&(n, _)| n).unwrap_or(0) > 0 {
+                        if counts.get(&home).map(|&(n, _, _)| n).unwrap_or(0) > 0 {
                             home
                         } else if cur == home {
                             cur // hold home turf once lit
@@ -2773,6 +2917,7 @@ impl World {
                     self.territory.remove(&r);
                 } else {
                     self.territory.insert(r, desired);
+                    flips.insert(r, desired);
                 }
                 changed = true;
             }
@@ -2780,6 +2925,84 @@ impl World {
         if changed {
             self.territory_dirty = true;
             self.broadcast_territory();
+        }
+
+        // Rebuild the field intel map: presence counts/strengths, settled
+        // control, and decaying income/casualty signals.
+        let fresh_income = std::mem::take(&mut self.region_income);
+        let fresh_casualties = std::mem::take(&mut self.region_casualties);
+        let mut intel_regions: HashSet<(i32, i32)> = HashSet::new();
+        intel_regions.extend(presence.keys().copied());
+        intel_regions.extend(self.territory.keys().copied());
+        intel_regions.extend(self.field_intel.keys().copied());
+        intel_regions.extend(fresh_income.keys().copied());
+        intel_regions.extend(fresh_casualties.keys().copied());
+        let mut intel: HashMap<(i32, i32), RegionIntel> = HashMap::new();
+        for r in intel_regions {
+            let mut cell = RegionIntel::default();
+            if let Some(old) = self.field_intel.get(&r) {
+                cell.income = old.income * INTEL_INCOME_DECAY;
+                cell.casualties = old.casualties * INTEL_CASUALTY_DECAY;
+            }
+            cell.income += fresh_income.get(&r).copied().unwrap_or(0) as f32;
+            cell.casualties += fresh_casualties.get(&r).copied().unwrap_or(0) as f32;
+            if let Some(counts) = presence.get(&r) {
+                for (&f, &(n, _, s)) in counts {
+                    match f {
+                        FACTION_REBELS => {
+                            cell.rebels = n;
+                            cell.rebel_strength = s;
+                        }
+                        FACTION_FORUM => {
+                            cell.forum = n;
+                            cell.forum_strength = s;
+                        }
+                        FACTION_WAPES => {
+                            cell.wapes = n;
+                            cell.wape_strength = s;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            cell.controller = self.territory.get(&r).copied().unwrap_or(FACTION_NEUTRAL);
+            // Drop dead entries so the map tracks activity, not history.
+            let quiet = cell.rebels == 0
+                && cell.forum == 0
+                && cell.wapes == 0
+                && cell.controller == FACTION_NEUTRAL
+                && cell.income < 0.5
+                && cell.casualties < 0.1;
+            if !quiet {
+                intel.insert(r, cell);
+            }
+        }
+        self.field_intel = intel;
+
+        // Learning: a flip pays every friendly body standing in the region
+        // (their presence did the flipping); a contested hold pays the agents
+        // deliberately standing guard. Both are rate samples (MILD/min) —
+        // the value a body earns its faction by being exactly here.
+        for &(r, i) in &agent_where {
+            let idx = i as usize;
+            let Some(cell) = self.field_intel.get(&r).copied() else { continue };
+            let faction = self.agents[idx].faction;
+            if flips.get(&r) == Some(&faction) {
+                self.agents[idx]
+                    .traits
+                    .credit(Activity::Capture, 35.0 + (cell.income * 0.3).min(45.0));
+                continue;
+            }
+            let (_, enemy, _, _) = cell.sides(faction);
+            let holding = matches!(
+                self.agents[idx].goal,
+                Goal::Capture { .. } | Goal::Defend { .. }
+            );
+            if holding && cell.controller == faction && enemy > 0 {
+                self.agents[idx]
+                    .traits
+                    .credit(Activity::Capture, 12.0 + (cell.income * 0.2).min(20.0));
+            }
         }
 
         // Accrue rolling zone-seconds for whatever is held this tick. The
@@ -2930,6 +3153,7 @@ impl World {
                     kind,
                     count,
                     price_each,
+                    agent: false,
                 };
                 self.next_listing_id += 1;
                 self.market.push(listing);
@@ -2950,7 +3174,7 @@ impl World {
                 let cost = price_each.saturating_mul(count);
                 let buyer = self.players.get_mut(&entity).ok_or("not in world")?;
                 if buyer.wallet < cost {
-                    return Err(format!("need {cost} WILD, have {}", buyer.wallet));
+                    return Err(format!("need {cost} MILD, have {}", buyer.wallet));
                 }
                 buyer.wallet -= cost;
                 let buyer_account = buyer.character.account_id;
@@ -2974,7 +3198,7 @@ impl World {
                 let proceeds = cost - fee;
                 let _ = seller_name; // display name lives on the listing
                 // Ledger: escrowed items leave the market agent for the
-                // buyer; the buyer's WILD splits into seller proceeds and
+                // buyer; the buyer's MILD splits into seller proceeds and
                 // the market fee (routed to territory holders or burned).
                 let seller_party = self.credit_market_seller(seller, proceeds);
                 // Leaderboards: both sides of a fill count a trade.
@@ -3008,6 +3232,7 @@ impl World {
                     );
                 }
                 self.ledger.trades += 1;
+                self.market_stats.record_fill(kind, price_each, count);
 
                 let l = &mut self.market[idx];
                 l.count -= count;
@@ -3140,7 +3365,7 @@ impl World {
                 let cost = offer.buy.saturating_mul(count);
                 let player = self.players.get_mut(&entity).ok_or("not in world")?;
                 if player.wallet < cost {
-                    return Err(format!("need {cost} WILD, have {}", player.wallet));
+                    return Err(format!("need {cost} MILD, have {}", player.wallet));
                 }
                 player.wallet -= cost;
                 let account = player.character.account_id;
@@ -3150,7 +3375,7 @@ impl World {
                 let leftover = inv::add_items(&mut player.inventory.slots, item, count);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
-                // Ledger: WILD moves onto the vendor agent; the stock the
+                // Ledger: MILD moves onto the vendor agent; the stock the
                 // vendor hands over is fresh issuance (bottomless shelves).
                 self.ledger.record(
                     TxKind::VendorBuy,
@@ -3242,7 +3467,7 @@ impl World {
                 let converter = player_party(player);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
-                // Ledger: Cash burns out of supply and WILD mints in its
+                // Ledger: Cash burns out of supply and MILD mints in its
                 // place (minus the fee, routed below as commerce).
                 self.ledger.record_ex(
                     TxKind::BankConvert,
@@ -3273,9 +3498,9 @@ impl World {
     /// as do rounding remainders.
     ///
     /// Ledger: `from` is the agent routing the cut. When `minted` is true the
-    /// cut is new WILD (bank conversion fee) — paid shares are mint legs and
-    /// unrouted WILD simply never enters supply; otherwise the cut is real
-    /// WILD the agent collected, so unrouted amounts burn.
+    /// cut is new MILD (bank conversion fee) — paid shares are mint legs and
+    /// unrouted MILD simply never enters supply; otherwise the cut is real
+    /// MILD the agent collected, so unrouted amounts burn.
     fn distribute_commerce(&mut self, pos: Vec3, cut: u32, from: TxParty, minted: bool) {
         if cut == 0 {
             return;
@@ -3283,6 +3508,9 @@ impl World {
         // Anything not paid out either burns (real WILD) or is never minted.
         let mut unrouted = cut;
         let region = region_of(pos);
+        // Field intel: commerce flowed here — this ground is worth holding,
+        // whoever (if anyone) currently skims it.
+        *self.region_income.entry(region).or_insert(0) += cut;
         let controller = self.territory.get(&region).copied().unwrap_or(FACTION_NEUTRAL);
         if controller != FACTION_NEUTRAL {
             let holders: Vec<EntityId> = self
@@ -3326,7 +3554,7 @@ impl World {
                     );
                     let _ = player.tx.send(S2C::Chat {
                         from: "system".into(),
-                        text: format!("+{share} WILD — commerce cut from territory you hold"),
+                        text: format!("+{share} MILD — commerce cut from territory you hold"),
                     });
                 }
                 for idx in holder_agents {
@@ -3515,6 +3743,14 @@ impl World {
             if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
                 w.broadcast_map_intel();
             }
+            // Unsold agent asks decay toward their floor every ~15 s.
+            if w.tick % MARKET_DECAY_TICKS == 0 {
+                w.tick_market_decay();
+            }
+            // Item market drill-in: re-push watched kinds that traded, ~1 Hz.
+            if w.tick % ITEM_MARKET_TICK_INTERVAL == 0 {
+                w.broadcast_item_markets();
+            }
         });
 
         // Clear per-tick attack flags only after replicate so the Attack anim
@@ -3527,6 +3763,9 @@ impl World {
         if self.tick % SAVE_INTERVAL_TICKS == 0 {
             self.timed(TickPhase::Save, |w| w.save_all());
         }
+        // Agent persistence rotates one bounded shard at a time on its own
+        // stride (the early return is a couple of integer ops on off-ticks).
+        self.timed(TickPhase::Save, |w| w.tick_agent_saves());
 
         self.timings.finish_tick(step_start.elapsed());
     }
@@ -3619,15 +3858,23 @@ impl World {
     /// discs, so melee piles no longer interpenetrate. Players are never
     /// moved — client prediction owns their position and a server-side shove
     /// would fight reconciliation — and every push respects world collision.
+    ///
+    /// Several relaxation iterations per tick: steering re-converges agents
+    /// that share a destination at up to one movement step per tick, so a
+    /// single half-overlap push (capped at the same step) can only ever fight
+    /// it to a draw — doorway queues then fester at half-body overlap.
+    /// Iterating until separation outruns re-convergence lets piles unwind;
+    /// the loop exits early once nobody moved.
     fn separate_characters(&mut self) {
         /// Two character discs touch at twice the shared body radius.
         const MIN_SEP: f32 = PLAYER_RADIUS * 2.0;
-        /// Fraction of the remaining overlap resolved per tick. Softness
+        /// Fraction of the remaining overlap resolved per iteration. Softness
         /// spreads the resolution over a few ticks so packed crowds relax
         /// smoothly instead of jittering.
         const RELAX: f32 = 0.5;
-        /// A body never gets shoved faster than it can run.
+        /// A body never gets shoved faster than it can run (per iteration).
         const MAX_PUSH: f32 = agents::AGENT_SPEED * TICK_DT;
+        const ITERATIONS: usize = 4;
 
         enum Body {
             Agent(usize),
@@ -3659,7 +3906,9 @@ impl World {
         }
 
         // Fine spatial hash: cell = MIN_SEP, so any overlapping pair sits in
-        // the same or an adjacent cell.
+        // the same or an adjacent cell. Built once; positions only move a
+        // fraction of a cell per iteration, so the 3x3 scan still sees every
+        // candidate pair on the second pass.
         let cell =
             |p: &Vec3| ((p.x / MIN_SEP).floor() as i32, (p.z / MIN_SEP).floor() as i32);
         let mut grid: HashMap<(i32, i32), SmallVec<[u32; 4]>> =
@@ -3669,73 +3918,92 @@ impl World {
         }
 
         let mut pushes = vec![(0.0f32, 0.0f32); bodies.len()];
-        for (i, (kind_i, pos_i)) in bodies.iter().enumerate() {
-            let movable_i = !matches!(kind_i, Body::Player);
-            let (cx, cz) = cell(pos_i);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else { continue };
-                    for &j in bucket {
-                        let j = j as usize;
-                        if j <= i {
-                            continue; // each pair once
+        let mut moved = false;
+        for iteration in 0..ITERATIONS {
+            if iteration > 0 && !moved {
+                break; // fully separated (or fully wedged) after one pass
+            }
+            for p in pushes.iter_mut() {
+                *p = (0.0, 0.0);
+            }
+            for (i, (kind_i, pos_i)) in bodies.iter().enumerate() {
+                let movable_i = !matches!(kind_i, Body::Player);
+                let (cx, cz) = cell(pos_i);
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else { continue };
+                        for &j in bucket {
+                            let j = j as usize;
+                            if j <= i {
+                                continue; // each pair once
+                            }
+                            let (kind_j, pos_j) = &bodies[j];
+                            let movable_j = !matches!(kind_j, Body::Player);
+                            if !movable_i && !movable_j {
+                                continue;
+                            }
+                            let dxw = pos_j.x - pos_i.x;
+                            let dzw = pos_j.z - pos_i.z;
+                            let d2 = dxw * dxw + dzw * dzw;
+                            if d2 >= MIN_SEP * MIN_SEP {
+                                continue;
+                            }
+                            let d = d2.sqrt();
+                            // Coincident centers: derive a stable push axis
+                            // from the pair indices so the bodies part ways.
+                            let (nx, nz) = if d > 1e-4 {
+                                (dxw / d, dzw / d)
+                            } else {
+                                let a = (i * 31 + j * 17) as f32;
+                                (a.cos(), a.sin())
+                            };
+                            let overlap = (MIN_SEP - d) * RELAX;
+                            // Immovable neighbors (players) transfer their share.
+                            let (wi, wj) = match (movable_i, movable_j) {
+                                (true, true) => (0.5, 0.5),
+                                (true, false) => (1.0, 0.0),
+                                _ => (0.0, 1.0),
+                            };
+                            pushes[i].0 -= nx * overlap * wi;
+                            pushes[i].1 -= nz * overlap * wi;
+                            pushes[j].0 += nx * overlap * wj;
+                            pushes[j].1 += nz * overlap * wj;
                         }
-                        let (kind_j, pos_j) = &bodies[j];
-                        let movable_j = !matches!(kind_j, Body::Player);
-                        if !movable_i && !movable_j {
-                            continue;
-                        }
-                        let dxw = pos_j.x - pos_i.x;
-                        let dzw = pos_j.z - pos_i.z;
-                        let d2 = dxw * dxw + dzw * dzw;
-                        if d2 >= MIN_SEP * MIN_SEP {
-                            continue;
-                        }
-                        let d = d2.sqrt();
-                        // Coincident centers: derive a stable push axis from
-                        // the pair indices so the two bodies part ways.
-                        let (nx, nz) = if d > 1e-4 {
-                            (dxw / d, dzw / d)
-                        } else {
-                            let a = (i * 31 + j * 17) as f32;
-                            (a.cos(), a.sin())
-                        };
-                        let overlap = (MIN_SEP - d) * RELAX;
-                        // Immovable neighbors (players) transfer their share.
-                        let (wi, wj) = match (movable_i, movable_j) {
-                            (true, true) => (0.5, 0.5),
-                            (true, false) => (1.0, 0.0),
-                            _ => (0.0, 1.0),
-                        };
-                        pushes[i].0 -= nx * overlap * wi;
-                        pushes[i].1 -= nz * overlap * wi;
-                        pushes[j].0 += nx * overlap * wj;
-                        pushes[j].1 += nz * overlap * wj;
                     }
+                }
+            }
+
+            moved = false;
+            for (idx, (_, pos)) in bodies.iter_mut().enumerate() {
+                let (mut px, mut pz) = pushes[idx];
+                let len2 = px * px + pz * pz;
+                if len2 < 1e-8 {
+                    continue;
+                }
+                let len = len2.sqrt();
+                if len > MAX_PUSH {
+                    px *= MAX_PUSH / len;
+                    pz *= MAX_PUSH / len;
+                }
+                let next = nudge(&self.chunks, *pos, px, pz);
+                if (next - *pos).length_squared() > 1e-10 {
+                    *pos = next;
+                    moved = true;
                 }
             }
         }
 
-        for (idx, (body, pos)) in bodies.iter().enumerate() {
-            let (mut px, mut pz) = pushes[idx];
-            let len2 = px * px + pz * pz;
-            if len2 < 1e-8 {
-                continue;
-            }
-            let len = len2.sqrt();
-            if len > MAX_PUSH {
-                px *= MAX_PUSH / len;
-                pz *= MAX_PUSH / len;
-            }
-            let next = nudge(&self.chunks, *pos, px, pz);
+        for (body, pos) in bodies {
             match body {
                 Body::Agent(i) => {
-                    self.agents[*i].position = next;
-                    self.regrid_agent(*i);
+                    if (self.agents[i].position - pos).length_squared() > 1e-10 {
+                        self.agents[i].position = pos;
+                        self.regrid_agent(i);
+                    }
                 }
                 Body::Npc(id) => {
-                    if let Some(npc) = self.npcs.get_mut(id) {
-                        npc.position = next;
+                    if let Some(npc) = self.npcs.get_mut(&id) {
+                        npc.position = pos;
                     }
                 }
                 Body::Player => {}
@@ -4095,6 +4363,15 @@ impl World {
             let killer = self.actor_ref(attacker);
             let victim = self.agent_actor_ref(idx);
             self.stats.record_kill(killer.as_ref(), &victim);
+            // A winning fight is the Fight activity's payoff: bounty plus a
+            // share of what the victim was carrying (the killer's side can
+            // now loot it / hold the ground it defended).
+            let spoils =
+                self.agents[idx].wallet + self.agents[idx].carried_value();
+            if let Some(&killer_idx) = self.agent_by_entity.get(&attacker) {
+                self.agents[killer_idx]
+                    .learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
+            }
             // Hot-tier death: a real body drops real loot.
             self.kill_agent(idx, true);
             if self.players.contains_key(&attacker) {
@@ -4115,6 +4392,11 @@ impl World {
             agent.health = 0.0;
             agent.anim = AnimState::Death;
             agent.respawn_in = AGENT_RESPAWN_SECONDS;
+            // Dying is the loss signal: charge everything on the body to the
+            // activity that got the agent killed, so risky lines of work
+            // learn their true (risk-adjusted) return.
+            let lost = agent.wallet + agent.carried_value();
+            agent.learn(activity_of(agent.goal), -(lost as f32));
             agent.goal = Goal::Idle;
             agent.path.clear();
             agent.path_request = None;
@@ -4122,6 +4404,8 @@ impl World {
             let wallet = std::mem::take(&mut agent.wallet);
             (agent.entity, agent.position, items, wallet, agent.party())
         };
+        // Field intel: a body dropped here (danger signal).
+        *self.region_casualties.entry(region_of(position)).or_insert(0) += 1;
         // Dead: out of the spatial grid, onto the respawn list.
         self.regrid_agent(idx);
         if !self.dead_agents.contains(&(idx as u32)) {
@@ -4470,6 +4754,11 @@ impl World {
                     self.agents[killer].alive().then_some(&killer_actor),
                     &victim_actor,
                 );
+                // Statistical wins teach Fight the same way embodied ones do.
+                let spoils = self.agents[idx].wallet + self.agents[idx].carried_value();
+                if self.agents[killer].alive() {
+                    self.agents[killer].learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
+                }
                 self.kill_agent(idx, false);
             }
         }
@@ -4675,22 +4964,28 @@ impl World {
     /// so peers deciding later this tick route around it.
     fn commit_goal(&mut self, idx: usize, goal: Goal) {
         self.agents[idx].goal = goal;
+        self.agents[idx].goal_age = 0.0;
         if let Some(e) = goal_service_target(goal) {
             *self.service_load.entry(e).or_insert(0) += 1;
         }
     }
 
-    /// Utility-AI: score candidate goals for one agent and commit to the best.
+    /// Utility-AI: score candidate goals for one agent and commit to the
+    /// best. There is no role table — every multiplier comes from the
+    /// agent's learned `Traits`, and territory plays (capture/defend) are
+    /// scored from live field intel by marginal impact, so what an agent
+    /// does emerges from what it has seen pay off on the ground it's on.
     fn decide_agent(&mut self, idx: usize) {
         use rand::Rng;
-        let (pos, role, faction, health_frac, wallet, haul, entity, retreat_cd) = {
+        let (pos, traits, faction, health_frac, wallet, carried, haul, entity, retreat_cd) = {
             let a = &self.agents[idx];
             (
                 a.position,
-                a.role,
+                a.traits,
                 a.faction,
                 a.health / a.max_health,
                 a.wallet,
+                a.carried_value(),
                 a.haul_value(),
                 a.entity,
                 a.retreat_cooldown,
@@ -4719,7 +5014,7 @@ impl World {
         let danger_here = districts::danger_at(pos);
         let mut best: (f32, Goal) = (2.0, Goal::Patrol { to: self.wander_target(idx) });
 
-        // --- Gather: expected WILD from zone drops, boosted in warzones ---
+        // --- Gather: expected MILD from zone drops, boosted in warzones ---
         let zone = zone_of_chunk(ChunkCoord::from_world(pos));
         let weights = wilder_economy::zone_resource_weights(zone);
         let total: u32 = weights.iter().sum();
@@ -4762,7 +5057,7 @@ impl World {
             Role::Scavenger => 1.2,
             _ => 1.0,
         };
-        let want_market = role == Role::Trader && self.market.len() < 200;
+        let want_market = role == Role::Trader && self.market.len() < MARKET_BOOK_CAP;
         let sell_plan = if want_market {
             self.route_service(pos, EntityKind::MarketTerminal)
                 .map(|r| (true, market_list_value(&self.agents[idx]), r))
@@ -4924,7 +5219,8 @@ impl World {
         if role == Role::Crafter && best_recipe.is_none() && wallet >= 30 {
             let wanted = [ItemKind::Iron, ItemKind::Copper, ItemKind::Chemicals, ItemKind::Biomass];
             let listing = self.market.iter().find(|l| {
-                wanted.contains(&l.kind) && l.price_each <= base_value(l.kind).saturating_mul(2)
+                wanted.contains(&l.kind)
+                    && l.price_each <= self.market_ref_price(l.kind).saturating_mul(2)
             });
             if let Some(l) = listing {
                 if let Some((_, terminal_pos)) =
@@ -4949,8 +5245,9 @@ impl World {
         // --- Trade: arbitrage underpriced listings (Trader role) ---
         if role == Role::Trader && wallet >= 20 {
             let bargain = self.market.iter().any(|l| {
-                let base = base_value(l.kind);
-                l.price_each.saturating_mul(10) <= base.saturating_mul(7) && l.price_each <= wallet
+                let market_ref = self.market_ref_price(l.kind);
+                l.price_each.saturating_mul(10) <= market_ref.saturating_mul(7)
+                    && l.price_each <= wallet
             });
             if bargain {
                 if let Some((_, terminal_pos)) =
@@ -5152,7 +5449,7 @@ impl World {
     }
 
     /// Complete an extraction channel: the agent's haul (everything but its
-    /// personal kit) ships off-map for full reference value in WILD. Items
+    /// personal kit) ships off-map for full reference value in MILD. Items
     /// burn from supply; the payout mints, taxed on hostile-held ground like
     /// player extractions.
     fn agent_extract(&mut self, idx: usize) {
@@ -5336,8 +5633,90 @@ impl World {
         );
     }
 
-    /// List the agent's carried resources on the market book at a markup
-    /// over reference value.
+    /// Live market reference price for an item: the most recent fill when the
+    /// kind has traded, clamped to sane bounds around the static base value
+    /// (so one absurd fill can't poison agent decisions), else the base value.
+    fn market_ref_price(&self, kind: ItemKind) -> u32 {
+        let base = base_value(kind).max(1);
+        match self.market_stats.last_price(kind) {
+            Some(p) => p.clamp((base / 2).max(1), base.saturating_mul(3)),
+            None => base,
+        }
+    }
+
+    /// Walk every agent ask down ~5% toward its price floor (unsold stock
+    /// meets demand instead of clogging the book forever); player listings
+    /// are never repriced. Changed kinds are marked dirty so item-market
+    /// watchers see the book move. Called every `MARKET_DECAY_TICKS`.
+    fn tick_market_decay(&mut self) {
+        let mut changed = false;
+        for i in 0..self.market.len() {
+            let l = &self.market[i];
+            if !l.agent {
+                continue;
+            }
+            let floor = (base_value(l.kind) / 2).max(1);
+            if l.price_each <= floor {
+                continue;
+            }
+            let next = (l.price_each.saturating_mul(95) / 100).clamp(floor, l.price_each - 1);
+            let kind = l.kind;
+            self.market[i].price_each = next;
+            self.market_stats.mark_dirty(kind);
+            changed = true;
+        }
+        if changed {
+            self.save_market();
+        }
+    }
+
+    /// Ask price for a fresh agent listing. Prices float with supply and
+    /// demand instead of sitting on a static markup: with live competition on
+    /// the book the new seller undercuts the cheapest ask by ~5%; on an empty
+    /// book (demand just cleared the supply) it marks up ~10% over the last
+    /// fill. Clamped to [base/2, base*3] so the loop can't run away.
+    fn agent_ask_price(&self, kind: ItemKind) -> u32 {
+        let base = base_value(kind).max(1);
+        let floor = (base / 2).max(1);
+        let ceil = base.saturating_mul(3);
+        let best_ask = self
+            .market
+            .iter()
+            .filter(|l| l.kind == kind && l.count > 0)
+            .map(|l| l.price_each)
+            .min();
+        let anchor = match best_ask {
+            Some(ask) => ask.saturating_mul(95) / 100,
+            None => self.market_ref_price(kind).saturating_mul(11) / 10,
+        };
+        anchor.clamp(floor, ceil)
+    }
+
+    /// Evict one floor-priced agent listing to make room on a full book (the
+    /// escrowed items burn — dead stock nobody bought at the minimum price).
+    /// Returns false when the book is wall-to-wall player listings.
+    fn evict_stale_listing(&mut self) -> bool {
+        let Some(pos) = self
+            .market
+            .iter()
+            .position(|l| l.agent && l.price_each <= (base_value(l.kind) / 2).max(1))
+        else {
+            return false;
+        };
+        let l = self.market.remove(pos);
+        self.ledger.record(
+            TxKind::Burn,
+            self.market_party(),
+            TxParty::Burn,
+            TxAmount::Item { kind: l.kind, count: l.count },
+            0,
+        );
+        self.market_stats.mark_dirty(l.kind);
+        true
+    }
+
+    /// List the agent's carried resources on the market book at the current
+    /// floating market price.
     fn agent_market_list(&mut self, idx: usize) {
         let market_agent = self.market_party();
         let carried: Vec<(ItemKind, u32)> = self.agents[idx]
@@ -5347,14 +5726,16 @@ impl World {
             .map(|s| (s.kind, s.count))
             .collect();
         for (kind, count) in carried {
-            if self.market.len() >= 200 {
+            // Full book: scrap dead floor-priced agent stock to make room;
+            // if none exists the book really is full and listing stops.
+            if self.market.len() >= MARKET_BOOK_CAP && !self.evict_stale_listing() {
                 break;
             }
+            let price_each = self.agent_ask_price(kind);
             let removed = self.agents[idx].remove_item(kind, count);
             if removed == 0 {
                 continue;
             }
-            let price_each = (base_value(kind).saturating_mul(11) / 10).max(1);
             let seller_party = self.agents[idx].party();
             self.ledger.record(
                 TxKind::MarketList,
@@ -5372,6 +5753,7 @@ impl World {
                 kind,
                 count: removed,
                 price_each,
+                agent: true,
             };
             self.next_listing_id += 1;
             self.market.push(listing);
@@ -5448,6 +5830,7 @@ impl World {
             self.ledger.record(TxKind::Fee, market_agent, TxParty::Burn, TxAmount::Wild { amount: fee }, 0);
         }
         self.ledger.trades += 1;
+        self.market_stats.record_fill(kind, price_each, affordable);
         let l = &mut self.market[pos];
         l.count -= affordable;
         if l.count == 0 {
@@ -5482,21 +5865,22 @@ impl World {
     }
 
     /// Trader arbitrage at a terminal: buy the best underpriced listing,
-    /// then relist it above reference value.
+    /// then relist it at the floating market price.
     fn agent_trade(&mut self, idx: usize) {
         self.agents[idx].goal = Goal::Idle;
         let wallet = self.agents[idx].wallet;
         let me = self.agents[idx].agent_id;
-        // Best bargain: largest absolute discount vs reference value.
+        // Best bargain: largest absolute discount vs the live market price.
         let pick = self
             .market
             .iter()
             .filter(|l| {
                 l.seller != me
                     && l.price_each <= wallet
-                    && l.price_each.saturating_mul(10) <= base_value(l.kind).saturating_mul(7)
+                    && l.price_each.saturating_mul(10)
+                        <= self.market_ref_price(l.kind).saturating_mul(7)
             })
-            .max_by_key(|l| base_value(l.kind).saturating_sub(l.price_each))
+            .max_by_key(|l| self.market_ref_price(l.kind).saturating_sub(l.price_each))
             .map(|l| (l.kind, l.price_each));
         let Some((kind, price_each)) = pick else { return };
         if self.agent_market_buy(idx, kind, u32::MAX, price_each) {
@@ -5567,7 +5951,22 @@ impl World {
         let layout: u32 =
             self.store.meta("agent_seed_layout").ok().flatten().unwrap_or(0);
         let saves: Vec<AgentSave> = if layout == AGENT_SEED_LAYOUT {
-            self.store.meta("faction_agents").ok().flatten().unwrap_or_default()
+            // Sharded layout when the descriptor exists (concatenate every
+            // shard), else the legacy single blob (pre-shard worlds).
+            let shard_count: Option<usize> =
+                self.store.meta("faction_agents_shards").ok().flatten();
+            match shard_count {
+                Some(shards) => (0..shards)
+                    .flat_map(|shard| {
+                        self.store
+                            .meta::<Vec<AgentSave>>(&format!("faction_agents_shard_{shard}"))
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+                None => self.store.meta("faction_agents").ok().flatten().unwrap_or_default(),
+            }
         } else {
             Vec::new()
         };
@@ -5589,6 +5988,10 @@ impl World {
                 self.regrid_agent(idx);
             }
             tracing::info!(agents = self.agents.len(), "faction agents restored");
+            // One full-shard write so the sharded layout is complete before
+            // the rotating saver takes over (this is also what migrates a
+            // legacy single-blob save to shards).
+            self.save_agent_shards_full();
             return;
         }
         let total: usize = std::env::var("WILDER_AGENTS")
@@ -5597,6 +6000,7 @@ impl World {
             .unwrap_or(500);
         self.seed_agents(total);
         let _ = self.store.save_meta("agent_seed_layout", &AGENT_SEED_LAYOUT);
+        self.save_agent_shards_full();
         tracing::info!(agents = self.agents.len(), layout = AGENT_SEED_LAYOUT, "faction agents seeded");
     }
 
@@ -6208,6 +6612,87 @@ impl World {
         }
     }
 
+    /// Watch (or stop watching) one item's market detail. Subscribing answers
+    /// immediately with a full `ItemMarketState`; while watched, new fills
+    /// re-push the state (throttled by `broadcast_item_markets`).
+    fn item_market_sub(&mut self, entity: EntityId, kind: Option<ItemKind>) {
+        let Some(kind) = kind else {
+            self.item_subs.remove(&entity);
+            return;
+        };
+        let state = self.item_market_state(kind);
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::ItemMarketState(state));
+            self.item_subs.insert(entity, kind);
+        }
+    }
+
+    /// Build the market detail snapshot for one item kind: price series +
+    /// totals from `market_stats`, live book stats, ledger supply, and the
+    /// fixed vendor reference prices.
+    fn item_market_state(&self, kind: ItemKind) -> ItemMarketState {
+        let (series, last_price, total_fills, total_units, total_wild) =
+            match self.market_stats.history(kind) {
+                Some(h) => (
+                    h.buckets.iter().copied().collect(),
+                    h.last_price,
+                    h.total_fills,
+                    h.total_units,
+                    h.total_wild,
+                ),
+                None => (Vec::new(), 0, 0, 0, 0),
+            };
+        let mut best_ask = 0u32;
+        let mut listed_units = 0u32;
+        for l in self.market.iter().filter(|l| l.kind == kind && l.count > 0) {
+            listed_units += l.count;
+            if best_ask == 0 || l.price_each < best_ask {
+                best_ask = l.price_each;
+            }
+        }
+        let (vendor_buy, vendor_sell) = wilder_economy::reference_prices(kind);
+        ItemMarketState {
+            kind,
+            series,
+            last_price,
+            best_ask,
+            listed_units,
+            total_fills,
+            total_units,
+            total_wild,
+            supply: self.ledger.item_supply(kind),
+            vendor_buy,
+            vendor_sell,
+        }
+    }
+
+    /// Re-push item market detail to watchers whose kind saw new fills since
+    /// the last broadcast (called on a ~1 s cadence from the tick loop).
+    fn broadcast_item_markets(&mut self) {
+        if self.item_subs.is_empty() {
+            // Nobody watching: drop the dirty set so it can't grow unbounded.
+            self.market_stats.take_dirty();
+            return;
+        }
+        let dirty = self.market_stats.take_dirty();
+        if dirty.is_empty() {
+            return;
+        }
+        self.item_subs.retain(|id, _| self.players.contains_key(id));
+        let watchers: Vec<(EntityId, ItemKind)> = self
+            .item_subs
+            .iter()
+            .filter(|(_, kind)| dirty.contains(kind))
+            .map(|(&id, &kind)| (id, kind))
+            .collect();
+        for (id, kind) in watchers {
+            let state = self.item_market_state(kind);
+            if let Some(player) = self.players.get(&id) {
+                let _ = player.tx.send(S2C::ItemMarketState(state));
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Streaming / replication
     // -----------------------------------------------------------------------
@@ -6547,7 +7032,7 @@ impl World {
                     id: pickup.entity,
                     kind: EntityKind::CurrencyPickup,
                     name: match pickup.currency {
-                        Currency::Wild => "WILD".into(),
+                        Currency::Wild => "MILD".into(),
                         Currency::Shards => "Shards".into(),
                         Currency::Energy => "Energy".into(),
                     },
@@ -6749,11 +7234,12 @@ impl World {
         if let Err(e) = self.store.save_meta("econ_ledger", &self.ledger.save()) {
             tracing::error!("ledger save failed: {e}");
         }
-        // Faction agents: identity, goods and position survive restarts.
-        let agent_saves: Vec<AgentSave> = self.agents.iter().map(|a| a.save()).collect();
-        if let Err(e) = self.store.save_meta("faction_agents", &agent_saves) {
-            tracing::error!("agent save failed: {e}");
+        // Per-item market price history (dashboard charts).
+        if let Err(e) = self.store.save_meta("market_stats", &self.market_stats.save()) {
+            tracing::error!("market stats save failed: {e}");
         }
+        // Faction agents persist separately in rotating shards (see
+        // `tick_agent_saves`) so this pass never serializes the population.
         // Leaderboard stats book (competitor records + lifetime rollups).
         if let Err(e) = self.store.save_meta("stats_book", &self.stats) {
             tracing::error!("stats save failed: {e}");
@@ -6774,6 +7260,51 @@ impl World {
             chunks = self.chunks.loaded_count(),
             "world saved"
         );
+    }
+
+    /// Persist one shard of the agent population, round-robin. Sharding
+    /// bounds the per-tick serialization cost at `AGENT_SAVE_SHARD` agents;
+    /// the stride spreads the shards so the whole population still cycles
+    /// through roughly every `SAVE_INTERVAL_TICKS` (each agent's saved state
+    /// is at most ~10 s stale, same as every other persisted system).
+    fn tick_agent_saves(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+        let shards = self.agents.len().div_ceil(AGENT_SAVE_SHARD);
+        let stride = (SAVE_INTERVAL_TICKS / shards as u64).max(1);
+        if self.tick % stride != 0 {
+            return;
+        }
+        let shard = self.agent_save_cursor % shards;
+        self.agent_save_cursor = (shard + 1) % shards;
+        self.save_agent_shard(shard);
+    }
+
+    /// Serialize and store agents `[shard * AGENT_SAVE_SHARD, ..)`.
+    fn save_agent_shard(&self, shard: usize) {
+        let lo = shard * AGENT_SAVE_SHARD;
+        let hi = (lo + AGENT_SAVE_SHARD).min(self.agents.len());
+        let saves: Vec<AgentSave> = self.agents[lo..hi].iter().map(|a| a.save()).collect();
+        if let Err(e) = self.store.save_meta(&format!("faction_agents_shard_{shard}"), &saves) {
+            tracing::error!("agent shard save failed: {e}");
+        }
+    }
+
+    /// Write the whole population (every shard + the shard-count descriptor)
+    /// in one pass. Runs once at startup right after load/seed so the shard
+    /// set is complete and self-consistent before the rotating saver takes
+    /// over; also migrates legacy single-blob saves to the sharded layout.
+    fn save_agent_shards_full(&mut self) {
+        let shards = self.agents.len().div_ceil(AGENT_SAVE_SHARD).max(1);
+        if let Err(e) = self.store.save_meta("faction_agents_shards", &shards) {
+            tracing::error!("agent shard descriptor save failed: {e}");
+            return;
+        }
+        for shard in 0..shards {
+            self.save_agent_shard(shard);
+        }
+        self.agent_save_cursor = 0;
     }
 
     fn persist_player_entity(&self, entity: EntityId) {
@@ -7101,10 +7632,15 @@ mod tests {
             rx,
             territory: HashMap::new(),
             territory_dirty: false,
+            field_intel: HashMap::new(),
+            region_income: HashMap::new(),
+            region_casualties: HashMap::new(),
             zone_clock: ZoneClock::new(districts::district_defs().len()),
             ledger: Ledger::new(LedgerSave::default()),
+            market_stats: MarketStats::default(),
             stats: StatsBook::default(),
             econ_subs: HashSet::new(),
+            item_subs: HashMap::new(),
             agents: Vec::new(),
             agent_by_entity: HashMap::new(),
             agent_grid: HashMap::new(),
@@ -7112,6 +7648,7 @@ mod tests {
             dead_agents: Vec::new(),
             agent_path_queue: std::collections::VecDeque::new(),
             agent_decision_queue: std::collections::VecDeque::new(),
+            agent_save_cursor: 0,
             service_load: HashMap::new(),
             recent_attacks: HashMap::new(),
             district_spots: Vec::new(),
@@ -7447,6 +7984,26 @@ mod tests {
     }
 
     #[test]
+    fn sharded_agent_saves_roundtrip_across_restart() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        // Span multiple shards so the concatenating loader is exercised.
+        world.seed_agents(AGENT_SAVE_SHARD + 500);
+        world.save_agent_shards_full();
+        let names: Vec<String> = world.agents.iter().map(|a| a.name.clone()).collect();
+        // Simulate a restart: wipe the live population, restore from disk.
+        world.agents.clear();
+        world.agent_by_entity.clear();
+        world.agent_grid.clear();
+        world.hot_agents.clear();
+        world.dead_agents.clear();
+        world.store.save_meta("agent_seed_layout", &AGENT_SEED_LAYOUT).unwrap();
+        world.load_or_seed_agents();
+        let restored: Vec<String> = world.agents.iter().map(|a| a.name.clone()).collect();
+        assert_eq!(restored, names, "shards should reassemble the population in order");
+    }
+
+    #[test]
     fn hub_cohort_seeds_both_factions_in_the_combat_ring() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
@@ -7588,6 +8145,106 @@ mod tests {
             assert!(
                 crowd <= 20,
                 "{} has a {crowd}-agent mob at the door (statue-pile regression)",
+                s.name
+            );
+        }
+    }
+
+    /// Build the minimal connected-player record used by hot-tier tests.
+    fn insert_test_player(world: &mut World, pos: Vec3) -> EntityId {
+        let entity = world.alloc_entity();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        std::mem::forget(_rx);
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: uuid::Uuid::new_v4(),
+            name: "TESTER".into(),
+            appearance: Appearance::default(),
+            position: pos,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.players.insert(
+            entity,
+            Player {
+                entity,
+                character,
+                inventory: Inventory::new(),
+                stash: Stash::default(),
+                tx,
+                pending_inputs: Vec::new(),
+                last_input_seq: 0,
+                path: Vec::new(),
+                view: HashSet::new(),
+                known_entities: HashSet::new(),
+                moved_this_tick: false,
+                ran_this_tick: false,
+                attacked_this_tick: false,
+                attack_cooldown: 0.0,
+                crouching: false,
+                roll_time: 0.0,
+                roll_dir: (1.0, 0.0),
+                roll_cooldown: 0.0,
+                shield_delay: 0.0,
+                ability_cooldowns: [0.0; 3],
+                stim_heal_left: 0.0,
+                stim_speed_time: 0.0,
+                overcharge_time: 0.0,
+                extracting: None,
+                blueprints: HashSet::new(),
+                production: HashMap::new(),
+                wallet: 0,
+                shards: 0,
+                energy: 0,
+                wallet_sent: None,
+                sent_snaps: HashMap::new(),
+                map_intel: false,
+                dirty: true,
+            },
+        );
+        entity
+    }
+
+    /// Hot-tier twin of `bodega_crowds_stay_dispersed`: a connected player
+    /// keeps the hub hot (20 Hz embodied sim, collision, separation) — the
+    /// exact conditions of the on-screen statue-mob reports — and no hub
+    /// Bodega may accumulate a pile at the door.
+    #[test]
+    fn hot_hub_bodega_stays_dispersed() {
+        let (mut world, _dir) = test_world();
+        world.seed_district();
+        world.seed_neighborhood_stores();
+        world.seed_agents(500);
+        for i in 0..world.agents.len() {
+            if i % 2 == 0 {
+                world.agents[i].add_item(ItemKind::Smg, 1);
+                world.agents[i].add_item(ItemKind::Ammo9mm, 60);
+            }
+        }
+        // A connected player at spawn keeps the hub hot, like the live game.
+        insert_test_player(&mut world, SPAWN);
+        // ~5 sim-minutes at 20 Hz with hot-tier collision + separation.
+        for _ in 0..6000 {
+            world.tick += 1;
+            world.ledger.set_tick(world.tick);
+            world.tick_agents();
+            world.separate_characters();
+        }
+        for s in world.statics.values().filter(|s| s.kind == EntityKind::Bodega) {
+            let crowd = world
+                .agents
+                .iter()
+                .filter(|a| a.alive() && (a.position - s.position).length() < 12.0)
+                .count();
+            assert!(
+                crowd <= 20,
+                "{} has a {crowd}-agent hot-tier mob at the door",
                 s.name
             );
         }
@@ -7776,6 +8433,88 @@ mod tests {
         assert_eq!(world.agents[buyer].wallet, buyer_wallet - cost);
         assert_eq!(world.agents[seller].wallet, seller_wallet + cost - fee);
         assert_eq!(world.agents[buyer].count_item(ItemKind::Iron), 10);
+        // The fill landed on the per-item price history at the fill price.
+        let hist = world.market_stats.history(ItemKind::Iron).expect("iron history");
+        assert_eq!(hist.last_price, listing_price);
+        assert_eq!(hist.total_units, 10);
+        assert_eq!(hist.total_fills, 1);
+        // ...and the drill-in snapshot reflects book + history + vendor refs.
+        let state = world.item_market_state(ItemKind::Iron);
+        assert_eq!(state.last_price, listing_price);
+        assert_eq!(state.listed_units, 20);
+        assert_eq!(state.best_ask, listing_price);
+        assert_eq!(state.vendor_sell, 2); // Bodega floor
+        assert_eq!(state.series.len(), 1);
+    }
+
+    #[test]
+    fn agent_ask_price_floats_with_the_book() {
+        let (mut world, _dir) = test_world();
+        let base = base_value(ItemKind::Iron).max(1);
+
+        // Virgin market: list at ~110% of base value.
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), (base * 11 / 10).max(1));
+
+        // Competition on the book: undercut the cheapest ask by ~5%.
+        world.market.push(wilder_market::Listing {
+            id: 900,
+            seller: uuid::Uuid::nil(),
+            seller_name: "Vex".into(),
+            kind: ItemKind::Iron,
+            count: 5,
+            price_each: 5,
+            agent: true,
+        });
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), 4); // 5 * 95 / 100
+        // An overpriced ask is undercut but stays inside the clamp band.
+        world.market[0].price_each = 500;
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), base * 3);
+        world.market.clear();
+
+        // Demand cleared the book: next ask marks up over the last fill,
+        // clamped to the [base/2, base*3] band.
+        world.market_stats.record_fill(ItemKind::Iron, 5, 10);
+        assert_eq!(world.market_ref_price(ItemKind::Iron), 5);
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), (5 * 11 / 10).max(1).min(base * 3));
+        // A pathological fill price is clamped before it steers pricing.
+        world.market_stats.record_fill(ItemKind::Iron, 10_000, 1);
+        assert_eq!(world.market_ref_price(ItemKind::Iron), base * 3);
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), base * 3);
+    }
+
+    #[test]
+    fn agent_asks_decay_and_stale_stock_evicts() {
+        let (mut world, _dir) = test_world();
+        let mk = |id: u64, kind: ItemKind, price: u32, agent: bool| wilder_market::Listing {
+            id,
+            seller: uuid::Uuid::nil(),
+            seller_name: "X".into(),
+            kind,
+            count: 3,
+            price_each: price,
+            agent,
+        };
+        // Knife base 38 -> floor 19. An overpriced agent ask walks down 5%
+        // per decay tick; the player ask never moves.
+        world.market.push(mk(1, ItemKind::Knife, 41, true));
+        world.market.push(mk(2, ItemKind::Knife, 41, false));
+        world.tick_market_decay();
+        assert_eq!(world.market[0].price_each, 38); // 41 * 95 / 100
+        assert_eq!(world.market[1].price_each, 41);
+        // Repeated decay bottoms out at the floor and stays there.
+        for _ in 0..64 {
+            world.tick_market_decay();
+        }
+        let floor = (base_value(ItemKind::Knife) / 2).max(1);
+        assert_eq!(world.market[0].price_each, floor);
+        assert_eq!(world.market[1].price_each, 41);
+
+        // Eviction scraps the floor-priced agent listing (burned on the
+        // ledger) but never touches player stock.
+        assert!(world.evict_stale_listing());
+        assert_eq!(world.market.len(), 1);
+        assert!(!world.market[0].agent);
+        assert!(!world.evict_stale_listing());
     }
 
     /// Sanity benchmark: 2,000 cold agents ticking for 100 world ticks must

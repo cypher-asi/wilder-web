@@ -328,7 +328,7 @@ export interface LevelUpEvent {
   at: number;
 }
 
-/** Small bouncy currency toast ("+N WILD") shown near the wallet UI. */
+/** Small bouncy currency toast ("+N MILD") shown near the wallet UI. */
 export interface WalletToast {
   id: number;
   text: string;
@@ -496,14 +496,16 @@ interface UiState {
   musicOn: boolean;
   /** Left-side pickup feed entries (newest last); expired by the HUD. */
   pickupFeed: PickupFeedEntry[];
-  /** Currency balances (WILD / Shards / Energy) shown under the vitals. */
+  /** Currency balances (MILD / Shards / Energy) shown under the vitals. */
   wallet: { wild: number; shards: number; energy: number } | null;
   /** Active level-up celebration; cleared by the banner after it plays. */
   levelUp: LevelUpEvent | null;
-  /** Bouncy currency toasts ("+N WILD"); self-expire in the HUD. */
+  /** Bouncy currency toasts ("+N MILD"); self-expire in the HUD. */
   walletToasts: WalletToast[];
   /** Active death overlay (BSOD death screen); cleared on any-key respawn. */
   death: DeathInfo | null;
+  /** Squares you personally secured this session (near-player captures). */
+  zonesSecured: number;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
@@ -512,6 +514,8 @@ interface UiState {
   celebrateLevelUp: (level: number) => void;
   pushWalletToast: (text: string) => void;
   expireWalletToast: (id: number) => void;
+  /** Record `n` squares the local player just secured (near-player captures). */
+  addZonesSecured: (n: number) => void;
   /** Open the central menu on `tab` (or switch to it if already open). */
   openMenu: (tab: MenuTab) => void;
   /** Close the central menu. */
@@ -599,6 +603,7 @@ export const useGame: import("zustand").UseBoundStore<
   levelUp: null,
   walletToasts: [],
   death: null,
+  zonesSecured: 0,
 
   set: (partial) => set(partial),
   pushChat: (line) =>
@@ -617,6 +622,8 @@ export const useGame: import("zustand").UseBoundStore<
     })),
   expireWalletToast: (id) =>
     set((s) => ({ walletToasts: s.walletToasts.filter((t) => t.id !== id) })),
+  addZonesSecured: (n) =>
+    set((s) => ({ zonesSecured: s.zonesSecured + n })),
   openMenu: (tab) => set({ menuOpen: true, menuTab: tab }),
   closeMenu: () => set({ menuOpen: false }),
   toggleMenuTab: (tab) =>

@@ -54,6 +54,10 @@ pub enum C2S {
     Vendor { vendor: EntityId, action: VendorAction },
     /// Subscribe/unsubscribe to live economy ledger updates (K dashboard).
     EconomySub { on: bool },
+    /// Watch one item's market detail (price history, book, supply). `Some`
+    /// answers immediately with `ItemMarketState` and re-pushes on new fills;
+    /// `None` unsubscribes. Each connection watches at most one kind.
+    ItemMarketSub { kind: Option<ItemKind> },
     /// Subscribe/unsubscribe to whole-map agent blips (map filters). While
     /// on, the server streams `MapIntel` at ~1 Hz.
     MapIntelSub { on: bool },
@@ -83,11 +87,11 @@ pub enum InventoryAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
 pub enum VendorAction {
-    /// Buy `count` items from the vendor's stock (pays WILD).
+    /// Buy `count` items from the vendor's stock (pays MILD).
     Buy { kind: ItemKind, count: u32 },
-    /// Sell `count` carried items to the vendor (receives WILD).
+    /// Sell `count` carried items to the vendor (receives MILD).
     Sell { kind: ItemKind, count: u32 },
-    /// Bank only: convert carried Cash into wallet WILD (minus the fee).
+    /// Bank only: convert carried Cash into wallet MILD (minus the fee).
     Convert { count: u32 },
     Refresh,
 }
@@ -181,6 +185,9 @@ pub enum S2C {
     EconomyState { stats: EconomyStats, recent: Vec<EconTx> },
     /// Per-tick batch of new ledger transactions for subscribers.
     EconomyTxs { txs: Vec<EconTx>, stats: EconomyStats },
+    /// One item's market detail: sent on `ItemMarketSub` and re-pushed
+    /// (throttled) while new fills land for the watched kind.
+    ItemMarketState(ItemMarketState),
     /// Whole-map actor blips, streamed ~1 Hz to `MapIntelSub` subscribers.
     MapIntel { blips: Vec<AgentBlip> },
     /// Leaderboards + faction/guild standings, refreshed for economy
@@ -224,6 +231,30 @@ pub struct MarketListing {
     pub kind: ItemKind,
     pub count: u32,
     pub price_each: u32,
+}
+
+/// Market detail for one item kind: the fill-price time series plus live
+/// order-book, supply and vendor-reference stats (economy dashboard drill-in).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemMarketState {
+    pub kind: ItemKind,
+    /// Fill-price buckets, oldest first (sparse: only minutes with trades).
+    pub series: Vec<PriceBucket>,
+    /// Most recent fill price (0 = never traded).
+    pub last_price: u32,
+    /// Cheapest live ask on the book (0 = nothing listed).
+    pub best_ask: u32,
+    /// Units currently listed on the book.
+    pub listed_units: u32,
+    /// Lifetime market fills / units / MILD volume for this kind.
+    pub total_fills: u64,
+    pub total_units: u64,
+    pub total_wild: u64,
+    /// Ledger supply counters (minted / burned).
+    pub supply: ItemSupply,
+    /// NPC vendor reference prices (0 = vendors don't trade it that way).
+    pub vendor_buy: u32,
+    pub vendor_sell: u32,
 }
 
 /// A vendor's price line for one item kind. `buy` is what the player pays per

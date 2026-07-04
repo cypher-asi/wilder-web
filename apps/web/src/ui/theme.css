@@ -324,7 +324,7 @@ body {
   margin-bottom: 12px;
 }
 
-/* Currency chips (WILD / Shards / Energy) tucked into the bottom-right cluster,
+/* Currency chips (MILD / Shards / Energy) tucked into the bottom-right cluster,
    directly under the inventory grid on the same angled holo plane. */
 .currency-panel {
   position: absolute;
@@ -507,7 +507,7 @@ body {
   position: absolute;
   top: 40px;
   right: 24px;
-  width: 230px;
+  width: 276px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -564,7 +564,7 @@ body {
   bottom: 10px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.1em;
   color: var(--text-dim);
@@ -593,13 +593,13 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0.08em;
   background: var(--panel);
   backdrop-filter: blur(6px);
-  border: 1px solid var(--steel-border);
+  border: none;
   clip-path: var(--clip-notch-sm);
-  padding: 3px 8px;
+  padding: 4px 10px;
   overflow: hidden;
 }
 
@@ -622,12 +622,12 @@ body {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  font-size: 9px;
+  gap: 4px;
+  font-size: 11px;
   letter-spacing: 0.06em;
   background: var(--panel);
   backdrop-filter: blur(6px);
-  border: 1px solid var(--steel-border);
+  border: none;
   clip-path: var(--clip-notch-sm);
   padding: 5px 8px;
 }
@@ -636,8 +636,9 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding-bottom: 3px;
-  border-bottom: 1px solid var(--steel-border);
+  padding-top: 4px;
+  margin-top: 1px;
+  border-top: 1px solid var(--steel-border);
 }
 
 .hud-terr-label {
@@ -663,9 +664,9 @@ body {
 
 .hud-terr-row {
   display: grid;
-  grid-template-columns: 8px minmax(0, auto) 1fr 22px;
+  grid-template-columns: 9px 76px 1fr 28px;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
 .hud-terr-row.you .hud-terr-name {
@@ -673,8 +674,8 @@ body {
 }
 
 .hud-terr-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 1px;
 }
 
@@ -686,7 +687,7 @@ body {
 }
 
 .hud-terr-bar {
-  height: 4px;
+  height: 5px;
   background: rgba(0, 0, 0, 0.4);
   overflow: hidden;
 }
@@ -705,13 +706,13 @@ body {
   width: 100%;
   text-align: center;
   white-space: nowrap;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.05em;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   background: var(--panel);
   backdrop-filter: blur(6px);
-  border: 1px solid var(--steel-border);
+  border: none;
   clip-path: var(--clip-notch-sm);
   padding: 3px 6px;
   overflow: hidden;
@@ -1486,7 +1487,7 @@ body {
   }
 }
 
-/* Bouncy "+N WILD" coin toasts stacked above the bottom-right dock. */
+/* Bouncy "+N MILD" coin toasts stacked above the bottom-right dock. */
 .wallet-toasts {
   position: absolute;
   right: 24px;
@@ -4012,7 +4013,7 @@ body {
   }
 }
 
-/* Bouncy "+N WILD" coin toasts stacked above the bottom-right dock. */
+/* Bouncy "+N MILD" coin toasts stacked above the bottom-right dock. */
 .wallet-toasts {
   position: absolute;
   right: 24px;

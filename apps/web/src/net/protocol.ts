@@ -287,6 +287,7 @@ export type C2S =
   | Tagged<"Market", MarketActionMsg>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
+  | Tagged<"ItemMarketSub", { kind: ItemKind | null }>
   | Tagged<"MapIntelSub", { on: boolean }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
@@ -473,6 +474,45 @@ export interface ItemSupply {
   burned: number;
 }
 
+/**
+ * One time bucket of market fill prices (sparse: only minutes with trades).
+ * Mirror of wilder-types PriceBucket.
+ */
+export interface PriceBucket {
+  /** Bucket start, unix milliseconds. */
+  t: number;
+  /** Volume-weighted average fill price (MILD per unit). */
+  avg: number;
+  min: number;
+  max: number;
+  /** Units traded. */
+  units: number;
+  /** MILD volume (price x units summed). */
+  wild: number;
+  /** Number of fills. */
+  fills: number;
+}
+
+/** Market detail for one item kind (economy dashboard drill-in). */
+export interface ItemMarketState {
+  kind: ItemKind;
+  /** Fill-price buckets, oldest first. */
+  series: PriceBucket[];
+  /** Most recent fill price (0 = never traded). */
+  last_price: number;
+  /** Cheapest live ask on the book (0 = nothing listed). */
+  best_ask: number;
+  /** Units currently listed on the book. */
+  listed_units: number;
+  total_fills: number;
+  total_units: number;
+  total_wild: number;
+  supply: ItemSupply;
+  /** NPC vendor reference prices (0 = untraded that way). */
+  vendor_buy: number;
+  vendor_sell: number;
+}
+
 /** Aggregate economy snapshot pushed to dashboard subscribers. */
 export interface EconomyStats {
   block: number;
@@ -566,6 +606,7 @@ export type S2C =
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"EconomyState", { stats: EconomyStats; recent: EconTx[] }>
   | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>
+  | Tagged<"ItemMarketState", ItemMarketState>
   | Tagged<"MapIntel", { blips: AgentBlip[] }>
   | Tagged<"LeaderboardState", LeaderboardData>
   | Tagged<"Chat", { from: string; text: string }>

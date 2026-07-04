@@ -33,7 +33,7 @@ pub const COLD_TICK_BUDGET: u64 = 1024;
 pub const AGENT_RESPAWN_SECONDS: f32 = 60.0;
 /// Retreat when health drops below this fraction.
 pub const RETREAT_HEALTH_PCT: f32 = 0.4;
-/// Retreat to bank/rest when the wallet exceeds this many WILD.
+/// Retreat to bank/rest when the wallet exceeds this many MILD.
 pub const WEALTH_RETREAT: u32 = 600;
 /// Seconds between goal re-scores (staggered per agent).
 pub const DECISION_SECONDS: (f32, f32) = (1.0, 2.0);
@@ -55,35 +55,182 @@ pub const RETREAT_COOLDOWN: f32 = 240.0;
 /// shoves, jittering melee targets) can't whip the body back and forth,
 /// while real turns still complete in a fraction of a second.
 pub const FACE_RESPONSE: f32 = 8.0;
+/// Max body turn rate, rad/s. The low-pass alone can't damp *collinear*
+/// push-pull (desired heading alternating straight forward/backward keeps
+/// the smoothed vector on one line, so its angle still snaps 180°); the
+/// rate limit caps any flip to a smooth ~half-second turn.
+pub const TURN_RATE: f32 = std::f32::consts::TAU;
 /// Seconds the Run pose lingers after the last actual step, so stop-start
 /// crowd jostling doesn't flap Run/Idle on every tick.
 pub const RUN_HOLD: f32 = 0.25;
 /// Agents notice dropped loot within this range when re-scoring goals.
 pub const LOOT_SCAN_RANGE: f32 = 60.0;
-/// Minimum haul value (reference WILD) before an extraction run appeals.
+/// Minimum haul value (reference MILD) before an extraction run appeals.
 pub const EXTRACT_MIN_HAUL: u32 = 60;
 /// Agents only consider extraction beacons within this range.
 pub const EXTRACT_SEEK_RANGE: f32 = 250.0;
 
-/// Agent occupation, ported from the offline sim (`wilder-sim::agents`) and
-/// extended with the combat roles.
+/// Activity classes an agent learns payoffs over. There are no fixed roles:
+/// every agent carries a payoff estimate per class and specializes toward
+/// whatever has actually been paying *it* (see [`Traits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Role {
-    /// Gather resources in the field, haul to a store, sell.
-    Scavenger,
-    /// Arbitrage the market: buy cheap listings, relist higher or vendor-flip.
-    Trader,
-    /// Buy inputs, craft the best-margin recipe at a station, sell output.
-    Crafter,
-    /// Patrol contested ground and hunt hostile-faction targets.
-    Enforcer,
-    /// Aggressive freelancer: gathers in warzones, picks fights.
-    Raider,
+pub enum Activity {
+    /// Pull resources from the field.
+    Gather,
+    /// Market work: arbitrage, restocking, vendor purchases.
+    Trade,
+    /// Turn inputs into higher-value outputs at a station.
+    Craft,
+    /// Hunt hostiles and win fights.
+    Fight,
+    /// Take or hold territory regions for the faction.
+    Capture,
+    /// Realize carried value: haul to counters, loot drops, extract cargo.
+    Haul,
 }
 
-impl Role {
-    pub fn is_combatant(self) -> bool {
-        matches!(self, Role::Enforcer | Role::Raider)
+/// All activity classes, index-aligned with `Traits::payoff`.
+pub const ACTIVITIES: [Activity; 6] = [
+    Activity::Gather,
+    Activity::Trade,
+    Activity::Craft,
+    Activity::Fight,
+    Activity::Capture,
+    Activity::Haul,
+];
+
+impl Activity {
+    pub fn index(self) -> usize {
+        match self {
+            Activity::Gather => 0,
+            Activity::Trade => 1,
+            Activity::Craft => 2,
+            Activity::Fight => 3,
+            Activity::Capture => 4,
+            Activity::Haul => 5,
+        }
+    }
+}
+
+/// EMA step for payoff samples (higher = faster adaptation, noisier).
+const TRAIT_ALPHA: f32 = 0.15;
+/// Softmax temperature over payoff EMAs (MILD/min). Smaller = sharper
+/// specialization for the same payoff gap.
+const TRAIT_TEMP: f32 = 25.0;
+/// Exploration floor: no activity's weight ever drops below this share, so
+/// agents keep sampling everything and can re-specialize when the world
+/// changes.
+const TRAIT_FLOOR: f32 = 0.08;
+/// Payoff samples are clamped to this band (MILD/min) so one windfall or
+/// one catastrophic death can't blow out the estimate.
+const TRAIT_SAMPLE_BAND: (f32, f32) = (-80.0, 240.0);
+
+/// Learned behavior profile: per-activity payoff EMAs in reference MILD per
+/// minute of commitment. Behavior multipliers are a softmax over these with
+/// an exploration floor — specialization *emerges* from realized returns
+/// (kills, margins, capture income) and losses (deaths charge the activity
+/// that got the agent killed), rather than being assigned top-down.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Traits {
+    pub payoff: [f32; 6],
+}
+
+impl Default for Traits {
+    fn default() -> Self {
+        Traits { payoff: [0.0; 6] }
+    }
+}
+
+impl Traits {
+    /// Fold one realized payoff-rate sample (MILD/min; negative = loss)
+    /// into the activity's estimate.
+    pub fn credit(&mut self, activity: Activity, rate: f32) {
+        let sample = rate.clamp(TRAIT_SAMPLE_BAND.0, TRAIT_SAMPLE_BAND.1);
+        let p = &mut self.payoff[activity.index()];
+        *p += (sample - *p) * TRAIT_ALPHA;
+    }
+
+    /// Behavior multiplier for an activity, scaled so a uniform (fresh)
+    /// profile yields exactly 1.0 everywhere. Softmax over payoff EMAs with
+    /// an exploration floor: range ≈ [0.48, 3.6].
+    pub fn mult(&self, activity: Activity) -> f32 {
+        let n = ACTIVITIES.len() as f32;
+        let max = self.payoff.iter().fold(f32::MIN, |a, &b| a.max(b));
+        let exps = self.payoff.map(|p| ((p - max) / TRAIT_TEMP).exp());
+        let sum: f32 = exps.iter().sum();
+        let w = exps[activity.index()] / sum.max(1e-6);
+        (TRAIT_FLOOR + (1.0 - n * TRAIT_FLOOR) * w) * n
+    }
+
+    /// The activity this agent currently earns best at.
+    pub fn dominant(&self) -> Activity {
+        let mut best = Activity::Gather;
+        for a in ACTIVITIES {
+            if self.payoff[a.index()] > self.payoff[best.index()] {
+                best = a;
+            }
+        }
+        best
+    }
+
+    /// Feed/leaderboard label derived from the dominant activity.
+    pub fn archetype(&self) -> &'static str {
+        match self.dominant() {
+            Activity::Gather => "Scavenger",
+            Activity::Trade => "Trader",
+            Activity::Craft => "Crafter",
+            Activity::Fight => "Enforcer",
+            Activity::Capture => "Vanguard",
+            Activity::Haul => "Runner",
+        }
+    }
+
+    /// Profile leaning toward one activity (mult ≈ 2.0 there, ≈ 0.79
+    /// elsewhere). Used by tests and anywhere a known disposition is needed.
+    pub fn leaning(activity: Activity) -> Self {
+        let mut t = Traits::default();
+        t.payoff[activity.index()] = 40.0;
+        t
+    }
+
+    pub fn fighter() -> Self {
+        Self::leaning(Activity::Fight)
+    }
+    pub fn gatherer() -> Self {
+        Self::leaning(Activity::Gather)
+    }
+    pub fn trader() -> Self {
+        Self::leaning(Activity::Trade)
+    }
+    pub fn crafter() -> Self {
+        Self::leaning(Activity::Craft)
+    }
+    pub fn hauler() -> Self {
+        Self::leaning(Activity::Haul)
+    }
+
+    /// Mild random priors so a fresh population starts diverse (initial
+    /// mult spread roughly 0.8–1.4) and experience then takes over.
+    pub fn seeded<R: rand::Rng>(rng: &mut R) -> Self {
+        let mut t = Traits::default();
+        for p in &mut t.payoff {
+            *p = rng.random_range(0.0..12.0);
+        }
+        t
+    }
+}
+
+/// Activity class a goal's outcome (or death during it) attributes to.
+pub fn activity_of(goal: Goal) -> Activity {
+    match goal {
+        Goal::Gather { .. } => Activity::Gather,
+        Goal::Trade { .. } | Goal::BuyMarket { .. } | Goal::Buy { .. } => Activity::Trade,
+        Goal::Craft { .. } => Activity::Craft,
+        Goal::Patrol { .. } | Goal::Hunt { .. } | Goal::Idle | Goal::Retreat { .. } => {
+            Activity::Fight
+        }
+        Goal::Capture { .. } | Goal::Defend { .. } => Activity::Capture,
+        Goal::Sell { .. } | Goal::Loot { .. } | Goal::Extract { .. } => Activity::Haul,
     }
 }
 
@@ -113,6 +260,12 @@ pub enum Goal {
     Craft { station: EntityId, station_pos: Vec3, recipe: &'static str, timer: f32, started: bool },
     /// Move toward a contested area looking for targets.
     Patrol { to: Vec3 },
+    /// Push into a territory region to flip it: stand on the ground until
+    /// the presence math (see `World::tick_territory`) does the rest.
+    Capture { region: (i32, i32), to: Vec3 },
+    /// Hold a friendly region against enemy presence (same mechanics as
+    /// Capture; split so feeds/attribution read correctly).
+    Defend { region: (i32, i32), to: Vec3 },
     /// Chase and attack a hostile entity.
     Hunt { target: EntityId },
     /// Fall back to a sanctuary and heal up.
@@ -135,6 +288,8 @@ impl Goal {
             Goal::Trade { terminal_pos } => Some(*terminal_pos),
             Goal::Craft { station_pos, .. } => Some(*station_pos),
             Goal::Patrol { to } => Some(*to),
+            Goal::Capture { to, .. } => Some(*to),
+            Goal::Defend { to, .. } => Some(*to),
             Goal::Retreat { to } => Some(*to),
             Goal::Loot { pos, .. } => Some(*pos),
             Goal::Extract { point_pos, .. } => Some(*point_pos),
@@ -168,7 +323,10 @@ pub struct AgentSave {
     pub name: String,
     pub faction: FactionId,
     pub guild: String,
-    pub role: Role,
+    /// Learned behavior profile — persists so agents grow and evolve across
+    /// sessions (and across respawns; see `World::respawn_agent`).
+    #[serde(default)]
+    pub traits: Traits,
     pub home: usize,
     /// Fixed staging position this agent defends and respawns at (hub-cohort
     /// agents). `None` = legacy behavior: stage at the home district's spot.
@@ -202,7 +360,7 @@ pub fn guild_for(faction: FactionId, home_district: usize) -> String {
     table[home_district % table.len()].to_string()
 }
 
-/// Reference value of an item in WILD, for utility scoring and trader
+/// Reference value of an item in MILD, for utility scoring and trader
 /// arbitrage. Resources track the Bodega sell line; refined goods carry a
 /// value-added markup over their recipe inputs; gear sits under Armory buy
 /// prices so the market is the cheaper path.
@@ -252,7 +410,9 @@ pub struct FactionAgent {
     pub name: String,
     pub faction: FactionId,
     pub guild: String,
-    pub role: Role,
+    /// Learned behavior weights (see [`Traits`]): what this agent has found
+    /// profitable, updated from realized payoffs and losses.
+    pub traits: Traits,
     /// Index into `districts::district_defs()`.
     pub home: usize,
     /// Fixed staging position for hub-cohort agents (respawn + patrol
@@ -266,6 +426,9 @@ pub struct FactionAgent {
     pub max_health: f32,
     pub tier: Tier,
     pub goal: Goal,
+    /// Seconds spent pursuing the current goal (reset when the world commits
+    /// a new one). Divides realized payoffs into MILD/min rate samples.
+    pub goal_age: f32,
     /// Seconds until the brain re-scores (staggered across agents).
     pub decision_timer: f32,
     /// Seconds until respawn once dead (0 while alive).
@@ -386,14 +549,31 @@ impl FactionAgent {
             .sum()
     }
 
+    /// Credit a realized payoff (reference MILD; negative = loss) against
+    /// the time invested in the current goal, as a MILD/min rate sample.
+    /// Clamping the elapsed time keeps instant windfalls from reading as
+    /// infinite rates and marathon goals from reading as zero.
+    pub fn learn(&mut self, activity: Activity, wild: f32) {
+        let minutes = (self.goal_age / 60.0).clamp(0.05, 5.0);
+        self.traits.credit(activity, wild / minutes);
+    }
+
+    /// Whether this agent answers violence with violence: it needs a real
+    /// weapon and must not have learned that fighting is a losing trade
+    /// (payoff-specialized economists break off instead).
+    pub fn fights_back(&self) -> bool {
+        self.weapon().damage > FIST.damage && self.traits.mult(Activity::Fight) >= 0.9
+    }
+
     /// React to taking (non-lethal) damage: fighters turn on the attacker,
     /// everyone else breaks off toward safety on the next decision.
     pub fn react_to_damage(&mut self, attacker: EntityId) {
         if !self.alive() {
             return;
         }
-        if self.role.is_combatant() {
+        if self.fights_back() {
             self.goal = Goal::Hunt { target: attacker };
+            self.goal_age = 0.0;
         } else {
             // Flee: force an immediate re-score; low health biases Retreat.
             self.decision_timer = 0.0;
@@ -434,7 +614,7 @@ impl FactionAgent {
             name: self.name.clone(),
             faction: self.faction,
             guild: self.guild.clone(),
-            role: self.role,
+            traits: self.traits,
             home: self.home,
             home_spot: self.home_spot,
             wallet: self.wallet,
@@ -452,7 +632,7 @@ impl FactionAgent {
             name: save.name,
             faction: save.faction,
             guild: save.guild,
-            role: save.role,
+            traits: save.traits,
             home: save.home,
             home_spot: save.home_spot,
             wallet: save.wallet,
@@ -463,6 +643,7 @@ impl FactionAgent {
             max_health: save.max_health.max(1.0),
             tier: Tier::Cold,
             goal: Goal::Idle,
+            goal_age: 0.0,
             decision_timer: 0.0,
             respawn_in: 0.0,
             path: Vec::new(),
@@ -496,20 +677,46 @@ impl FactionAgent {
         self.face.1 += (dz - self.face.1) * k;
         if self.face.0 * self.face.0 + self.face.1 * self.face.1 < 1e-4 {
             // A near-180° reversal collapsed the average through zero, where
-            // atan2 is unstable: snap straight to the new heading.
+            // atan2 is unstable: adopt the new heading (rate-limited below).
             self.face = (dx, dz);
         }
-        self.yaw = self.face.1.atan2(self.face.0);
+        // Rate-limit the actual body turn: collinear reversals pass through
+        // the low-pass unattenuated and would still snap the yaw 180°.
+        let target = self.face.1.atan2(self.face.0);
+        let mut d = target - self.yaw;
+        while d > std::f32::consts::PI {
+            d -= std::f32::consts::TAU;
+        }
+        while d < -std::f32::consts::PI {
+            d += std::f32::consts::TAU;
+        }
+        let max = TURN_RATE * dt;
+        self.yaw += d.clamp(-max, max);
+        // Keep the wrapped representation canonical for replication.
+        while self.yaw > std::f32::consts::PI {
+            self.yaw -= std::f32::consts::TAU;
+        }
+        while self.yaw < -std::f32::consts::PI {
+            self.yaw += std::f32::consts::TAU;
+        }
     }
 
-    /// Advance movement toward `dest`; returns the remaining distance. Hot
-    /// agents step with collision (following any granted path); cold agents
-    /// advance unimpeded (macro simulation). Destinations beyond `PATH_RANGE`
-    /// steer straight instead of requesting A*.
+    /// Advance movement toward `dest`, stopping once within `arrive` meters;
+    /// returns the remaining distance. Hot agents step with collision
+    /// (following any granted path); cold agents advance unimpeded (macro
+    /// simulation). Destinations beyond `PATH_RANGE` steer straight instead
+    /// of requesting A*.
+    ///
+    /// `arrive` matters for crowds: goals share exact destinations (one store
+    /// counter, one gather spot), and agents that all march to the same point
+    /// interpenetrate — steering re-converges them faster than the crowd
+    /// separation pass can push them apart. Stopping at the goal's action
+    /// radius leaves room for a crowd to stand as a loose ring instead.
     fn move_toward<W: CollisionWorld>(
         &mut self,
         world: &W,
         dest: Vec3,
+        arrive: f32,
         dt: f32,
         hot: bool,
     ) -> f32 {
@@ -525,8 +732,8 @@ impl FactionAgent {
         };
         let to = target - self.position;
         let dist_to_dest = (dest - self.position).length();
-        if dist_to_dest < 0.1 {
-            return 0.0;
+        if dist_to_dest <= arrive.max(0.1) {
+            return dist_to_dest;
         }
         self.steer_yaw(to.x, to.z, dt);
         if hot {
@@ -607,6 +814,7 @@ impl FactionAgent {
         self.anim_hold = (self.anim_hold - dt).max(0.0);
         self.run_hold = (self.run_hold - dt).max(0.0);
         self.decision_timer -= dt;
+        self.goal_age += dt;
 
         let event = self.tick_goal(world, dt, hot, target);
         // Run-pose hysteresis: crowd jostling makes stepped/blocked ticks
@@ -627,8 +835,11 @@ impl FactionAgent {
     ) -> AgentEvent {
         match self.goal {
             Goal::Idle => AgentEvent::NeedsGoal,
-            Goal::Patrol { to } => {
-                if self.move_toward(world, to, dt, hot) < 2.0 || self.decision_timer <= 0.0 {
+            Goal::Patrol { to } | Goal::Capture { to, .. } | Goal::Defend { to, .. } => {
+                // Walk to the spot, then let the brain re-score on its timer:
+                // holding ground is just re-choosing to stand on it while it
+                // stays worth holding (presence is what captures).
+                if self.move_toward(world, to, 1.5, dt, hot) < 2.0 || self.decision_timer <= 0.0 {
                     AgentEvent::NeedsGoal
                 } else {
                     AgentEvent::None
@@ -638,7 +849,7 @@ impl FactionAgent {
                 if pulls_left == 0 {
                     return AgentEvent::NeedsGoal;
                 }
-                if self.move_toward(world, spot, dt, hot) > 2.0 {
+                if self.move_toward(world, spot, 1.2, dt, hot) > 2.0 {
                     return AgentEvent::None;
                 }
                 self.anim = AnimState::Gather;
@@ -656,16 +867,29 @@ impl FactionAgent {
             | Goal::Buy { store_pos, .. }
             | Goal::BuyMarket { terminal_pos: store_pos, .. }
             | Goal::Trade { terminal_pos: store_pos } => {
-                if self.move_toward(world, store_pos, dt, hot) > 5.0 {
-                    AgentEvent::None
-                } else {
+                if self.move_toward(world, store_pos, 3.0, dt, hot) <= 5.0 {
                     AgentEvent::Act
+                } else if self.decision_timer <= 0.0 {
+                    // Still in transit when the brain timer fires: re-score.
+                    // The storefront we committed to may have packed up since
+                    // (live congestion), and this is what lets a walker peel
+                    // off to an emptier counter — or go back to work — instead
+                    // of locking in a jammed door until arrival.
+                    AgentEvent::NeedsGoal
+                } else {
+                    AgentEvent::None
                 }
             }
             Goal::Craft { station_pos, started, timer, .. } => {
                 if !started {
-                    if self.move_toward(world, station_pos, dt, hot) > 5.0 {
-                        return AgentEvent::None;
+                    if self.move_toward(world, station_pos, 3.0, dt, hot) > 5.0 {
+                        // No inputs consumed yet: transit re-scores like any
+                        // other errand so a crowding station can be rerouted.
+                        return if self.decision_timer <= 0.0 {
+                            AgentEvent::NeedsGoal
+                        } else {
+                            AgentEvent::None
+                        };
                     }
                     // Arrived: the world consumes inputs and flips `started`.
                     return AgentEvent::Act;
@@ -690,9 +914,18 @@ impl FactionAgent {
                 }
                 if !hot {
                     // Cold tier never resolves per-hit combat; drift toward
-                    // the target region (statistical combat covers the rest).
-                    self.move_toward(world, info.position, dt, false);
-                    return AgentEvent::None;
+                    // the target region (statistical combat covers the rest),
+                    // but revalidate on the decision timer. Without it a cold
+                    // hunter shadows its victim forever — straight into a
+                    // sanctuary it can't fight in, camping whatever counter
+                    // the victim stops at (the re-score drops protected
+                    // targets because `find_hostile_target` won't offer them).
+                    self.move_toward(world, info.position, 2.0, dt, false);
+                    return if self.decision_timer <= 0.0 {
+                        AgentEvent::NeedsGoal
+                    } else {
+                        AgentEvent::None
+                    };
                 }
                 let weapon = self.weapon();
                 let dist = (info.position - self.position).length();
@@ -714,12 +947,15 @@ impl FactionAgent {
                 } else if dist > 60.0 {
                     return AgentEvent::NeedsGoal; // lost the leash
                 } else {
-                    self.move_toward(world, info.position, dt, true);
+                    // Close to just inside attack range, not onto the target:
+                    // stacked melee hunters otherwise stand in each other.
+                    let arrive = (weapon.range - 0.4).max(0.9);
+                    self.move_toward(world, info.position, arrive, dt, true);
                 }
                 AgentEvent::None
             }
             Goal::Loot { pos, .. } => {
-                if self.move_toward(world, pos, dt, hot) > 2.0 {
+                if self.move_toward(world, pos, 1.2, dt, hot) > 2.0 {
                     AgentEvent::None
                 } else {
                     // Arrived on top of the drop: the world transfers the
@@ -728,7 +964,7 @@ impl FactionAgent {
                 }
             }
             Goal::Extract { point_pos, timer } => {
-                if self.move_toward(world, point_pos, dt, hot) > 2.5 {
+                if self.move_toward(world, point_pos, 1.5, dt, hot) > 2.5 {
                     return AgentEvent::None;
                 }
                 // Channeling on the pad, same discipline as players: stand
@@ -745,7 +981,7 @@ impl FactionAgent {
                 }
             }
             Goal::Retreat { to } => {
-                if self.move_toward(world, to, dt, hot) > 8.0 {
+                if self.move_toward(world, to, 4.0, dt, hot) > 8.0 {
                     return AgentEvent::None;
                 }
                 // Resting in the sanctuary: heal up, then get back to work.
@@ -774,7 +1010,7 @@ mod tests {
                 name,
                 faction: FACTION_REBELS,
                 guild: guild_for(FACTION_REBELS, 4),
-                role: Role::Scavenger,
+                traits: Traits::default(),
                 home: 4,
                 home_spot: None,
                 wallet: 80,
@@ -818,7 +1054,8 @@ mod tests {
 
     #[test]
     fn save_roundtrip_preserves_identity_and_goods() {
-        let a = sample_agent();
+        let mut a = sample_agent();
+        a.traits = Traits::fighter();
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
         let b = FactionAgent::from_save(99, back);
@@ -826,10 +1063,55 @@ mod tests {
         assert_eq!(b.name, a.name);
         assert_eq!(b.faction, a.faction);
         assert_eq!(b.guild, a.guild);
-        assert_eq!(b.role, a.role);
+        assert_eq!(b.traits, a.traits, "learned traits must survive the save");
         assert_eq!(b.wallet, a.wallet);
         assert_eq!(b.count_item(ItemKind::Iron), 5);
         assert_eq!(b.entity, 99);
+    }
+
+    #[test]
+    fn saves_without_traits_load_neutral() {
+        // Pre-traits saves (and the removed `role` field) must still load:
+        // unknown fields are ignored, missing traits default to neutral.
+        let json = r#"{
+            "agent_id": "6ec4a03c-4de5-4e56-9d42-6a2c8bbd7c1e",
+            "name": "REBEL-6EC4", "faction": 1, "guild": "Dead Signal",
+            "role": "Scavenger", "home": 4, "wallet": 80, "inventory": [],
+            "position": [1.0, 0.0, 2.0], "health": 90.0, "max_health": 100.0
+        }"#;
+        let save: AgentSave = serde_json::from_str(json).unwrap();
+        assert_eq!(save.traits, Traits::default());
+        for a in ACTIVITIES {
+            assert!((save.traits.mult(a) - 1.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn traits_learn_and_specialize_from_payoffs() {
+        let mut t = Traits::default();
+        // Neutral profile: every multiplier is exactly 1.
+        for a in ACTIVITIES {
+            assert!((t.mult(a) - 1.0).abs() < 1e-4);
+        }
+        // Crafting keeps paying: its weight rises, everything else sinks.
+        for _ in 0..30 {
+            t.credit(Activity::Craft, 60.0);
+        }
+        assert_eq!(t.dominant(), Activity::Craft);
+        assert_eq!(t.archetype(), "Crafter");
+        assert!(t.mult(Activity::Craft) > 1.5, "craft mult: {}", t.mult(Activity::Craft));
+        assert!(t.mult(Activity::Gather) < 1.0);
+        // Exploration floor: even the losers keep a nonzero share.
+        for a in ACTIVITIES {
+            assert!(t.mult(a) >= TRAIT_FLOOR * ACTIVITIES.len() as f32 - 1e-4);
+        }
+        // Deaths charge the activity: heavy losses push it below neutral.
+        let mut t = Traits::default();
+        for _ in 0..30 {
+            t.credit(Activity::Fight, -50.0);
+        }
+        assert!(t.mult(Activity::Fight) < 1.0);
+        assert_ne!(t.dominant(), Activity::Fight);
     }
 
     #[test]
@@ -863,6 +1145,25 @@ mod tests {
         }
         assert!(acted, "agent should reach the drop and ask to act");
         assert!((a.position - Vec3::new(40.0, 0.0, 10.0)).length() <= 2.0);
+    }
+
+    #[test]
+    fn sell_errand_rescores_when_the_decision_timer_fires() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.goal =
+            Goal::Sell { store: 1, store_pos: Vec3::new(500.0, 0.0, 10.0), list_on_market: false };
+        a.decision_timer = 1.5;
+        // Timer still alive mid-transit: keep walking.
+        assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::None);
+        // Timer fired well short of the store: ask for a fresh decision so
+        // live congestion can reroute the errand instead of locking it in.
+        assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::NeedsGoal);
     }
 
     #[test]
@@ -927,16 +1228,26 @@ mod tests {
         for _ in 0..200 {
             a.tick(&Open, dt, true, None);
         }
+        // Settles inside the Gather arrive radius (1.2 m: crowds stand in a
+        // loose ring around shared spots instead of stacking on the point),
+        // well within the 2.0 m action range.
         assert!(
-            (a.position.x - 3.4).abs() < 0.11,
-            "agent should settle on the spot: {:?}",
+            (a.position.x - 3.4).abs() < 1.25,
+            "agent should settle near the spot: {:?}",
             a.position
         );
-        // Once settled, further ticks must not swing the yaw around.
+        // Once settled, further ticks must not move the body or swing the yaw.
+        let settled = a.position;
         let yaw_before = a.yaw;
         for _ in 0..20 {
             a.tick(&Open, dt, true, None);
         }
+        assert!(
+            (a.position - settled).length() < 1e-4,
+            "agent kept sliding after settling: {:?} -> {:?}",
+            settled,
+            a.position
+        );
         let mut dy = (a.yaw - yaw_before).abs();
         if dy > std::f32::consts::PI {
             dy = 2.0 * std::f32::consts::PI - dy;
@@ -975,6 +1286,40 @@ mod tests {
         }
         let wobble = (max_yaw - min_yaw).to_degrees();
         assert!(wobble < 8.0, "yaw wobbled {wobble:.1} degrees in the scrum");
+    }
+
+    #[test]
+    fn reversals_turn_the_body_smoothly_instead_of_snapping() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.position = Vec3::new(0.0, 0.0, 0.0);
+        a.decision_timer = 1000.0;
+        let dt = 0.05;
+        // Walk east to settle the facing, then flip the goal due west: the
+        // yaw must sweep around over multiple ticks, never snapping.
+        a.goal = Goal::Patrol { to: Vec3::new(50.0, 0.0, 0.0) };
+        for _ in 0..20 {
+            a.tick(&Open, dt, true, None);
+        }
+        a.goal = Goal::Patrol { to: Vec3::new(-50.0, 0.0, 0.0) };
+        let max_step = TURN_RATE * dt + 1e-3;
+        for _ in 0..40 {
+            let before = a.yaw;
+            a.tick(&Open, dt, true, None);
+            let mut d = (a.yaw - before).abs();
+            if d > std::f32::consts::PI {
+                d = std::f32::consts::TAU - d;
+            }
+            assert!(d <= max_step, "yaw snapped {:.0} degrees in one tick", d.to_degrees());
+        }
+        // ... and it does complete the turn-around.
+        let facing_west = (a.yaw.abs() - std::f32::consts::PI).abs() < 0.2;
+        assert!(facing_west, "agent should end up facing west, yaw={}", a.yaw);
     }
 
     #[test]

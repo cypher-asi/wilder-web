@@ -52,10 +52,10 @@ committed** (statuses last updated 2026-07-02).
 - [x] Extraction points with channel timer banking loot to stash
 - [x] Resource nodes (gather/deplete/respawn) + refinery/factory crafting chain
 - [x] Production queues with power budget, laboratory blueprint research (fragment costs)
-- [x] Market: listings, buy/cancel, WILD wallet with fee burn
+- [x] Market: listings, buy/cancel, MILD wallet with fee burn
 - [x] Economy simulator (`wilder-sim`): 10k agents, sinks/faucets, CSV/JSON balance reports
 - [x] Spawn district: 10 service buildings (Storage/Market/Refinery/Factory/Lab/Armory/Bank/Bodega/Dealership/Safehouse) + hostile-ring outposts, POI map legend & holo signage (see §11.5)
-- [x] NPC vendors (Armory/Bodega), Cash -> WILD bank conversion, themed resource zones, territory commerce cut
+- [x] NPC vendors (Armory/Bodega), Cash -> MILD bank conversion, themed resource zones, territory commerce cut
 - [ ] Crafting professions/specialization (deferred from Phase 3)
 - [ ] Market transaction history (stub)
 - [ ] Production queues persistence (currently in-memory per character, inputs refunded on disconnect)
@@ -276,7 +276,7 @@ A standalone, deterministic (seeded) Rust binary (`crates/wilder-sim`) built **b
 the game economy, and maintained as a balance tool thereafter.
 
 Models: ~10,000 simulated players; resource generation; refining; manufacturing;
-trading; death rates; item destruction; market prices; inflation; WILD burns; guild
+trading; death rates; item destruction; market prices; inflation; MILD burns; guild
 production.
 
 Runs headless at 100x+ speed (months of gameplay in minutes) and emits CSV/JSON
@@ -350,12 +350,12 @@ Every location has one job, one accent color, and one map glyph (shared taxonomy
 | Building | Glyph | What happens there |
 | --- | --- | --- |
 | **Storage** | S | Stash terminal: deposit/withdraw backpack loot (48 slots) |
-| **Market** | M | Player market: list/buy items in WILD (5% fee) |
+| **Market** | M | Player market: list/buy items in MILD (5% fee) |
 | **Refinery** | R | Refine resources into materials (timed queues, power) |
 | **Factory** | F | Manufacture weapons/gear from materials |
 | **Laboratory** | L | Research blueprint unlocks (fragments + resources) |
-| **Armory** | A | NPC vendor: buy/sell weapons, armor, ammo in WILD |
-| **Bank** | B | Convert looted **Cash** into wallet WILD (10% fee) |
+| **Armory** | A | NPC vendor: buy/sell weapons, armor, ammo in MILD |
+| **Bank** | B | Convert looted **Cash** into wallet MILD (10% fee) |
 | **Bodega** | G | NPC general store: sells consumables, buys raw resources cheap |
 | **Dealership** | D | Vehicle showroom — placeholder until vehicles ship |
 | **Safehouse** | H | 10 m safety bubble: hostiles ignore players inside; health regen |
@@ -371,7 +371,7 @@ and the floating holo signs on the buildings themselves.
 
 NPCs drop **Cash** (a lootable item, not wallet currency) alongside resources — more
 from raiders, double in the Blast Zone. Cash is worthless until carried to a Bank and
-converted to WILD at a 10% fee, making it one more thing to lose (or extract) on a run.
+converted to MILD at a 10% fee, making it one more thing to lose (or extract) on a run.
 
 ### Resource zones
 

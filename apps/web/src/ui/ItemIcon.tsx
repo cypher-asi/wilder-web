@@ -85,7 +85,7 @@ export const ITEM_INFO: Record<ItemKind, ItemInfo> = {
     label: "Plate Carrier",
     category: "armor",
     ticker: "PLTE",
-    desc: "Ballistic plate carrier with a heavy shield cell. Serious protection for serious WILD.",
+    desc: "Ballistic plate carrier with a heavy shield cell. Serious protection for serious MILD.",
   },
   Ammo9mm: {
     label: "9mm Ammo",
@@ -169,7 +169,7 @@ export const ITEM_INFO: Record<ItemKind, ItemInfo> = {
     label: "Cash",
     category: "currency",
     ticker: "CASH",
-    desc: "Looted street currency. Worthless paper until a Bank converts it to WILD (minus their cut).",
+    desc: "Looted street currency. Worthless paper until a Bank converts it to MILD (minus their cut).",
   },
 };
 
@@ -390,7 +390,7 @@ export function ItemIcon({ kind, size = 34 }: { kind: ItemKind; size?: number })
 export type FeedIconKind = "wild" | "shards" | "energy" | "zone" | "alert";
 
 /** Inner SVG per feed icon (20x20 viewBox, currentColor so it inherits the
- * line color — including red for alert lines). WILD/SHARDS/ENERGY mirror the
+ * line color — including red for alert lines). MILD/SHARDS/ENERGY mirror the
  * HUD currency chips (Hud.tsx CurrencyPanel) for visual consistency. */
 const FEED_GLYPHS: Record<FeedIconKind, JSX.Element> = {
   wild: (

@@ -64,7 +64,7 @@ export const POI_STYLES: Partial<Record<EntityKind, PoiStyle>> = {
     icon: "M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2a2 2 0 0 1-.6-1.4V4a2 2 0 0 1 2-2h7.6a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8z M7.5 7.5h.01",
     category: "TRADE",
     color: CATEGORY_COLOR.TRADE,
-    desc: "Player market — trade in WILD",
+    desc: "Player market — trade in MILD",
   },
   Refinery: {
     label: "REFINERY",
@@ -104,7 +104,7 @@ export const POI_STYLES: Partial<Record<EntityKind, PoiStyle>> = {
     icon: "M3 10 12 3l9 7 M4 10v8 M9 10v8 M15 10v8 M20 10v8 M3 21h18",
     category: "TRADE",
     color: CATEGORY_COLOR.TRADE,
-    desc: "Convert looted Cash into WILD",
+    desc: "Convert looted Cash into MILD",
   },
   Bodega: {
     label: "BODEGA",

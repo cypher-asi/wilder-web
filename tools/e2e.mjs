@@ -601,8 +601,8 @@ async function scenarioManufacturing() {
   c.interact(market.id);
   const ms0 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState");
   const wallet0 = ms0.d.wallet;
-  log("market open: wallet", wallet0, "WILD,", ms0.d.listings.length, "listings");
-  if (wallet0 <= 0) throw new Error("no WILD grant on wallet");
+  log("market open: wallet", wallet0, "MILD,", ms0.d.listings.length, "listings");
+  if (wallet0 <= 0) throw new Error("no MILD grant on wallet");
 
   const steelHeld = c.invCount("SteelPlate");
   c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 2, price_each: 10 } } });
@@ -613,7 +613,7 @@ async function scenarioManufacturing() {
   if (!listing) throw new Error("listing not found after List");
   await sleep(300);
   if (c.invCount("SteelPlate") !== steelHeld - 2) throw new Error("items not escrowed on list");
-  log("PASS market list: 2x SteelPlate escrowed at 10 WILD each (listing", listing.id + ")");
+  log("PASS market list: 2x SteelPlate escrowed at 10 MILD each (listing", listing.id + ")");
 
   // Buy our own listing (single-player verification; 5% fee burned).
   c.send({ t: "Market", d: { t: "Buy", d: { listing_id: listing.id, count: 2 } } });
@@ -627,7 +627,7 @@ async function scenarioManufacturing() {
   if (ms2.d.wallet !== wallet0 - fee) {
     throw new Error(`wallet ${ms2.d.wallet}, expected ${wallet0 - fee} (fee burn ${fee})`);
   }
-  log(`PASS market buy: bought own listing, ${fee} WILD fee burned (wallet ${wallet0} -> ${ms2.d.wallet})`);
+  log(`PASS market buy: bought own listing, ${fee} MILD fee burned (wallet ${wallet0} -> ${ms2.d.wallet})`);
 
   // Cancel round-trip.
   c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 1, price_each: 5 } } });

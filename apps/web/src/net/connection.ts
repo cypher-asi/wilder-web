@@ -473,7 +473,7 @@ export class GameConnection {
         // (skip the initial balance push right after joining).
         if (prev) {
           if (msg.d.wild > prev.wild) {
-            ui.pushPickup({ kind: null, icon: "wild", text: `+${msg.d.wild - prev.wild} WILD` });
+            ui.pushPickup({ kind: null, icon: "wild", text: `+${msg.d.wild - prev.wild} MILD` });
           }
           if (msg.d.shards > prev.shards) {
             ui.pushPickup({ kind: null, icon: "shards", text: `+${msg.d.shards - prev.shards} SHARDS` });
@@ -605,7 +605,7 @@ export class GameConnection {
         ui.set({ market: { listings: msg.d.listings, wallet: msg.d.wallet } });
         if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
           playCoin();
-          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} WILD`);
+          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} MILD`);
         }
         break;
       }
@@ -633,7 +633,7 @@ export class GameConnection {
         });
         if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
           playCoin();
-          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} WILD`);
+          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} MILD`);
         }
         break;
       }
@@ -720,6 +720,9 @@ export class GameConnection {
           })
           .filter((c) => c.d2 <= CAPTURE_NEAR)
           .sort((a, b) => a.d2 - b.d2);
+        // Personal tally: every square you flipped near you (not deduped),
+        // shown under the minimap. Distinct from the faction-wide counts.
+        if (secured.length > 0) ui.addZonesSecured(secured.length);
         let gained = 0;
         const seen = new Set<string>();
         for (const c of secured) {

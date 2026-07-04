@@ -1210,7 +1210,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
 }
 
 // Loose currency pickups spilled on death. Three looks keyed by variant:
-// 0 = WILD (gold coin), 1 = Shards (violet crystal), 2 = Energy (green cell).
+// 0 = MILD (gold coin), 1 = Shards (violet crystal), 2 = Energy (green cell).
 // Shared geometries/materials: dozens can be on screen after a firefight.
 const pickupCoinGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.03, 16);
 const pickupShardGeo = new THREE.OctahedronGeometry(0.12, 0);

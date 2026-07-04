@@ -124,7 +124,7 @@ function Amount({ amount }: { amount: TxAmount }) {
         </span>
       );
     case "Wild":
-      return <span className="econ-amount econ-amount-wild">{amount.d.amount} WILD</span>;
+      return <span className="econ-amount econ-amount-wild">{amount.d.amount} MILD</span>;
     case "Shards":
       return <span className="econ-amount econ-amount-shards">{amount.d.amount} SHARDS</span>;
     case "Energy":
@@ -255,9 +255,9 @@ function KpiStrip() {
     <div className="econ-kpis">
       <Kpi label="BLOCK" value={`#${n(s?.block)}`} />
       <Kpi label="TRANSACTIONS" value={n(s?.tx_count)} />
-      <Kpi label="WILD CIRCULATING" value={n(s?.wild_circulating)} tone="#8fd6ff" />
-      <Kpi label="WILD MINTED" value={n(s?.wild_minted)} tone="#9fdcff" />
-      <Kpi label="WILD BURNED" value={n(s?.wild_burned)} tone="#ff6a7c" />
+      <Kpi label="MILD CIRCULATING" value={n(s?.wild_circulating)} tone="#8fd6ff" />
+      <Kpi label="MILD MINTED" value={n(s?.wild_minted)} tone="#9fdcff" />
+      <Kpi label="MILD BURNED" value={n(s?.wild_burned)} tone="#ff6a7c" />
       <Kpi label="VENDOR FLOAT" value={n(s?.wild_agent_held)} />
       <Kpi label="PLAYERS" value={n(s?.players_online)} />
       <Kpi label="AGENTS" value={n(s?.agents_alive)} />
@@ -274,11 +274,11 @@ function KpiStrip() {
 // ---------------------------------------------------------------------------
 
 // Feed filter mirrors the supply panel's item categories, plus dedicated chips
-// for the non-item amount kinds (WILD / Shards / Energy / Blueprint).
+// for the non-item amount kinds (MILD / Shards / Energy / Blueprint).
 type FeedFilter = ItemCategory | "all" | "wild" | "shards" | "energy" | "blueprint";
 
 const FEED_EXTRA: { id: FeedFilter; label: string }[] = [
-  { id: "wild", label: "WILD" },
+  { id: "wild", label: "MILD" },
   { id: "shards", label: "SHARDS" },
   { id: "energy", label: "ENERGY" },
   { id: "blueprint", label: "BP" },
@@ -323,7 +323,7 @@ function TxRow({ tx, now }: { tx: EconTx; now: number }) {
       <span className="econ-cell">
         <Amount amount={tx.amount} />
       </span>
-      <span className="econ-fee num">{tx.fee > 0 ? `${tx.fee} WILD` : "—"}</span>
+      <span className="econ-fee num">{tx.fee > 0 ? `${tx.fee} MILD` : "—"}</span>
     </div>
   );
 }
@@ -593,7 +593,7 @@ function PriceChart({ buckets, rangeMs }: { buckets: PriceBucket[]; rangeMs: num
           <g transform={`translate(${Math.min(Math.max(x(h.t) - 92, 2), plotW - 186)}, ${PAD_T})`}>
             <rect width="184" height="34" rx="2" fill="rgba(8,14,20,0.92)" stroke="rgba(79,195,255,0.35)" strokeWidth="1" />
             <text x="8" y="14" fill="#eaf7ff" fontSize="11.5" fontWeight="700">
-              {h.avg.toLocaleString()} WILD
+              {h.avg.toLocaleString()} MILD
               {h.min !== h.max ? `  (${h.min.toLocaleString()}–${h.max.toLocaleString()})` : ""}
             </text>
             <text x="8" y="27" fill={CHART_DIM} fontSize="10.5">
@@ -645,7 +645,7 @@ function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }
   const rangeFills = inRange.reduce((n, b) => n + b.fills, 0);
 
   const n = (v: number | undefined) => (v ?? 0).toLocaleString();
-  const wildOrDash = (v: number | undefined) => (v ? `${v.toLocaleString()} WILD` : "—");
+  const wildOrDash = (v: number | undefined) => (v ? `${v.toLocaleString()} MILD` : "—");
   const circulating = (data?.supply.minted ?? 0) - (data?.supply.burned ?? 0);
 
   return (
@@ -672,7 +672,7 @@ function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }
         </div>
         <div className="econ-item-price">
           <div className="econ-item-price-value">
-            {data && data.last_price > 0 ? `${n(data.last_price)} WILD` : "NO TRADES"}
+            {data && data.last_price > 0 ? `${n(data.last_price)} MILD` : "NO TRADES"}
           </div>
           {change !== null && (
             <div
@@ -714,13 +714,13 @@ function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }
           <ItemStat label="LISTED ON BOOK" value={`${n(data?.listed_units)} units`} />
           <ItemStat
             label={`VOLUME (${RANGES.find((r) => r.id === range)?.label})`}
-            value={`${n(rangeVolume)} WILD`}
+            value={`${n(rangeVolume)} MILD`}
           />
           <ItemStat label={`UNITS (${RANGES.find((r) => r.id === range)?.label})`} value={n(rangeUnits)} />
           <div className="econ-item-stat-gap" />
           <ItemStat label="TRADES (ALL TIME)" value={n(data?.total_fills)} />
           <ItemStat label="UNITS TRADED" value={n(data?.total_units)} />
-          <ItemStat label="WILD VOLUME" value={`${n(data?.total_wild)} WILD`} />
+          <ItemStat label="MILD VOLUME" value={`${n(data?.total_wild)} MILD`} />
           <div className="econ-item-stat-gap" />
           <ItemStat label="ISSUED" value={n(data?.supply.minted)} />
           <ItemStat label="BURNED" value={n(data?.supply.burned)} tone="#ff6a7c" />
@@ -750,7 +750,7 @@ function factionName(factions: FactionInfo[], id: FactionId): string {
 
 /** Value formatting per board category. */
 function boardValue(category: string, value: number): string {
-  return category === "Wealth" ? `${value.toLocaleString()} WILD` : value.toLocaleString();
+  return category === "Wealth" ? `${value.toLocaleString()} MILD` : value.toLocaleString();
 }
 
 function FactionStandingsStrip() {
@@ -774,7 +774,7 @@ function FactionStandingsStrip() {
               <span className="econ-lb-stat-label">DEATHS</span>
               <span className="num econ-burned">{f.deaths.toLocaleString()}</span>
               <span className="econ-lb-stat-label">TREASURY</span>
-              <span className="num econ-live">{f.treasury.toLocaleString()} WILD</span>
+              <span className="num econ-live">{f.treasury.toLocaleString()} MILD</span>
               <span className="econ-lb-stat-label">REGIONS</span>
               <span className="num">{f.regions_held.toLocaleString()}</span>
               <span className="econ-lb-stat-label">DISTRICTS</span>
@@ -875,7 +875,7 @@ function GuildStandings() {
             </span>
             <span className="num">{g.members.toLocaleString()}</span>
             <span className="num">{g.kills.toLocaleString()}</span>
-            <span className="num econ-live">{g.wealth.toLocaleString()} WILD</span>
+            <span className="num econ-live">{g.wealth.toLocaleString()} MILD</span>
           </div>
         ))}
       </div>

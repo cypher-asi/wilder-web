@@ -1467,6 +1467,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "wilder-exchange"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wilder-exchange-asset",
+ "wilder-exchange-book",
+ "wilder-exchange-data",
+ "wilder-exchange-settle",
+ "wilder-types",
+]
+
+[[package]]
+name = "wilder-exchange-asset"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wilder-types",
+]
+
+[[package]]
+name = "wilder-exchange-book"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wilder-exchange-asset",
+ "wilder-types",
+]
+
+[[package]]
+name = "wilder-exchange-data"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wilder-exchange-asset",
+ "wilder-exchange-book",
+ "wilder-types",
+]
+
+[[package]]
+name = "wilder-exchange-settle"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wilder-exchange-asset",
+ "wilder-exchange-book",
+ "wilder-types",
+]
+
+[[package]]
 name = "wilder-gateway"
 version = "0.1.0"
 dependencies = [

@@ -2014,6 +2014,19 @@ impl World {
         match parts.as_slice() {
             ["give", item, rest @ ..] => {
                 let count: u32 = rest.first().and_then(|n| n.parse().ok()).unwrap_or(1);
+                // Wallet currencies route through the real faucet helpers
+                // (ledger mint + WalletUpdate) instead of the item path.
+                let currency = match item.to_lowercase().as_str() {
+                    "energy" => Some(Currency::Energy),
+                    "wild" | "mild" => Some(Currency::Wild),
+                    "shards" => Some(Currency::Shards),
+                    _ => None,
+                };
+                if let Some(currency) = currency {
+                    self.grant_currency(entity, currency, count);
+                    return;
+                }
+                let Some(player) = self.players.get_mut(&entity) else { return };
                 let kind = match item.to_lowercase().as_str() {
                     "pipe" => ItemKind::Pipe,
                     "knife" => ItemKind::Knife,
@@ -2064,7 +2077,7 @@ impl World {
             }
             _ => {
                 let _ = player.tx.send(S2C::Error {
-                    message: "dev commands: /give <item> [n], /heal, /tp <x> <z>".into(),
+                    message: "dev commands: /give <item|energy|wild|shards> [n], /heal, /tp <x> <z>".into(),
                 });
             }
         }
@@ -12278,5 +12291,57 @@ mod tests {
         world.tick_currency_pickups();
         assert_eq!(world.agents[idx].purse.carried(Currency::Energy), before + 3);
         assert!(world.pickups.is_empty());
+    }
+
+    /// Ledger conservation: after a mix of faucet/sink/transfer flows,
+    /// `energy_minted - energy_burned` equals the Energy actually outstanding
+    /// on purses. Energy is the clean currency for this audit — unlike MILD it
+    /// never pools in vendor takings or faction treasuries, so every unit is
+    /// either on a purse or burned. Uncollected death spills don't count as
+    /// outstanding: death burns the full carried balance and the spilled half
+    /// re-mints only on pickup.
+    #[test]
+    fn ledger_energy_supply_matches_outstanding_balances() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        let b = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), pos);
+        world.agents[a].tier = Tier::Hot;
+        world.regrid_agent(a);
+
+        // Faucet: a ground pickup collected by a hot agent (mints on grab).
+        world.spawn_currency_pickup(pos, Currency::Energy, 6);
+        for p in world.pickups.values_mut() {
+            p.position = pos;
+        }
+        world.tick_currency_pickups();
+        // Sink + refund: queue burns the batch Energy up-front, cancel
+        // re-mints the uncompleted units' share.
+        world.agents[a].add_item(ItemKind::Iron, 8);
+        let job = world
+            .queue_production(EconActor::Agent(a), station, "steel_plate", 2)
+            .expect("queue");
+        assert!(world.cancel_production(EconActor::Agent(a), station, job));
+        // Death: carried Energy burns in full; half spills and re-mints when
+        // the survivor walks over it.
+        world.grant_currency_actor(EconActor::Agent(b), Currency::Energy, 5);
+        world.kill_agent(b, true);
+        for p in world.pickups.values_mut() {
+            p.position = pos;
+        }
+        world.tick_currency_pickups();
+
+        let stats = world.ledger.stats(0, world.agents_alive());
+        let outstanding: u64 = world
+            .agents
+            .iter()
+            .map(|ag| {
+                (ag.purse.carried(Currency::Energy) + ag.purse.banked(Currency::Energy)) as u64
+            })
+            .sum();
+        assert_eq!(stats.energy_minted, 6 + 2 + 5 + 2, "pickup + refund + grant + spill");
+        assert_eq!(stats.energy_burned, 2 + 5, "queue batch + death burn");
+        assert_eq!(stats.energy_minted - stats.energy_burned, outstanding);
     }
 }

@@ -29,6 +29,7 @@ import { allRegions, MY_FACTION, REGION_SIZE } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import {
   AgentBlip,
+  AgentSummary,
   CHUNK_SIZE,
   DangerLevel,
   FactionId,
@@ -106,14 +107,51 @@ export function HoloMap({ connection }: { connection: GameConnection }) {
   return <HoloMapView open={mapOpen} connection={connection} />;
 }
 
-function HoloMapView({ open, connection }: { open: boolean; connection: GameConnection }) {
+/** Imperative camera control exposed to standalone (mobile) hosts. */
+export interface HoloMapHandle {
+  /** Pan the camera to a world position (optionally changing zoom). */
+  centerOn: (x: number, z: number, dist?: number) => void;
+}
+
+/** One resolved tap on the map (standalone hosts, via `onTap`). */
+export interface HoloMapTap {
+  /** Tapped point on the ground plane (world meters). */
+  x: number;
+  z: number;
+  /** Owned agent whose marker was within tap range, if any. */
+  agentId: string | null;
+}
+
+/**
+ * The map surface itself. Desktop wraps it in `HoloMap` (menu-gated);
+ * the mobile Map tab renders it directly with `standalone` set, which:
+ *  - skips every local-player read (spectator: no player entity),
+ *  - opens on the first owned agent (fallback: city center),
+ *  - hides the desktop filter/legend panels (the tab draws its own chrome),
+ *  - reports taps through `onTap` and draws bright owned-agent markers.
+ */
+export function HoloMapView({
+  open,
+  connection,
+  standalone = false,
+  ownedAgents = null,
+  onTap,
+  handleRef,
+}: {
+  open: boolean;
+  connection: GameConnection;
+  standalone?: boolean;
+  ownedAgents?: AgentSummary[] | null;
+  onTap?: (tap: HoloMapTap) => void;
+  handleRef?: RefObject<HoloMapHandle | null>;
+}) {
   const view = useRef<HoloView>({
     tx: game.predicted.x,
     tz: game.predicted.z,
     dist: OPEN_DIST,
     yaw: Math.PI, // camera west of target -> north (-Z) points left on screen
     topDown: false,
-    follow: true,
+    follow: !standalone,
     sTx: game.predicted.x,
     sTz: game.predicted.z,
     sDist: OPEN_DIST,
@@ -122,7 +160,15 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
   });
   const [topDown, setTopDown] = useState(false);
   const [filters, setFilters] = useState<MapFilters>(DEFAULT_FILTERS);
-  const drag = useRef<{ x: number; y: number; button: number } | null>(null);
+  // Active pointers (multi-touch pan/pinch) + two-finger pinch baseline.
+  const pointers = useRef(new Map<number, { x: number; y: number; button: number }>());
+  const pinch = useRef<{ dist: number; angle: number } | null>(null);
+  // Tap candidate: survives only while total movement stays tiny.
+  const tapStart = useRef<{ t: number; moved: number } | null>(null);
+  // Live THREE camera, grabbed from inside the Canvas for tap hit-testing.
+  const cameraRef = useRef<THREE.Camera | null>(null);
+  const ownedRef = useRef(ownedAgents);
+  ownedRef.current = ownedAgents;
 
   // Whole-map intel (actor blips) streams only while the map is open.
   useEffect(() => {
@@ -134,19 +180,64 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
   }, [open, connection]);
 
   useEffect(() => {
+    if (!handleRef) return;
+    handleRef.current = {
+      centerOn: (x, z, dist) => {
+        const v = view.current;
+        v.follow = false;
+        v.tx = x;
+        v.tz = z;
+        if (dist !== undefined) {
+          v.dist = Math.min(MAX_DIST, Math.max(MIN_DIST, dist));
+        }
+      },
+    };
+    return () => {
+      handleRef.current = null;
+    };
+  }, [handleRef]);
+
+  useEffect(() => {
     if (!open) return;
-    // Each open starts fresh on the player, matching the old mount-per-open
-    // behavior (the component now stays mounted across opens).
+    // Each open starts fresh, matching the old mount-per-open behavior (the
+    // component now stays mounted across opens). Desktop centers on the
+    // player; standalone (mobile spectator) has none, so it opens on the
+    // first owned agent, else the city center.
     const v = view.current;
-    v.tx = v.sTx = game.predicted.x;
-    v.tz = v.sTz = game.predicted.z;
     v.dist = v.sDist = OPEN_DIST;
     v.yaw = Math.PI;
     v.topDown = false;
-    v.follow = true;
     v.sPitch = PITCH_3D;
     v.keys = {};
     setTopDown(false);
+    if (standalone) {
+      v.follow = false;
+      const first = ownedRef.current?.[0];
+      if (first) {
+        v.tx = v.sTx = first.x;
+        v.tz = v.sTz = first.z;
+        return;
+      }
+      let cancelled = false;
+      let touched = false;
+      const markTouched = () => (touched = true);
+      window.addEventListener("pointerdown", markTouched, true);
+      onCityMapReady(() => {
+        // Don't yank the camera if the grid resolves after the user panned.
+        if (cancelled || touched) return;
+        const g = getCityGrid();
+        if (!g) return;
+        v.tx = v.sTx = (g.tileMinX + g.width / 2) * TILE_SIZE;
+        v.tz = v.sTz = (g.tileMinZ + g.height / 2) * TILE_SIZE;
+      });
+      return () => {
+        cancelled = true;
+        window.removeEventListener("pointerdown", markTouched, true);
+      };
+    }
+    v.tx = v.sTx = game.predicted.x;
+    v.tz = v.sTz = game.predicted.z;
+    v.follow = true;
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (e.code === "Escape") {
@@ -175,7 +266,53 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [open]);
+  }, [open, standalone]);
+
+  /** Pan the look-at target by a screen-pixel delta at the current zoom. */
+  const panByPixels = (dx: number, dy: number) => {
+    const v = view.current;
+    v.follow = false;
+    // Meters per screen pixel at the look-at plane.
+    const mpp = (2 * v.sDist * Math.tan((FOV * Math.PI) / 360)) / window.innerHeight;
+    // Screen right / screen up projected onto the ground.
+    const rx = Math.sin(v.yaw);
+    const rz = -Math.cos(v.yaw);
+    const ux = -Math.cos(v.yaw);
+    const uz = -Math.sin(v.yaw);
+    v.tx += (-rx * dx + ux * dy) * mpp;
+    v.tz += (-rz * dx + uz * dy) * mpp;
+  };
+
+  /** Resolve a tap: nearest owned-agent marker in screen range, else the
+   * ground point under the finger. Standalone hosts consume the result. */
+  const resolveTap = (clientX: number, clientY: number, el: HTMLElement) => {
+    const cam = cameraRef.current;
+    if (!cam || !onTap) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    let agentId: string | null = null;
+    let bestPx = 40; // generous touch slop around a marker
+    const proj = new THREE.Vector3();
+    for (const a of ownedRef.current ?? []) {
+      proj.set(a.x, 16, a.z).project(cam);
+      if (proj.z >= 1) continue;
+      const dx = ((proj.x - ndcX) / 2) * rect.width;
+      const dy = ((proj.y - ndcY) / 2) * rect.height;
+      const d = Math.hypot(dx, dy);
+      if (d < bestPx) {
+        bestPx = d;
+        agentId = a.agent_id;
+      }
+    }
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), cam);
+    const hit = new THREE.Vector3();
+    const ok = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit);
+    const v = view.current;
+    onTap({ x: ok ? hit.x : v.sTx, z: ok ? hit.z : v.sTz, agentId });
+  };
 
   return (
     <div
@@ -183,33 +320,72 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
       style={{ display: open ? undefined : "none" }}
       onContextMenu={(e) => e.preventDefault()}
       onPointerDown={(e) => {
-        drag.current = { x: e.clientX, y: e.clientY, button: e.button };
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button });
+        if (pointers.current.size === 1 && e.button === 0) {
+          tapStart.current = { t: performance.now(), moved: 0 };
+        } else {
+          tapStart.current = null;
+        }
+        if (pointers.current.size === 2) {
+          const [a, b] = [...pointers.current.values()];
+          pinch.current = {
+            dist: Math.hypot(b.x - a.x, b.y - a.y),
+            angle: Math.atan2(b.y - a.y, b.x - a.x),
+          };
+        }
       }}
       onPointerMove={(e) => {
-        if (!drag.current) return;
+        const p = pointers.current.get(e.pointerId);
+        if (!p) return;
+        const dx = e.clientX - p.x;
+        const dy = e.clientY - p.y;
+        p.x = e.clientX;
+        p.y = e.clientY;
+        if (tapStart.current) tapStart.current.moved += Math.hypot(dx, dy);
         const v = view.current;
-        const dx = e.clientX - drag.current.x;
-        const dy = e.clientY - drag.current.y;
-        drag.current.x = e.clientX;
-        drag.current.y = e.clientY;
-        if (drag.current.button === 2) {
-          v.yaw -= dx * 0.004;
-          return;
+        if (pointers.current.size === 1) {
+          if (p.button === 2) {
+            v.yaw -= dx * 0.004;
+            return;
+          }
+          panByPixels(dx, dy);
+        } else if (pointers.current.size === 2) {
+          // Two-finger gesture: pinch zooms, twist rotates, and the shared
+          // centroid drag pans (each finger contributes half its delta).
+          const [a, b] = [...pointers.current.values()];
+          const dist = Math.hypot(b.x - a.x, b.y - a.y);
+          const angle = Math.atan2(b.y - a.y, b.x - a.x);
+          if (pinch.current && dist > 0 && pinch.current.dist > 0) {
+            v.dist = Math.min(
+              MAX_DIST,
+              Math.max(MIN_DIST, v.dist * (pinch.current.dist / dist)),
+            );
+            let da = angle - pinch.current.angle;
+            if (da > Math.PI) da -= 2 * Math.PI;
+            else if (da < -Math.PI) da += 2 * Math.PI;
+            v.yaw += da;
+            panByPixels(dx / 2, dy / 2);
+          }
+          pinch.current = { dist, angle };
         }
-        v.follow = false;
-        // Meters per screen pixel at the look-at plane.
-        const mpp =
-          (2 * v.sDist * Math.tan((FOV * Math.PI) / 360)) / window.innerHeight;
-        // Screen right / screen up projected onto the ground.
-        const rx = Math.sin(v.yaw);
-        const rz = -Math.cos(v.yaw);
-        const ux = -Math.cos(v.yaw);
-        const uz = -Math.sin(v.yaw);
-        v.tx += (-rx * dx + ux * dy) * mpp;
-        v.tz += (-rz * dx + uz * dy) * mpp;
       }}
-      onPointerUp={() => (drag.current = null)}
+      onPointerUp={(e) => {
+        pointers.current.delete(e.pointerId);
+        if (pointers.current.size < 2) pinch.current = null;
+        const t = tapStart.current;
+        if (t && pointers.current.size === 0) {
+          tapStart.current = null;
+          if (t.moved < 10 && performance.now() - t.t < 450) {
+            resolveTap(e.clientX, e.clientY, e.currentTarget as HTMLElement);
+          }
+        }
+      }}
+      onPointerCancel={(e) => {
+        pointers.current.delete(e.pointerId);
+        if (pointers.current.size < 2) pinch.current = null;
+        tapStart.current = null;
+      }}
       onWheel={(e) => {
         const v = view.current;
         v.dist = Math.min(
@@ -217,7 +393,9 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
           Math.max(MIN_DIST, v.dist * Math.exp(e.deltaY * 0.0012)),
         );
       }}
-      onDoubleClick={() => (view.current.follow = true)}
+      onDoubleClick={() => {
+        if (!standalone) view.current.follow = true;
+      }}
     >
       <Canvas
         dpr={[1, 2]}
@@ -226,10 +404,14 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
         style={{ position: "absolute", inset: 0 }}
         frameloop={open ? "always" : "never"}
       >
-        <HoloScene view={view} filters={filters} />
+        <CameraGrab cameraRef={cameraRef} />
+        <HoloScene view={view} filters={filters} standalone={standalone} />
+        {standalone && ownedAgents && ownedAgents.length > 0 && (
+          <OwnedAgentMarkers view={view} agents={ownedAgents} />
+        )}
       </Canvas>
-      <MapFilterPanel filters={filters} setFilters={setFilters} />
-      <MapLegend />
+      {!standalone && <MapFilterPanel filters={filters} setFilters={setFilters} />}
+      {!standalone && <MapLegend />}
       <button
         className="map-view-toggle"
         onClick={() => {
@@ -238,11 +420,25 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
             return !t;
           });
         }}
+        onPointerDown={(e) => e.stopPropagation()}
       >
-        {topDown ? "VIEW: TOP-DOWN" : "VIEW: 3D"} <span className="action-key">T</span>
+        {topDown ? "VIEW: TOP-DOWN" : "VIEW: 3D"}
+        {!standalone && <span className="action-key">T</span>}
       </button>
     </div>
   );
+}
+
+/** Exposes the R3F camera to the DOM layer (tap raycasts). Renders nothing. */
+function CameraGrab({ cameraRef }: { cameraRef: RefObject<THREE.Camera | null> }) {
+  const camera = useThree((s) => s.camera);
+  useEffect(() => {
+    cameraRef.current = camera;
+    return () => {
+      cameraRef.current = null;
+    };
+  }, [camera, cameraRef]);
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +554,15 @@ function TerritoryTint({ enabled }: { enabled: boolean }) {
   return null;
 }
 
-function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapFilters }) {
+function HoloScene({
+  view,
+  filters,
+  standalone = false,
+}: {
+  view: RefObject<HoloView>;
+  filters: MapFilters;
+  standalone?: boolean;
+}) {
   return (
     <>
       <color attach="background" args={["#010409"]} />
@@ -367,7 +571,8 @@ function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapF
       <TerritoryTint enabled={filters.territory} />
       {filters.danger && <DangerLayer />}
       <SafeZoneOutline />
-      <PlayerMarker view={view} />
+      {/* Spectator (mobile standalone) has no local player to mark. */}
+      {!standalone && <PlayerMarker view={view} />}
       <AmmoMarkers view={view} />
       {filters.pois && <PoiMarkers view={view} />}
       <CensusLayer filters={filters} />
@@ -866,6 +1071,107 @@ function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
             transparent
           />
         </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Owned-agent markers (standalone / mobile): bright accent diamonds with name
+// labels revealed at close zoom, drawn above the census/blip point clouds.
+// ---------------------------------------------------------------------------
+
+/** Hot cyan-white (blooms) so YOUR agents pop over faction-colored blips. */
+const OWNED_MARKER_COLOR = new THREE.Color(1.1, 2.6, 3.0);
+
+/** Zoom distance at which owned-agent name labels are fully visible. */
+const OWNED_LABEL_DIST = 2800;
+
+const ownedLabelCache = new Map<string, THREE.Sprite>();
+
+function makeOwnedLabelSprite(name: string): THREE.Sprite {
+  let sprite = ownedLabelCache.get(name);
+  if (sprite) return sprite;
+  const pad = 8;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  ctx.font = "800 32px system-ui, sans-serif";
+  const text = name.toUpperCase();
+  const tw = Math.ceil(ctx.measureText(text).width);
+  canvas.width = tw + pad * 2;
+  canvas.height = 46;
+  ctx.font = "800 32px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(120, 240, 255, 0.8)";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "rgba(230, 250, 255, 0.95)";
+  ctx.fillText(text, pad, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    sizeAttenuation: false,
+    opacity: 0, // faded in by OwnedAgentMarkers when zoomed close
+  });
+  sprite = new THREE.Sprite(mat);
+  const k = 0.022;
+  sprite.scale.set((canvas.width / canvas.height) * k, k, 1);
+  sprite.renderOrder = 11;
+  ownedLabelCache.set(name, sprite);
+  return sprite;
+}
+
+/** Pulsing diamond + name label per owned agent (roster x/z, ~2 s refresh). */
+function OwnedAgentMarkers({
+  view,
+  agents,
+}: {
+  view: RefObject<HoloView>;
+  agents: AgentSummary[];
+}) {
+  const group = useRef<THREE.Group>(null);
+  useFrame(({ clock }) => {
+    const g = group.current;
+    if (!g) return;
+    const sDist = view.current.sDist;
+    const s = Math.min(Math.max(5, sDist * 0.011), 44);
+    const pulse = 1 + 0.18 * Math.sin(clock.elapsedTime * 3.2);
+    // Labels fade in as the camera closes past the reveal distance.
+    const target = THREE.MathUtils.clamp((OWNED_LABEL_DIST - sDist) / 600, 0, 1) * 0.95;
+    for (const child of g.children) {
+      if ((child as THREE.Sprite).isSprite) {
+        const m = (child as THREE.Sprite).material as THREE.SpriteMaterial;
+        m.opacity += (target - m.opacity) * 0.2;
+        child.visible = m.opacity > 0.02;
+      } else {
+        // Stretch Y so the octahedron reads as a marker diamond.
+        child.scale.set(s * pulse, s * 1.7 * pulse, s * pulse);
+        child.rotation.y = clock.elapsedTime * 1.1;
+      }
+    }
+  });
+  return (
+    <group ref={group}>
+      {agents.map((a) => (
+        <mesh key={a.agent_id} position={[a.x, 16, a.z]} renderOrder={10}>
+          <octahedronGeometry args={[1]} />
+          <meshBasicMaterial
+            color={OWNED_MARKER_COLOR}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+            depthTest={false}
+            transparent
+          />
+        </mesh>
+      ))}
+      {agents.map((a) => (
+        <primitive
+          key={`${a.agent_id}-label`}
+          object={makeOwnedLabelSprite(a.name)}
+          position={[a.x, 42, a.z]}
+          dispose={null}
+        />
       ))}
     </group>
   );

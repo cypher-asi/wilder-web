@@ -19,27 +19,15 @@ import {
   TxParty,
 } from "../net/protocol";
 import { useGame } from "../state/game";
+import { fmtMild, formatAge } from "./format";
 import { ItemIcon, itemLabel } from "./ItemIcon";
 
 /** Max owned agents per player (mirror of the server cap). */
 export const AGENT_CAP = 5;
 
-export function fmtMild(n: number): string {
-  return n.toLocaleString("en-US");
-}
-
-/** Compact relative age: "12s", "4m", "3h", "2d", then a short date. */
-export function formatAge(atMs: number, now: number): string {
-  const s = Math.max(0, Math.floor((now - atMs) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  return new Date(atMs).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
+// Re-exported for existing consumers (AgentsTab / WatchTab / AgentsScreen);
+// the definitions now live in the shared ./format module.
+export { fmtMild, formatAge };
 
 export interface UseAgentsApi {
   /** Owned roster (null until the first AgentRoster push lands). */

@@ -1,0 +1,16 @@
+[package]
+name = "wilder-exchange"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wilder-exchange-asset = { workspace = true }
+wilder-exchange-book = { workspace = true }
+wilder-exchange-data = { workspace = true }
+wilder-exchange-settle = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+wilder-types = { workspace = true }
+serde_json = { workspace = true }

@@ -23,8 +23,8 @@ export function MobileShell({ connection }: { connection: GameConnection }) {
       <div className="m-content">
         {tab === "agents" && <AgentsTab connection={connection} />}
         {tab === "watch" && <WatchTab connection={connection} />}
-        {tab === "map" && <MapTab />}
-        {tab === "economy" && <EconomyTab />}
+        {tab === "map" && <MapTab connection={connection} />}
+        {tab === "economy" && <EconomyTab connection={connection} />}
         {tab === "trade" && <TradeTab />}
       </div>
       <TabBar />

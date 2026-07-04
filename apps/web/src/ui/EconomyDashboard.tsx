@@ -23,6 +23,7 @@ import {
 import { cameraState } from "../render/CameraRig";
 import { allRegions, MY_FACTION } from "../game/territory";
 import { useGame } from "../state/game";
+import { formatAge } from "./format";
 import { ITEM_INFO, ItemCategory, ItemIcon, itemLabel } from "./ItemIcon";
 import { ProductionMap } from "./ProductionMap";
 
@@ -30,7 +31,7 @@ import { ProductionMap } from "./ProductionMap";
 // Labels / colors
 // ---------------------------------------------------------------------------
 
-const TX_KIND_LABEL: Record<TxKind, string> = {
+export const TX_KIND_LABEL: Record<TxKind, string> = {
   Mint: "MINT",
   Burn: "BURN",
   LootPickup: "LOOT",
@@ -52,7 +53,7 @@ const TX_KIND_LABEL: Record<TxKind, string> = {
 // Cohesive blue / white / red scheme: creation reads light-blue, destruction and
 // costs read red, ordinary flows stay mid/deep blue, and passive events fade to
 // dim steel. Item-category hues (ECON_CAT_COLOR) are the only multi-hue accents.
-const TX_KIND_COLOR: Record<TxKind, string> = {
+export const TX_KIND_COLOR: Record<TxKind, string> = {
   Mint: "#9fdcff",
   Burn: "#ff6a7c",
   LootPickup: "#eaf7ff",
@@ -74,7 +75,7 @@ const TX_KIND_COLOR: Record<TxKind, string> = {
 // Per-category color (dashboard-local so the shared inventory tick palette in
 // ItemIcon stays untouched). Each item type reads with one consistent hue across
 // the supply panel and the transaction feed's ITEM / AMOUNT column.
-const ECON_CAT_COLOR: Record<ItemCategory, string> = {
+export const ECON_CAT_COLOR: Record<ItemCategory, string> = {
   weapon: "#5ad1ff",
   armor: "#8fb4ff",
   ammo: "#ffb072",
@@ -87,20 +88,6 @@ const ECON_CAT_COLOR: Record<ItemCategory, string> = {
 
 function shortHash(hash: string): string {
   return hash.length > 14 ? `${hash.slice(0, 8)}…${hash.slice(-4)}` : hash;
-}
-
-// Compact relative age: seconds -> minutes -> hours -> days, then a short date
-// once older than a week (e.g. "Jul 3").
-function formatAge(atMs: number, now: number): string {
-  const s = Math.max(0, Math.floor((now - atMs) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  return new Date(atMs).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function Party({ party }: { party: TxParty }) {
@@ -144,7 +131,7 @@ function Amount({ amount }: { amount: TxAmount }) {
 // Supply panel
 // ---------------------------------------------------------------------------
 
-const CATEGORY_ORDER: (ItemCategory | "all")[] = [
+export const CATEGORY_ORDER: (ItemCategory | "all")[] = [
   "all",
   "resource",
   "material",
@@ -156,7 +143,7 @@ const CATEGORY_ORDER: (ItemCategory | "all")[] = [
   "currency",
 ];
 
-const CATEGORY_LABEL: Record<ItemCategory | "all", string> = {
+export const CATEGORY_LABEL: Record<ItemCategory | "all", string> = {
   all: "ALL",
   resource: "RESOURCES",
   material: "MATERIALS",

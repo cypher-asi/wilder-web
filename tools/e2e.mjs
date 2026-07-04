@@ -144,6 +144,9 @@ class Client {
       case "InventoryUpdate":
         this.inventory = msg.d;
         break;
+      case "WalletUpdate":
+        this.wallet = msg.d; // { wild, bank, shards, bank_shards, energy, bank_energy }
+        break;
       case "StashUpdate":
         this.stash = msg.d.slots;
         this.events.push(msg);
@@ -256,27 +259,29 @@ async function scenarioExtraction() {
   if (c.inventory.equipped_weapon !== "Pistol") throw new Error("pistol not equipped");
   log("PASS gear: pistol equipped, ammo", c.invCount("Ammo9mm"));
 
-  // 2. Find a hostile chunk with NPCs by hopping chunk centers.
+  // 2. Find a hostile chunk with Wape agents (the retired Npc system is now
+  // the FACTION_WAPES agent pool) by hopping chunk centers.
+  const hostileWapes = (cl) => cl.findEntities("Agent").filter((e) => e.name?.startsWith("WAPE-"));
   let npcs = [];
   outer: for (let cx = 3; cx < 12; cx++) {
     for (let cz = 3; cz < 12; cz++) {
       c.tp(cx * 32 + 8, cz * 32 + 8);
       await sleep(700);
-      npcs = c.findEntities("Npc");
+      npcs = hostileWapes(c);
       if (npcs.length) {
-        log("found", npcs.length, "NPCs at chunk", cx, cz);
+        log("found", npcs.length, "Wapes at chunk", cx, cz);
         break outer;
       }
     }
   }
-  if (!npcs.length) throw new Error("no NPCs found in hostile chunks");
+  if (!npcs.length) throw new Error("no Wapes found in hostile chunks");
 
-  // 3. Kill an NPC.
-  log("NPCs in view:", npcs.length);
+  // 3. Kill a Wape.
+  log("Wapes in view:", npcs.length);
   const npc = npcs.reduce((a, b) =>
     Math.hypot(a.x - c.pos[0], a.z - c.pos[2]) < Math.hypot(b.x - c.pos[0], b.z - c.pos[2]) ? a : b,
   );
-  log("attacking NPC", npc.id, npc.name);
+  log("attacking Wape", npc.id, npc.name);
   c.logCombat = true;
   let killed = false;
   for (let i = 0; i < 40; i++) {
@@ -296,8 +301,8 @@ async function scenarioExtraction() {
     await sleep(700);
   }
   c.logCombat = false;
-  if (!killed) throw new Error("failed to kill NPC");
-  log("PASS combat: NPC killed");
+  if (!killed) throw new Error("failed to kill Wape");
+  log("PASS combat: Wape killed");
 
   // 4. Loot its container.
   await sleep(600);
@@ -355,13 +360,11 @@ async function scenarioExtraction() {
   await sleep(300);
   const ironBefore = c.invCount("Iron");
   if (ironBefore < 5) throw new Error("no iron given");
-  // TP into hostile zone next to an NPC and wait to be killed (unequip armor first).
-  const npcs2 = c.findEntities("Npc");
-  // move to a fresh hostile chunk to find NPCs
+  // TP into a hostile zone next to a Wape and wait to be killed.
   c.tp(3 * 32 + 8, 3 * 32 + 8);
   await sleep(800);
-  const hostiles = c.findEntities("Npc");
-  if (!hostiles.length) throw new Error("no NPCs for death test");
+  const hostiles = hostileWapes(c);
+  if (!hostiles.length) throw new Error("no Wapes for death test");
   const killer = hostiles[0];
   c.tp(killer.x + 0.5, killer.z + 0.5);
   const died = await c.waitFor((m) => m.t === "Died", 30000, "Died");
@@ -416,39 +419,76 @@ async function scenarioEconomy() {
   log(`PASS gather: ${gained} units gathered, node depleted=${depleted}`);
   if (!depleted) throw new Error("node did not deplete after 5+ gathers");
 
-  // 3. Refine iron -> steel plates at the hub refinery.
+  // 3. Queue timed production at the hub Refinery. Instant crafting is gone:
+  // production runs through building queues, charging inputs AND Energy
+  // up-front, with output landing in a per-owner buffer.
   c.chat("/give iron 16");
-  await sleep(300);
-  c.tp(15, 4); // refinery at (15,3)
-  await sleep(600);
-  // Wrong-station check: pipe (factory recipe) at refinery must fail.
-  c.send({ t: "Craft", d: { recipe: "pipe", station: null } });
-  const bad = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
-  if (bad.d.ok) throw new Error("factory recipe crafted at refinery!");
-  log("PASS station gating:", bad.d.error);
-  for (let i = 0; i < 4; i++) {
-    c.send({ t: "Craft", d: { recipe: "steel_plate", station: null } });
-    const r = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
-    if (!r.d.ok) throw new Error("steel_plate craft failed: " + r.d.error);
+  c.chat("/give energy 10");
+  await sleep(400);
+  c.tp(15, 4); // hub refinery at (15,3)
+  await sleep(800);
+  const refinery = c.findEntities("Refinery")[0];
+  if (!refinery) throw new Error("no refinery in view at the hub");
+  c.tp(refinery.x + 1, refinery.z);
+  await sleep(500);
+
+  // Wrong-station check: a Factory recipe queued at the Refinery must fail.
+  c.send({ t: "QueueProduction", d: { building: refinery.id, recipe: "pipe", count: 1 } });
+  const bad = await c.waitFor((m) => m.t === "CraftResult", 4000, "station gating");
+  if (bad.d.ok || !/Factory/i.test(bad.d.error ?? "")) {
+    throw new Error("factory recipe not station-gated: " + JSON.stringify(bad.d));
   }
-  if (c.invCount("SteelPlate") < 4) throw new Error("missing steel plates");
-  log("PASS refine: 4x SteelPlate from 16 iron");
+  log("PASS station gating:", bad.d.error);
 
-  // 4. Craft + equip a pipe at the factory.
-  c.tp(21, 4); // factory at (21,3)
+  // Research gating: an unresearched blueprint can't be queued. (The dev
+  // character persists across runs — tolerate a previously researched one.)
+  c.send({ t: "QueueProduction", d: { building: refinery.id, recipe: "polymer", count: 1 } });
+  const gate = await c.waitFor((m) => m.t === "CraftResult", 4000, "blueprint gating");
+  if (!gate.d.ok && /blueprint/i.test(gate.d.error ?? "")) {
+    log("PASS blueprint gating:", gate.d.error);
+  } else if (!gate.d.ok) {
+    // Known blueprint but missing inputs — still proves the queue path.
+    log("NOTE polymer known on this character; queue denied on inputs:", gate.d.error);
+  } else {
+    log("NOTE polymer already researched AND queued (persisted character)");
+  }
+
+  // Queue 3x steel_plate: 12 iron + 3 Energy charged up-front.
+  const ironBefore = c.invCount("Iron");
+  const steelBefore = c.invCount("SteelPlate");
+  const energyBefore = c.wallet?.energy ?? 0;
+  c.send({ t: "QueueProduction", d: { building: refinery.id, recipe: "steel_plate", count: 3 } });
+  const ps = await c.waitFor(
+    (m) => m.t === "ProductionState" && m.d.jobs.some((j) => j.mine && j.recipe === "steel_plate"),
+    4000,
+    "ProductionState",
+  );
+  const job = ps.d.jobs.find((j) => j.mine && j.recipe === "steel_plate");
+  if (job.count !== 3) throw new Error("bad job state: " + JSON.stringify(ps.d));
+  if (!ps.d.energy_cap) throw new Error("ProductionState missing building energy cap");
   await sleep(600);
-  c.send({ t: "Craft", d: { recipe: "pipe", station: null } });
-  const made = await c.waitFor((m) => m.t === "CraftResult", 4000, "CraftResult");
-  if (!made.d.ok) throw new Error("pipe craft failed: " + made.d.error);
-  await sleep(300);
-  const pipeSlot = c.slotOf("Pipe");
-  if (pipeSlot < 0) throw new Error("no pipe in inventory");
-  c.send({ t: "InventoryAction", d: { t: "Equip", d: { slot: pipeSlot } } });
-  await sleep(300);
-  if (c.inventory.equipped_weapon !== "Pipe") throw new Error("pipe not equipped");
-  log("PASS factory: pipe crafted and equipped");
+  if (c.invCount("Iron") !== ironBefore - 12) throw new Error("inputs not consumed on queue");
+  if ((c.wallet?.energy ?? 0) !== energyBefore - 3) {
+    throw new Error(`energy not charged: ${energyBefore} -> ${c.wallet?.energy}`);
+  }
+  log(`PASS queue: 3x steel_plate queued (cap ${ps.d.energy_cap}), 12 iron + 3 Energy charged`);
 
-  log("ALL PHASE 2 CHECKS PASSED");
+  // 4. Wait for the batch (3 x 4s + slack); standing within 5 m auto-collects
+  // the output buffer into the backpack.
+  await c.waitFor(
+    (m) =>
+      m.t === "ProductionState" &&
+      m.d.building === refinery.id &&
+      !m.d.jobs.some((j) => j.mine),
+    25000,
+    "queue drained",
+  );
+  await sleep(1000);
+  const gainedSteel = c.invCount("SteelPlate") - steelBefore;
+  if (gainedSteel !== 3) throw new Error(`expected 3 steel plates collected, got ${gainedSteel}`);
+  log("PASS collect: queue drained, 3x SteelPlate auto-collected from the output buffer");
+
+  log("ALL ECONOMY CHECKS PASSED");
   c.ws.close();
 }
 
@@ -467,12 +507,13 @@ async function scenarioManufacturing() {
   log("PASS blueprints: defaults known on join:", known.sort().join(","));
   await sleep(600);
 
-  // Stock up.
+  // Stock up (Energy fuels research and every queued job now).
   c.chat("/give fragment 8");
   c.chat("/give electronics 20");
   c.chat("/give chemicals 30");
   c.chat("/give iron 40");
   c.chat("/give biomass 10");
+  c.chat("/give energy 40");
   await sleep(500);
 
   // 1. Unknown-recipe rejection: queue an unresearched advanced recipe.
@@ -554,8 +595,10 @@ async function scenarioManufacturing() {
   if (gainedSteel !== 3) throw new Error(`expected 3 steel plates, got ${gainedSteel}`);
   log("PASS production: queue drained, 3x SteelPlate delivered to inventory");
 
-  // 4. Power budget: 5 helpers + us queue factory jobs (6 x 20 kW = 120 > 100).
-  log("spawning 5 helper clients to saturate the power budget...");
+  // 4. Building energy cap: 5 helpers + us queue Factory jobs. Ammo costs
+  // 2 Energy per running unit and the Factory's throughput cap is 4, so only
+  // 2 of the 6 jobs run concurrently; the rest wait in the queue unpowered.
+  log("spawning 5 helper clients to saturate the factory energy cap...");
   const helpers = [];
   for (let i = 1; i <= 5; i++) {
     const h = new Client();
@@ -567,11 +610,11 @@ async function scenarioManufacturing() {
   for (const h of helpers) {
     h.chat("/give steel 20");
     h.chat("/give chemicals 40");
+    h.chat("/give energy 30");
   }
   c.chat("/give steel 20");
   c.chat("/give chemicals 40");
   await sleep(500);
-  const powered = [];
   for (const h of helpers) {
     const hf = h.findEntities("Factory")[0];
     h.tp(hf.x + 1, hf.z);
@@ -585,18 +628,21 @@ async function scenarioManufacturing() {
   await sleep(500);
   c.send({ t: "QueueProduction", d: { building: factory.id, recipe: "ammo_9mm", count: 10 } });
   await sleep(1500);
-  // Collect the latest power state each client saw for its job.
-  const states = [];
-  for (const h of [...helpers, c]) {
-    const last = [...h.events].reverse().find((m) => m.t === "ProductionState" && m.d.jobs.length);
-    if (last) states.push(last.d.jobs[0].powered);
-  }
-  const poweredCount = states.filter(Boolean).length;
-  const waitingCount = states.filter((p) => p === false).length;
-  log(`power states across 6 factory jobs: powered=${poweredCount} waiting=${waitingCount}`);
-  if (waitingCount < 1) throw new Error("expected at least one job waiting for power (6x20 > 100)");
-  if (poweredCount !== 5) throw new Error(`expected exactly 5 powered jobs, got ${poweredCount}`);
-  log("PASS power: budget of 100 kW powers 5 factory jobs, 6th waits");
+  // Latest shared queue state any client saw: powered jobs vs waiting jobs.
+  const last = [...c.events]
+    .reverse()
+    .find((m) => m.t === "ProductionState" && m.d.building === factory.id && m.d.jobs.length);
+  if (!last) throw new Error("no ProductionState for the factory");
+  const poweredCount = last.d.jobs.filter((j) => j.powered).length;
+  const waitingCount = last.d.jobs.filter((j) => !j.powered).length;
+  log(
+    `factory queue: ${last.d.jobs.length} jobs, powered=${poweredCount} waiting=${waitingCount}, ` +
+      `energy ${last.d.energy_used}/${last.d.energy_cap}`,
+  );
+  if (last.d.jobs.length < 6) throw new Error("expected 6 jobs in the shared factory queue");
+  if (poweredCount !== 2) throw new Error(`cap 4 / 2 Energy per job should power exactly 2, got ${poweredCount}`);
+  if (waitingCount < 4) throw new Error("expected the remaining jobs to wait unpowered");
+  log("PASS energy cap: factory cap 4 powers 2 ammo jobs, the rest queue unpowered");
   for (const h of helpers) h.ws.close();
 
   // 5. Market: list steel plates, buy our own listing, then list + cancel.

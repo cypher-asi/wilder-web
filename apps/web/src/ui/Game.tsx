@@ -8,6 +8,8 @@ import {
   stopMusic,
 } from "../assets/audio";
 import { CHARACTER_MODEL, PISTOL_MODEL, preloadModels } from "../assets/catalog";
+import { MobileShell } from "../mobile/MobileShell";
+import { useIsMobile } from "../mobile/useIsMobile";
 import { GameConnection } from "../net/connection";
 import { GameCanvas } from "../render/GameCanvas";
 import { game, useGame } from "../state/game";
@@ -45,6 +47,7 @@ function JoinVeil() {
 export function Game() {
   const token = useSession((s) => s.token);
   const character = useSession((s) => s.activeCharacter);
+  const mobile = useIsMobile();
 
   const connection = useMemo(() => {
     if (!token || !character) return null;
@@ -86,7 +89,11 @@ export function Game() {
   return (
     <>
       <GameCanvas connection={connection} />
-      <Hud connection={connection} />
+      {mobile ? (
+        <MobileShell connection={connection} />
+      ) : (
+        <Hud connection={connection} />
+      )}
       <JoinVeil />
     </>
   );

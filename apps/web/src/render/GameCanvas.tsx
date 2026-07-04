@@ -1,7 +1,9 @@
 import { Canvas, events } from "@react-three/fiber";
+import { useIsMobile } from "../mobile/useIsMobile";
 import { GameConnection } from "../net/connection";
 import { AdaptiveQuality } from "../perf/AdaptiveQuality";
 import { PerfTracker } from "../perf/PerfTracker";
+import { DESKTOP_DPR_MAX, MOBILE_DPR_MAX } from "../perf/quality";
 import { useGame } from "../state/game";
 import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
 import { CAMERA_FAR, CameraRig, cameraState } from "./CameraRig";
@@ -41,17 +43,23 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
   // the last frozen frame visible behind their overlays.
   const menuOpen = useGame((s) => s.menuOpen);
   const mapOpen = useGame((s) => s.menuOpen && s.menuTab === "map");
+  // Mobile preset: the shell covers the canvas except on the Watch tab, so
+  // rendering pauses on the other tabs (world/network stays alive). Lower DPR
+  // cap, no shadows, no postprocessing.
+  const mobile = useIsMobile();
+  const mobileTab = useGame((s) => s.mobileTab);
+  const paused = mobile ? mobileTab !== "watch" : mapOpen || menuOpen;
   return (
     <Canvas
-      shadows
-      dpr={[1, 1.75]}
+      shadows={!mobile}
+      dpr={mobile ? [1, MOBILE_DPR_MAX] : [1, DESKTOP_DPR_MAX]}
       camera={{ fov: 34, near: 0.5, far: CAMERA_FAR }}
       // No MSAA: every style composites through the EffectComposer (which
       // renders into non-multisampled targets) and SMAA handles the edges,
       // so default-framebuffer multisampling is pure overhead at high DPR.
       gl={{ antialias: false, powerPreference: "high-performance" }}
       events={pointerLockEvents}
-      frameloop={mapOpen || menuOpen ? "never" : "always"}
+      frameloop={paused ? "never" : "always"}
       style={{ position: "absolute", inset: 0, visibility: mapOpen ? "hidden" : "visible" }}
       onCreated={({ gl, scene }) => {
         // three's post-link getProgramInfoLog query forces a synchronous
@@ -67,7 +75,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       }}
     >
       <PerfTracker />
-      <AdaptiveQuality />
+      <AdaptiveQuality maxDpr={mobile ? MOBILE_DPR_MAX : DESKTOP_DPR_MAX} />
       <SunsetAtmosphere>
         <SceneSetup />
         <Lighting />
@@ -80,7 +88,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         <CombatFx />
         <CameraRig />
         <PlayerInput connection={connection} />
-        <Effects />
+        {!mobile && <Effects />}
       </SunsetAtmosphere>
     </Canvas>
   );

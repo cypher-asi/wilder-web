@@ -19,6 +19,12 @@ export const useQuality = create<QualityState>((set) => ({
   setTier: (tier) => set((s) => (s.tier === tier ? s : { tier })),
 }));
 
+// Render DPR ceilings. Desktop is the classic adaptive range; the mobile
+// preset caps lower because phone GPUs pay dearly for fill rate (and the
+// mobile shell covers most of the screen anyway outside the Watch tab).
+export const DESKTOP_DPR_MAX = 1.75;
+export const MOBILE_DPR_MAX = 1.4;
+
 /** Golden-style sun shadow map size (was a fixed 4096). */
 export function goldenShadowSize(tier: QualityTier): number {
   return tier === "high" ? 2048 : 1024;

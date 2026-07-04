@@ -7,31 +7,30 @@ import { PerformanceMonitor } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
 import { useCallback } from "react";
 import { perf } from "./perf";
-import { useQuality, type QualityTier } from "./quality";
+import { DESKTOP_DPR_MAX, useQuality, type QualityTier } from "./quality";
 
 const DPR_MIN = 1;
-const DPR_MAX = 1.75;
 
 function tierFor(factor: number): QualityTier {
   return factor >= 0.6 ? "high" : factor >= 0.3 ? "medium" : "low";
 }
 
-export function AdaptiveQuality() {
+export function AdaptiveQuality({ maxDpr = DESKTOP_DPR_MAX }: { maxDpr?: number }) {
   const setDpr = useThree((s) => s.setDpr);
 
   const apply = useCallback(
     (factor: number) => {
-      const raw = DPR_MIN + (DPR_MAX - DPR_MIN) * factor;
+      const raw = DPR_MIN + (maxDpr - DPR_MIN) * factor;
       const dpr = Math.min(
         Math.round(raw * 4) / 4,
-        typeof window !== "undefined" ? window.devicePixelRatio : DPR_MAX,
+        typeof window !== "undefined" ? window.devicePixelRatio : maxDpr,
       );
       setDpr(dpr);
       const tier = tierFor(factor);
       perf.qualityTier = tier;
       useQuality.getState().setTier(tier);
     },
-    [setDpr],
+    [setDpr, maxDpr],
   );
 
   return (

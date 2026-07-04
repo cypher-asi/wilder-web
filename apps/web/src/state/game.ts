@@ -430,6 +430,9 @@ export type MenuTab =
   | "settings"
   | "exit";
 
+/** Bottom tab bar sections of the mobile shell (agent-management mode). */
+export type MobileTab = "agents" | "watch" | "map" | "economy" | "trade";
+
 interface UiState {
   connected: boolean;
   joined: boolean;
@@ -507,6 +510,8 @@ interface UiState {
   menuOpen: boolean;
   /** Which section of the central menu is showing. */
   menuTab: MenuTab;
+  /** Active bottom tab in the mobile shell (ignored on desktop). */
+  mobileTab: MobileTab;
   /** Active visual style preset (persisted to localStorage). */
   visualStyle: VisualStyleId;
   /** Main-music on/off (persisted to localStorage). */
@@ -547,6 +552,8 @@ interface UiState {
   closeMenu: () => void;
   /** Toggle the central menu: open on `tab`, or close if already showing it. */
   toggleMenuTab: (tab: MenuTab) => void;
+  /** Switch the mobile shell's bottom tab. */
+  setMobileTab: (tab: MobileTab) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
@@ -620,6 +627,7 @@ export const useGame: import("zustand").UseBoundStore<
   itemMarket: null,
   menuOpen: false,
   menuTab: "map",
+  mobileTab: "agents",
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
   pickupFeed: [],
@@ -656,6 +664,7 @@ export const useGame: import("zustand").UseBoundStore<
         ? { menuOpen: false }
         : { menuOpen: true, menuTab: tab },
     ),
+  setMobileTab: (tab) => set({ mobileTab: tab }),
   toggleInventory: () =>
     set((s) =>
       s.menuOpen && s.menuTab === "inventory"

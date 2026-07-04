@@ -25,7 +25,7 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { POI_STYLES, LEGEND_CATEGORIES, CATEGORY_COLOR, type LegendCategory } from "../game/poi";
-import { allRegions, REGION_SIZE } from "../game/territory";
+import { allRegions, MY_FACTION, REGION_SIZE } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import {
   AgentBlip,
@@ -245,13 +245,126 @@ function HoloMapView({ open, connection }: { open: boolean; connection: GameConn
   );
 }
 
+// ---------------------------------------------------------------------------
+// Territory recolor: enemy-held regions repaint the holographic geometry with
+// the holder's faction color (instead of a translucent square overlay). One
+// region-grid ownership texture feeds the ground, building, and street shaders;
+// each samples it by world XZ and swaps the base blue holo color for the enemy
+// hue, normalized to the base luminance so the glow reads the same in any color.
+// ---------------------------------------------------------------------------
+
+/** Shared uniforms referenced by all three holo materials, updated in place. */
+const holoTerr = {
+  uTerrTex: { value: null as THREE.DataTexture | null },
+  uTerrOrigin: { value: new THREE.Vector2() },
+  uTerrGrid: { value: new THREE.Vector2(1, 1) },
+  uRegionSize: { value: REGION_SIZE },
+  uTerrEnabled: { value: 1 },
+};
+
+function makeTerrTexture(w: number, h: number, data: Uint8Array): THREE.DataTexture {
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+// Seed a 1x1 empty texture so the sampler uniform is never null before the
+// first ownership update lands.
+holoTerr.uTerrTex.value = makeTerrTexture(1, 1, new Uint8Array([0, 0, 0, 0]));
+
+/** GLSL: uniform block + terrTint() helper injected into each holo shader. */
+const TERR_TINT_GLSL = /* glsl */ `
+uniform sampler2D uTerrTex;
+uniform vec2 uTerrOrigin;
+uniform vec2 uTerrGrid;
+uniform float uRegionSize;
+uniform float uTerrEnabled;
+vec3 terrTint(vec3 base, vec2 wxz) {
+  if (uTerrEnabled < 0.5) return base;
+  vec2 uv = (floor(wxz / uRegionSize) - uTerrOrigin + 0.5) / uTerrGrid;
+  vec4 t = texture2D(uTerrTex, uv);
+  if (t.a < 0.5) return base;
+  // Preserve the base holo luminance so the enemy hue glows/blooms the same.
+  float bl = dot(base, vec3(0.2126, 0.7152, 0.0722));
+  float fl = max(dot(t.rgb, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
+  return t.rgb * (bl / fl);
+}
+`;
+
+/** Wire holoTerr's shared uniforms into a material's uniform map. */
+function attachTerrUniforms(u: Record<string, THREE.IUniform>): void {
+  u.uTerrTex = holoTerr.uTerrTex;
+  u.uTerrOrigin = holoTerr.uTerrOrigin;
+  u.uTerrGrid = holoTerr.uTerrGrid;
+  u.uRegionSize = holoTerr.uRegionSize;
+  u.uTerrEnabled = holoTerr.uTerrEnabled;
+}
+
+/** Rebuild the region-ownership texture from the current control map: one
+ * texel per region across the whole city grid, RGB = enemy faction color and
+ * alpha = 1 for hostile-held cells (the player's own faction stays blue). */
+function updateHoloTerritoryTexture(factions: FactionInfo[]): void {
+  const grid = getCityGrid();
+  if (!grid) return;
+  const minX = Math.floor((grid.tileMinX * TILE_SIZE) / REGION_SIZE);
+  const maxX = Math.floor(((grid.tileMinX + grid.width) * TILE_SIZE) / REGION_SIZE);
+  const minZ = Math.floor((grid.tileMinZ * TILE_SIZE) / REGION_SIZE);
+  const maxZ = Math.floor(((grid.tileMinZ + grid.height) * TILE_SIZE) / REGION_SIZE);
+  const w = maxX - minX + 1;
+  const h = maxZ - minZ + 1;
+  const data = new Uint8Array(w * h * 4);
+  for (const { rx, rz, faction } of allRegions()) {
+    if (faction === MY_FACTION) continue;
+    if (rx < minX || rx > maxX || rz < minZ || rz > maxZ) continue;
+    const color = factions.find((f) => f.id === faction)?.color ?? 0xff3860;
+    const o = ((rz - minZ) * w + (rx - minX)) * 4;
+    data[o] = (color >> 16) & 0xff;
+    data[o + 1] = (color >> 8) & 0xff;
+    data[o + 2] = color & 0xff;
+    data[o + 3] = 255;
+  }
+  const prev = holoTerr.uTerrTex.value;
+  holoTerr.uTerrTex.value = makeTerrTexture(w, h, data);
+  prev?.dispose();
+  holoTerr.uTerrOrigin.value.set(minX, minZ);
+  holoTerr.uTerrGrid.value.set(w, h);
+}
+
+/** Keeps the ownership texture fresh (1 Hz poll) and drives the on/off toggle
+ * from the TERRITORY filter row. Renders nothing. */
+function TerritoryTint({ enabled }: { enabled: boolean }) {
+  const factions = useGame((s) => s.factions);
+  useEffect(() => {
+    holoTerr.uTerrEnabled.value = enabled ? 1 : 0;
+  }, [enabled]);
+  useEffect(() => {
+    let sig = "";
+    const poll = () => {
+      const next = allRegions()
+        .filter((r) => r.faction !== MY_FACTION)
+        .map((r) => `${r.rx},${r.rz},${r.faction}`)
+        .sort()
+        .join("|");
+      if (next !== sig) {
+        sig = next;
+        updateHoloTerritoryTexture(factions);
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 1000);
+    return () => clearInterval(timer);
+  }, [factions]);
+  return null;
+}
+
 function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapFilters }) {
   return (
     <>
       <color attach="background" args={["#010409"]} />
       <HoloCamera view={view} />
       <HoloCity buildings={filters.buildings} />
-      {filters.territory && <TerritoryLayer />}
+      <TerritoryTint enabled={filters.territory} />
       {filters.danger && <DangerLayer />}
       <SafeZoneOutline />
       <PlayerMarker view={view} />
@@ -428,6 +541,11 @@ function buildGround(data: Uint8Array): GroundAsset {
       uColor: { value: new THREE.Color(0.16, 0.6, 0.85) },
       // Starts dark; HoloCity fades it in once the asset arrives.
       uGain: { value: 0 },
+      uTerrTex: holoTerr.uTerrTex,
+      uTerrOrigin: holoTerr.uTerrOrigin,
+      uTerrGrid: holoTerr.uTerrGrid,
+      uRegionSize: holoTerr.uRegionSize,
+      uTerrEnabled: holoTerr.uTerrEnabled,
     },
     vertexShader: /* glsl */ `
       varying vec3 vWorld;
@@ -444,6 +562,7 @@ function buildGround(data: Uint8Array): GroundAsset {
       uniform vec3 uColor;
       uniform float uGain;
       varying vec3 vWorld;
+      ${TERR_TINT_GLSL}
       void main() {
         vec2 uv = (vWorld.xz - uOrigin) / uSize;
         vec2 s = texture2D(uTex, uv).rg;
@@ -458,7 +577,7 @@ function buildGround(data: Uint8Array): GroundAsset {
         // Squared response keeps the land fabric faint; water (edge = 0)
         // contributes nothing, so the island silhouette comes from the SDF,
         // not the plane bounds.
-        vec3 col = uColor * (k * k * 0.8 * uGain) * edge;
+        vec3 col = terrTint(uColor, vWorld.xz) * (k * k * 0.8 * uGain) * edge;
         gl_FragColor = vec4(col, 1.0);
       }
     `,
@@ -493,6 +612,11 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
       uTime: { value: 0 },
       // Starts dark; HoloCity fades it in once the asset arrives.
       uGain: { value: 0 },
+      uTerrTex: holoTerr.uTerrTex,
+      uTerrOrigin: holoTerr.uTerrOrigin,
+      uTerrGrid: holoTerr.uTerrGrid,
+      uRegionSize: holoTerr.uRegionSize,
+      uTerrEnabled: holoTerr.uTerrEnabled,
     },
     vertexShader: /* glsl */ `
       attribute float aRelH;
@@ -500,11 +624,13 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
       varying float vH;
       varying float vGlow;
       varying float vWorldY;
+      varying vec2 vWorldXZ;
       void main() {
         vH = aRelH;
         vGlow = aGlow * 1.6;
         vec4 wp = modelMatrix * vec4(position, 1.0);
         vWorldY = wp.y;
+        vWorldXZ = wp.xz;
         gl_Position = projectionMatrix * viewMatrix * wp;
       }
     `,
@@ -515,6 +641,8 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
       varying float vH;
       varying float vGlow;
       varying float vWorldY;
+      varying vec2 vWorldXZ;
+      ${TERR_TINT_GLSL}
       void main() {
         // Story bands every 3 m give the stacked-floor hologram texture.
         // Anti-alias them in screen space with a symmetric triangle wave and
@@ -531,7 +659,7 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
         // Very slow, subtle vertical scan (gentle so it never visibly blinks).
         float scan = 1.0 + 0.05 * sin(vWorldY * 0.12 - uTime * 1.2);
         float i = vGlow * story * grad * scan * uGain;
-        gl_FragColor = vec4(uColor * i, 1.0);
+        gl_FragColor = vec4(terrTint(uColor, vWorldXZ) * i, 1.0);
       }
     `,
     blending: THREE.AdditiveBlending,
@@ -558,6 +686,25 @@ function buildStreets(city: CityGeo): THREE.Mesh {
     // Starts invisible; HoloCity fades it in once the asset arrives.
     opacity: 0,
   });
+  // Enemy territory recolors the road grid too: inject a world-XZ varying and
+  // run diffuse through terrTint. Opacity fade-in (streetMat.opacity) is
+  // untouched, so this is a pure hue swap.
+  mat.onBeforeCompile = (shader) => {
+    attachTerrUniforms(shader.uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec2 vStreetXZ;")
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvStreetXZ = (modelMatrix * vec4(transformed, 1.0)).xz;",
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec2 vStreetXZ;\n${TERR_TINT_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        "#include <color_fragment>\ndiffuseColor.rgb = terrTint(diffuseColor.rgb, vStreetXZ);",
+      );
+  };
+  mat.customProgramCacheKey = () => "holo-street-terr";
   const mesh = new THREE.Mesh(geo, mat);
   // Lift a touch above the ground plane so streets never z-fight with it.
   mesh.position.y = 0.5;
@@ -958,82 +1105,6 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
         blending={THREE.AdditiveBlending}
       />
     </points>
-  );
-}
-
-/** Faction territory control: one translucent quad per held region, tinted
- * with the holder's color. Region state lives in game/territory.ts (module
- * cache), so this polls it once a second while mounted. */
-function TerritoryLayer() {
-  const factions = useGame((s) => s.factions);
-  const [cells, setCells] = useState(() => allRegions());
-  useEffect(() => {
-    const poll = () => {
-      const next = allRegions();
-      setCells((prev) =>
-        prev.length === next.length &&
-        prev.every(
-          (p, i) => p.rx === next[i].rx && p.rz === next[i].rz && p.faction === next[i].faction,
-        )
-          ? prev
-          : next,
-      );
-    };
-    poll();
-    const timer = setInterval(poll, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const geometry = useMemo(() => {
-    const pos = new Float32Array(cells.length * 4 * 3);
-    const col = new Float32Array(cells.length * 4 * 3);
-    const idx = new Uint32Array(cells.length * 6);
-    const c = new THREE.Color();
-    const pad = REGION_SIZE * 0.04;
-    cells.forEach((cell, i) => {
-      const x0 = cell.rx * REGION_SIZE + pad;
-      const z0 = cell.rz * REGION_SIZE + pad;
-      const x1 = (cell.rx + 1) * REGION_SIZE - pad;
-      const z1 = (cell.rz + 1) * REGION_SIZE - pad;
-      const corners = [
-        [x0, z0],
-        [x1, z0],
-        [x1, z1],
-        [x0, z1],
-      ];
-      c.set(factionCss(factions, cell.faction));
-      for (let k = 0; k < 4; k++) {
-        const o = (i * 4 + k) * 3;
-        pos[o] = corners[k][0];
-        pos[o + 1] = 1.5;
-        pos[o + 2] = corners[k][1];
-        col[o] = c.r;
-        col[o + 1] = c.g;
-        col[o + 2] = c.b;
-      }
-      const v = i * 4;
-      idx.set([v, v + 2, v + 1, v, v + 3, v + 2], i * 6);
-    });
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    geo.setIndex(new THREE.BufferAttribute(idx, 1));
-    return geo;
-  }, [cells, factions]);
-
-  useEffect(() => () => geometry.dispose(), [geometry]);
-
-  return (
-    <mesh geometry={geometry} frustumCulled={false} renderOrder={2}>
-      <meshBasicMaterial
-        vertexColors
-        transparent
-        opacity={0.16}
-        depthWrite={false}
-        blending={THREE.AdditiveBlending}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
   );
 }
 

@@ -39,6 +39,8 @@ content/imported/
 content/gameready/
 content/registry.json
 assets/purchased/
-assets/models/imported/
+# assets/models/imported/ is intentionally committed: these ~140MB of derived
+# GLBs are the runtime models the client loads from /assets/models/imported,
+# and CI builds the image from a clean git checkout, so they must live in git.
 
 tmp/

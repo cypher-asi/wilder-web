@@ -1262,7 +1262,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
         )}
         {offers.map((offer) => {
           const held = invCount(inventory, offer.kind);
-          const canBuy = offer.buy > 0 && (wallet ?? 0) >= offer.buy;
+          const canBuy = offer.buy > 0 && offer.stock > 0 && (wallet ?? 0) >= offer.buy;
           const canSell = offer.sell > 0 && held > 0;
           return (
             <div
@@ -1281,7 +1281,11 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
                   {shortName(offer.kind)}
                 </div>
                 <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
-                  {offer.buy > 0 ? `buy ${offer.buy}` : ""}
+                  {offer.buy > 0
+                    ? offer.stock > 0
+                      ? `buy ${offer.buy} · ${offer.stock} in stock`
+                      : "sold out"
+                    : ""}
                   {offer.buy > 0 && offer.sell > 0 ? " · " : ""}
                   {offer.sell > 0 ? `sell ${offer.sell}` : ""}
                   {held > 0 ? ` · ${held} held` : ""}

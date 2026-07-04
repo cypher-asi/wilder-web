@@ -49,6 +49,10 @@ pub struct LedgerSave {
     #[serde(default)]
     pub energy_burned: u64,
     pub blueprints_learned: u64,
+    #[serde(default)]
+    pub items_extracted: u64,
+    #[serde(default)]
+    pub items_withdrawn: u64,
     pub deaths: u64,
     pub npc_kills: u64,
     pub trades: u64,
@@ -73,6 +77,9 @@ pub struct Ledger {
     energy_minted: u64,
     energy_burned: u64,
     pub blueprints_learned: u64,
+    /// Items stashed (Extract forward leg) / pulled back out (reverse leg).
+    pub items_extracted: u64,
+    pub items_withdrawn: u64,
     pub deaths: u64,
     pub npc_kills: u64,
     pub trades: u64,
@@ -115,6 +122,8 @@ impl Ledger {
             energy_minted: save.energy_minted,
             energy_burned: save.energy_burned,
             blueprints_learned: save.blueprints_learned,
+            items_extracted: save.items_extracted,
+            items_withdrawn: save.items_withdrawn,
             deaths: save.deaths,
             npc_kills: save.npc_kills,
             trades: save.trades,
@@ -135,6 +144,8 @@ impl Ledger {
             energy_minted: self.energy_minted,
             energy_burned: self.energy_burned,
             blueprints_learned: self.blueprints_learned,
+            items_extracted: self.items_extracted,
+            items_withdrawn: self.items_withdrawn,
             deaths: self.deaths,
             npc_kills: self.npc_kills,
             trades: self.trades,
@@ -278,6 +289,8 @@ impl Ledger {
             energy_burned: self.energy_burned,
             items: self.item_supplies(),
             blueprints_learned: self.blueprints_learned,
+            items_extracted: self.items_extracted,
+            items_withdrawn: self.items_withdrawn,
             players_online,
             agents_alive,
             deaths: self.deaths,

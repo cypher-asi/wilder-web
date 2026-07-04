@@ -327,6 +327,8 @@ export interface VendorOffer {
   kind: ItemKind;
   buy: number;
   sell: number;
+  /** Units the vendor holds (stock-backed shelves): 0 on a buy line = sold out. */
+  stock: number;
 }
 
 /** A persistent point of interest (service building) for map/legend UI. */

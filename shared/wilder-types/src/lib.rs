@@ -692,6 +692,12 @@ pub struct EconomyStats {
     /// Per-item supply counters (only kinds that have seen activity).
     pub items: Vec<ItemSupply>,
     pub blueprints_learned: u64,
+    /// Items deposited into stashes (TxKind::Extract, forward leg).
+    #[serde(default)]
+    pub items_extracted: u64,
+    /// Items withdrawn back out of stashes (TxKind::Extract, reverse leg).
+    #[serde(default)]
+    pub items_withdrawn: u64,
     pub players_online: u32,
     pub agents_alive: u32,
     /// Player deaths (each burns the victim's backpack).

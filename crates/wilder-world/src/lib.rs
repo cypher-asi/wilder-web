@@ -105,6 +105,9 @@ const AMMO_CACHE_ROUNDS: u32 = 12;
 /// player walks within this distance (metres) - no click required. Click
 /// pickup only works with a free cursor, which mouse-look play never has.
 const LOOT_PICKUP_RADIUS: f32 = 2.0;
+/// Min seconds between auto-pickup "backpack full" denials per player, so
+/// standing on loot with a full pack doesn't spam the toast/sound each tick.
+const AUTO_PICKUP_DENY_COOLDOWN: f64 = 3.0;
 /// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
 /// Compiled defaults; charge count, respawn and density read optional env
 /// overrides once at world init (see [`NodeTuning::from_env`]).
@@ -660,9 +663,10 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
 /// across services and nodes.
 fn goal_service_target(goal: Goal) -> Option<EntityId> {
     match goal {
-        Goal::Sell { store, .. } | Goal::Buy { store, .. } | Goal::Bank { store, .. } => {
-            Some(store)
-        }
+        Goal::Sell { store, .. }
+        | Goal::Buy { store, .. }
+        | Goal::Bank { store, .. }
+        | Goal::Extract { store, .. } => Some(store),
         Goal::Craft { station, .. } => Some(station),
         Goal::Gather { node, .. } => Some(node),
         _ => None,
@@ -974,6 +978,10 @@ struct Player {
     /// MapIntel stream itself ships in Phase 5.
     #[allow(dead_code)]
     map_intel: bool,
+    /// World-clock seconds of the last "backpack full" deny sent for
+    /// auto-pickup. Rate-limits the toast so standing on loot with a full
+    /// pack doesn't spam it every tick.
+    last_full_deny: f64,
     dirty: bool,
 }
 
@@ -1314,6 +1322,14 @@ pub struct World {
     rx: mpsc::UnboundedReceiver<WorldCmd>,
     /// Market listings (persisted in world meta).
     market: Vec<wilder_market::Listing>,
+    /// Stock-backed vendor shelves keyed by vendor static (Armory/Bodega).
+    /// A vendor only sells what it holds; sold-in items land here. Seeded
+    /// once per vendor (`ensure_vendor_stock`), persisted in world meta
+    /// (`vendor_stock`) on the save cadence. An empty entry means sold out —
+    /// it stays in the map so the seed never re-mints.
+    vendor_stock: HashMap<EntityId, Vec<ItemStack>>,
+    /// Vendor stock changed since the last save sweep.
+    vendor_stock_dirty: bool,
     next_listing_id: u64,
     next_job_id: u64,
     /// Shared production queues keyed by station building. Only buildings
@@ -1414,6 +1430,15 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         }
     }
     let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
+    // Vendor shelves: persisted stock per vendor static (entity ids are
+    // stable across restarts because statics seed deterministically).
+    let vendor_stock: HashMap<EntityId, Vec<ItemStack>> = store
+        .meta::<Vec<(EntityId, Vec<ItemStack>)>>("vendor_stock")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     // Production queues + output buffers survive restarts (spec §61): jobs
     // keep running and buffered goods stay claimable. Building entity ids
     // are stable because statics seed deterministically before anything
@@ -1465,6 +1490,8 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         store: store.clone(),
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
         market,
+        vendor_stock,
+        vendor_stock_dirty: false,
         next_listing_id,
         next_job_id,
         production,
@@ -1690,6 +1717,7 @@ impl World {
             wallet_sent: None,
             sent_snaps: HashMap::new(),
             map_intel: false,
+            last_full_deny: f64::NEG_INFINITY,
             dirty: true,
         };
         player.sync_shield();
@@ -3733,6 +3761,17 @@ impl World {
             })
     }
 
+    /// Position of a MarketTerminal the actor is standing at (5 m or inside
+    /// its walk-in room) — the shared range rule for trading on the book.
+    fn market_terminal_near(&self, actor: EconActor) -> Option<Vec3> {
+        self.services_by_kind
+            .get(&EntityKind::MarketTerminal)
+            .into_iter()
+            .flatten()
+            .find(|&&(entity, _)| self.actor_in_range(actor, entity, 5.0))
+            .map(|&(_, pos)| pos)
+    }
+
     fn apply_market_action(&mut self, entity: EntityId, action: MarketAction) -> Result<(), String> {
         let market_agent = self.market_party();
         match action {
@@ -3921,6 +3960,81 @@ impl World {
     // NPC vendors & bank
     // -----------------------------------------------------------------------
 
+    /// Units of `kind` a vendor currently holds on its shelves.
+    fn vendor_stock_count(&self, vendor: EntityId, kind: ItemKind) -> u32 {
+        self.vendor_stock
+            .get(&vendor)
+            .map_or(0, |stacks| stacks.iter().filter(|s| s.kind == kind).map(|s| s.count).sum())
+    }
+
+    /// Put `count` of `kind` onto a vendor's shelves.
+    fn vendor_stock_add(&mut self, vendor: EntityId, kind: ItemKind, count: u32) {
+        let stacks = self.vendor_stock.entry(vendor).or_default();
+        match stacks.iter_mut().find(|s| s.kind == kind) {
+            Some(stack) => stack.count += count,
+            None => stacks.push(ItemStack { kind, count }),
+        }
+        self.vendor_stock_dirty = true;
+    }
+
+    /// Take up to `count` of `kind` off a vendor's shelves; returns what came
+    /// off. The entry itself stays (empty = sold out, never re-seeded).
+    fn vendor_stock_remove(&mut self, vendor: EntityId, kind: ItemKind, count: u32) -> u32 {
+        let Some(stacks) = self.vendor_stock.get_mut(&vendor) else { return 0 };
+        let mut left = count;
+        for stack in stacks.iter_mut().filter(|s| s.kind == kind) {
+            let take = left.min(stack.count);
+            stack.count -= take;
+            left -= take;
+            if left == 0 {
+                break;
+            }
+        }
+        stacks.retain(|s| s.count > 0);
+        self.vendor_stock_dirty = true;
+        count - left
+    }
+
+    /// Seed starting stock onto every Armory/Bodega shelf that has never had
+    /// an entry: a modest bootstrap per price line the vendor SELLS, minted
+    /// once to the vendor's ledger party. Vendors with a persisted entry
+    /// (even an empty, sold-out one) are left alone, so restarts and re-runs
+    /// never re-mint. Called after static seeding; idempotent.
+    fn ensure_vendor_stock(&mut self) {
+        let vendors: Vec<EntityId> = self
+            .statics
+            .values()
+            .filter(|s| matches!(s.kind, EntityKind::Armory | EntityKind::Bodega))
+            .filter(|s| !self.vendor_stock.contains_key(&s.entity))
+            .map(|s| s.entity)
+            .collect();
+        for vendor in vendors {
+            let (kind, party) = {
+                let s = &self.statics[&vendor];
+                (s.kind, static_party(s))
+            };
+            let seed: Vec<ItemStack> = wilder_economy::vendor_offers(kind)
+                .iter()
+                .filter(|e| e.buy > 0)
+                .map(|e| ItemStack {
+                    kind: e.kind,
+                    count: wilder_economy::seed_stock_count(e.kind),
+                })
+                .collect();
+            for stack in &seed {
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    party.clone(),
+                    TxAmount::Item { kind: stack.kind, count: stack.count },
+                    0,
+                );
+            }
+            self.vendor_stock.insert(vendor, seed);
+            self.vendor_stock_dirty = true;
+        }
+    }
+
     fn send_vendor_state(&self, entity: EntityId, vendor: EntityId) {
         let (Some(player), Some(station)) =
             (self.players.get(&entity), self.statics.get(&vendor))
@@ -3929,7 +4043,12 @@ impl World {
         };
         let offers: Vec<VendorOffer> = wilder_economy::vendor_offers(station.kind)
             .iter()
-            .map(|e| VendorOffer { kind: e.kind, buy: e.buy, sell: e.sell })
+            .map(|e| VendorOffer {
+                kind: e.kind,
+                buy: e.buy,
+                sell: e.sell,
+                stock: self.vendor_stock_count(vendor, e.kind),
+            })
             .collect();
         let purse = &player.purse;
         let _ = player.tx.send(S2C::VendorState {
@@ -4038,9 +4157,11 @@ impl World {
     }
 
     /// Vendor buy for any economy actor: same rules and ledger legs whether a
-    /// player or a faction agent stands at the counter. Debits the purse,
-    /// hands over the stock (overflow spills as ground loot at the buyer's
-    /// feet — paid for, never silently dropped), and routes the commerce cut.
+    /// player or a faction agent stands at the counter. Shelves are stock-
+    /// backed: the vendor only sells what it holds (out of stock = denied,
+    /// a short shelf clamps the batch). Debits the purse, hands over the
+    /// stock (overflow spills as ground loot at the buyer's feet — paid for,
+    /// never silently dropped), and routes the commerce cut.
     fn vendor_buy(
         &mut self,
         actor: EconActor,
@@ -4057,6 +4178,11 @@ impl World {
             .iter()
             .find(|e| e.kind == item && e.buy > 0)
             .ok_or("not sold here")?;
+        let in_stock = self.vendor_stock_count(vendor, item);
+        if in_stock == 0 {
+            return Err("out of stock".into());
+        }
+        let count = count.min(in_stock);
         let cost = offer.buy.saturating_mul(count);
         let buyer = self.actor_party(actor).ok_or("not in world")?;
         let purse = self.actor_purse_mut(actor).ok_or("not in world")?;
@@ -4065,9 +4191,11 @@ impl World {
         }
         self.persist_actor_purse(actor);
         let buyer_pos = self.actor_position(actor).unwrap_or(pos);
+        self.vendor_stock_remove(vendor, item, count);
         let leftover = self.actor_add_items(actor, item, count);
-        // Ledger: MILD moves onto the vendor agent; the stock the vendor
-        // hands over is fresh issuance (bottomless shelves).
+        // Ledger: MILD moves onto the vendor agent; the goods come OFF the
+        // vendor's real shelf — a transfer, not issuance (the items already
+        // entered supply when they were mined/crafted/seeded).
         self.ledger.record(
             TxKind::VendorBuy,
             buyer.clone(),
@@ -4075,13 +4203,12 @@ impl World {
             TxAmount::Wild { amount: cost },
             0,
         );
-        self.ledger.record_ex(
+        self.ledger.record(
             TxKind::VendorBuy,
             vendor_agent.clone(),
             buyer.clone(),
             TxAmount::Item { kind: item, count },
             0,
-            SupplyEffect::Mint,
         );
         if leftover > 0 {
             self.spawn_loot(
@@ -4101,9 +4228,11 @@ impl World {
         Ok(())
     }
 
-    /// Vendor sell for any economy actor: items burn out of supply, the
-    /// payout (minus the commerce cut) lands in the purse, the cut routes to
-    /// whoever holds the ground. Sells up to `count`, clamped to what's held.
+    /// Vendor sell for any economy actor: items land on the vendor's real
+    /// shelf (capped per kind — a full shelf refuses the trade — so vendors
+    /// never become infinite item vacuums), the payout (minus the commerce
+    /// cut) lands in the purse, the cut routes to whoever holds the ground.
+    /// Sells up to `count`, clamped to what's held and to the shelf cap.
     fn vendor_sell(
         &mut self,
         actor: EconActor,
@@ -4124,24 +4253,30 @@ impl World {
         if have == 0 {
             return Err(format!("no {} to sell", item.display_name()));
         }
-        let count = count.clamp(1, have);
+        let shelf_room = wilder_economy::VENDOR_STOCK_CAP
+            .saturating_sub(self.vendor_stock_count(vendor, item));
+        if shelf_room == 0 {
+            return Err(format!("vendor is fully stocked on {}", item.display_name()));
+        }
+        let count = count.clamp(1, have).min(shelf_room);
         let seller = self.actor_party(actor).ok_or("not in world")?;
         self.actor_remove_items(actor, item, count);
+        self.vendor_stock_add(vendor, item, count);
         let gross = offer.sell.saturating_mul(count);
         let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
         if let Some(purse) = self.actor_purse_mut(actor) {
             purse.credit(Currency::Wild, gross - cut);
         }
         self.persist_actor_purse(actor);
-        // Ledger: sold items are absorbed out of supply; the payout comes
-        // off the vendor agent's balance.
-        self.ledger.record_ex(
+        // Ledger: sold items transfer onto the vendor's shelf (they stay in
+        // supply for the next buyer); the payout comes off the vendor
+        // agent's balance.
+        self.ledger.record(
             TxKind::VendorSell,
             seller.clone(),
             vendor_agent.clone(),
             TxAmount::Item { kind: item, count },
             0,
-            SupplyEffect::Burn,
         );
         self.ledger.record(
             TxKind::VendorSell,
@@ -4178,6 +4313,121 @@ impl World {
         }
         self.persist_actor_purse(actor);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Extraction: stashing items at Storage terminals
+    // -----------------------------------------------------------------------
+
+    /// Storage terminal the actor can extract at: within 5 m or inside its
+    /// walk-in room. Same range rule for players and agents.
+    fn near_storage(&self, actor: EconActor) -> Option<EntityId> {
+        self.statics
+            .values()
+            .filter(|s| s.kind == EntityKind::Building)
+            .find(|s| self.actor_in_range(actor, s.entity, 5.0))
+            .map(|s| s.entity)
+    }
+
+    /// Mutable view of an actor's stash slots (players persist via the
+    /// stash store, agents via the population shards).
+    fn actor_stash_slots_mut(&mut self, actor: EconActor) -> Option<&mut [Option<ItemStack>]> {
+        match actor {
+            EconActor::Player(id) => self.players.get_mut(&id).map(|p| {
+                p.dirty = true;
+                p.stash.slots.as_mut_slice()
+            }),
+            EconActor::Agent(idx) => self.agents.get_mut(idx).map(|a| a.stash.as_mut_slice()),
+        }
+    }
+
+    /// Land items the caller already pulled out of the source container in
+    /// the destination (stash on deposit, backpack on withdraw) and record
+    /// the `TxKind::Extract` ledger leg for what moved. Extraction is a
+    /// risk transfer, not a supply change, so both directions are neutral
+    /// transfers between the owner and the Storage terminal's party (the
+    /// withdraw leg is the deposit with the parties swapped). Returns the
+    /// leftover that did NOT fit — the caller restores it to the source.
+    fn stash_settle(
+        &mut self,
+        actor: EconActor,
+        storage: EntityId,
+        kind: ItemKind,
+        count: u32,
+        deposit: bool,
+    ) -> u32 {
+        if count == 0 {
+            return 0;
+        }
+        let leftover = if deposit {
+            match self.actor_stash_slots_mut(actor) {
+                Some(slots) => inv::add_items(slots, kind, count),
+                None => count,
+            }
+        } else {
+            self.actor_add_items(actor, kind, count)
+        };
+        let moved = count - leftover;
+        if moved == 0 {
+            return leftover;
+        }
+        let (Some(owner), Some(storage_party)) =
+            (self.actor_party(actor), self.statics.get(&storage).map(static_party))
+        else {
+            return leftover;
+        };
+        let (from, to) = if deposit {
+            (owner, storage_party)
+        } else {
+            (storage_party, owner)
+        };
+        self.ledger.record(TxKind::Extract, from, to, TxAmount::Item { kind, count: moved }, 0);
+        if deposit {
+            self.ledger.items_extracted += moved as u64;
+        } else {
+            self.ledger.items_withdrawn += moved as u64;
+        }
+        leftover
+    }
+
+    /// Move up to `count` of `kind` between an actor's backpack and stash at
+    /// a Storage terminal — the shared extract/deposit path (players' stash
+    /// UI actions and agent Extract errands both land here). Range-checked
+    /// (5 m / interior); whatever doesn't fit the destination stays where it
+    /// was. Returns how many actually moved.
+    fn stash_transfer(
+        &mut self,
+        actor: EconActor,
+        storage: EntityId,
+        kind: ItemKind,
+        count: u32,
+        deposit: bool,
+    ) -> Result<u32, String> {
+        if !self.actor_in_range(actor, storage, 5.0) {
+            return Err("no stash terminal nearby".into());
+        }
+        let pulled = if deposit {
+            self.actor_remove_items(actor, kind, count)
+        } else {
+            match self.actor_stash_slots_mut(actor) {
+                Some(slots) => inv::remove_items(slots, kind, count),
+                None => 0,
+            }
+        };
+        if pulled == 0 {
+            return Ok(0);
+        }
+        let leftover = self.stash_settle(actor, storage, kind, pulled, deposit);
+        if leftover > 0 {
+            // Destination full: the remainder goes back where it came from
+            // (it was pulled a moment ago, so it always fits).
+            if deposit {
+                self.actor_add_items(actor, kind, leftover);
+            } else if let Some(slots) = self.actor_stash_slots_mut(actor) {
+                inv::add_items(slots, kind, leftover);
+            }
+        }
+        Ok(pulled - leftover)
     }
 
     /// Route a commerce cut to whoever holds the territory it happened in:
@@ -4283,7 +4533,20 @@ impl World {
     }
 
     fn inventory_action(&mut self, entity: EntityId, action: InventoryAction) {
-        let near_stash = self.near_stash_terminal(entity);
+        // Stash moves run through the shared extraction path (Storage range
+        // rule + Extract ledger legs) before the pure-backpack actions
+        // below borrow the player.
+        match action {
+            InventoryAction::Deposit { slot } => {
+                self.player_stash_action(entity, slot, true);
+                return;
+            }
+            InventoryAction::Withdraw { stash_slot } => {
+                self.player_stash_action(entity, stash_slot, false);
+                return;
+            }
+            _ => {}
+        }
         let Some(player) = self.players.get_mut(&entity) else { return };
         match action {
             InventoryAction::MoveSlot { from, to } => {
@@ -4345,48 +4608,47 @@ impl World {
                     }
                 }
             }
-            InventoryAction::Deposit { slot } => {
-                if !near_stash {
-                    let _ = player.tx.send(S2C::Error { message: "no stash terminal nearby".into() });
-                    return;
-                }
-                if let Some(s) = player.inventory.slots.get_mut(slot as usize) {
-                    if let Some(stack) = s.take() {
-                        let rem = inv::add_items(&mut player.stash.slots, stack.kind, stack.count);
-                        if rem > 0 {
-                            *s = Some(ItemStack { kind: stack.kind, count: rem });
-                        }
-                    }
-                }
-                let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
-            }
-            InventoryAction::Withdraw { stash_slot } => {
-                if !near_stash {
-                    let _ = player.tx.send(S2C::Error { message: "no stash terminal nearby".into() });
-                    return;
-                }
-                if let Some(s) = player.stash.slots.get_mut(stash_slot as usize) {
-                    if let Some(stack) = s.take() {
-                        let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
-                        if rem > 0 {
-                            *s = Some(ItemStack { kind: stack.kind, count: rem });
-                        }
-                    }
-                }
-                let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
-            }
+            // Handled above through the shared extraction path.
+            InventoryAction::Deposit { .. } | InventoryAction::Withdraw { .. } => {}
         }
         player.sync_shield();
         player.dirty = true;
         let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
     }
 
-    fn near_stash_terminal(&self, entity: EntityId) -> bool {
-        let Some(player) = self.players.get(&entity) else { return false };
-        self.statics.values().any(|s| {
-            s.kind == EntityKind::Building
-                && (s.position - player.character.position).length() < 5.0
-        })
+    /// One stash UI action: deposit a backpack slot into the stash, or pull
+    /// a stash slot back into the backpack — through the shared extraction
+    /// leg (`stash_settle`: Storage terminal party + Extract ledger legs).
+    /// Slot-preserving: whatever doesn't fit the destination stays in the
+    /// clicked slot, exactly as before.
+    fn player_stash_action(&mut self, entity: EntityId, slot: u16, deposit: bool) {
+        let actor = EconActor::Player(entity);
+        let Some(storage) = self.near_storage(actor) else {
+            if let Some(player) = self.players.get(&entity) {
+                let _ = player.tx.send(S2C::Error { message: "no stash terminal nearby".into() });
+            }
+            return;
+        };
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        let source = if deposit {
+            player.inventory.slots.get_mut(slot as usize)
+        } else {
+            player.stash.slots.get_mut(slot as usize)
+        };
+        if let Some(stack) = source.and_then(|s| s.take()) {
+            let leftover = self.stash_settle(actor, storage, stack.kind, stack.count, deposit);
+            if leftover > 0 {
+                let Some(player) = self.players.get_mut(&entity) else { return };
+                let slots =
+                    if deposit { &mut player.inventory.slots } else { &mut player.stash.slots };
+                slots[slot as usize] = Some(ItemStack { kind: stack.kind, count: leftover });
+            }
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.sync_shield();
+        player.dirty = true;
+        let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
+        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
     }
 
     // -----------------------------------------------------------------------
@@ -5484,14 +5746,39 @@ impl World {
             0,
         );
         for &(kind, count) in kit {
-            // The grubstake kit always fits: it lands in a freshly drained
-            // (or freshly seeded) backpack far below the volume budget.
-            self.agents[idx].add_item(kind, count);
+            // Death-safe stash first: a respawned identity re-kits from its
+            // own vault before the world mints anything (mirrors the bank
+            // comeback withdraw below). The draw is a remote respawn perk,
+            // not a Storage visit, so the Extract leg is a self-transfer.
+            let drawn = {
+                let agent = &mut self.agents[idx];
+                let got = inv::remove_items(&mut agent.stash, kind, count);
+                // The grubstake kit always fits: it lands in a freshly
+                // drained (or freshly seeded) backpack far below the
+                // volume budget.
+                agent.add_item(kind, got);
+                got
+            };
+            if drawn > 0 {
+                self.ledger.record(
+                    TxKind::Extract,
+                    party.clone(),
+                    party.clone(),
+                    TxAmount::Item { kind, count: drawn },
+                    0,
+                );
+                self.ledger.items_withdrawn += drawn as u64;
+            }
+            let mint = count - drawn;
+            if mint == 0 {
+                continue;
+            }
+            self.agents[idx].add_item(kind, mint);
             self.ledger.record(
                 TxKind::Mint,
                 TxParty::Mint,
                 party.clone(),
-                TxAmount::Item { kind, count },
+                TxAmount::Item { kind, count: mint },
                 0,
             );
         }
@@ -5806,6 +6093,25 @@ impl World {
             }
         }
 
+        // --- Extract: bank keeper cargo (fragments, craft materials, spare
+        // gear) into the death-safe stash at a Storage terminal — the item
+        // analog of the wealth bank run. Scored once the at-risk keeper
+        // value crosses the threshold, or under pack pressure when the
+        // keepers are worth anything at all; the learned Haul leaning weighs
+        // how much this agent cares about securing cargo vs. selling it. ---
+        let keeper_value = self.extract_value(idx);
+        let pack_pressure = free_volume <= agents::EXTRACT_FREE_VOLUME;
+        if keeper_value >= agents::EXTRACT_VALUE || (pack_pressure && keeper_value >= 30) {
+            if let Some((store, store_pos, appeal)) =
+                self.route_service(pos, EntityKind::Building)
+            {
+                let score = keeper_value as f32 * 0.1 * traits.mult(Activity::Haul) * appeal;
+                if score > best.0 {
+                    best = (score, Goal::Extract { store, store_pos });
+                }
+            }
+        }
+
         // --- Loot: grab dropped containers nearby (free value on the ground).
         // Ammo caches (variant 1) are world spawns left for players; agents
         // only chase death drops. ---
@@ -5867,18 +6173,24 @@ impl World {
             } else if let Some((store, store_pos, appeal)) =
                 self.route_service(pos, EntityKind::Armory)
             {
-                let kind = if wallet >= 360 {
-                    ItemKind::Smg
-                } else if wallet >= 170 {
-                    ItemKind::Pistol
-                } else if wallet >= 55 {
-                    ItemKind::Knife
-                } else {
-                    ItemKind::Pipe
-                };
-                let score = want * appeal;
-                if score > best.0 {
-                    best = (score, Goal::Buy { store, store_pos, kind, count: 1 });
+                // Shelves are stock-backed now: a sold-out line is unbuyable,
+                // so pick the best affordable weapon the Armory actually
+                // holds (none in stock = no vendor errand this pass).
+                let picks: &[(u32, ItemKind)] = &[
+                    (360, ItemKind::Smg),
+                    (170, ItemKind::Pistol),
+                    (55, ItemKind::Knife),
+                    (0, ItemKind::Pipe),
+                ];
+                let kind = picks
+                    .iter()
+                    .find(|&&(min, k)| wallet >= min && self.vendor_stock_count(store, k) > 0)
+                    .map(|&(_, k)| k);
+                if let Some(kind) = kind {
+                    let score = want * appeal;
+                    if score > best.0 {
+                        best = (score, Goal::Buy { store, store_pos, kind, count: 1 });
+                    }
                 }
             }
         }
@@ -5905,9 +6217,14 @@ impl World {
             } else if let Some((store, store_pos, appeal)) =
                 self.route_service(pos, EntityKind::Bodega)
             {
-                let score = 8.0 * appeal;
-                if score > best.0 {
-                    best = (score, Goal::Buy { store, store_pos, kind: ItemKind::Medkit, count: 1 });
+                // Sold-out shelves are unbuyable (fall back to the book next
+                // time a fair ask shows up).
+                if self.vendor_stock_count(store, ItemKind::Medkit) > 0 {
+                    let score = 8.0 * appeal;
+                    if score > best.0 {
+                        best =
+                            (score, Goal::Buy { store, store_pos, kind: ItemKind::Medkit, count: 1 });
+                    }
                 }
             }
         }
@@ -6331,6 +6648,7 @@ impl World {
             Goal::Collect { .. } => self.agent_collect(idx),
             Goal::Loot { container, .. } => self.agent_loot_pickup(idx, container),
             Goal::Bank { .. } => self.agent_bank_deposit(idx),
+            Goal::Extract { store, .. } => self.agent_extract(idx, store),
             _ => {}
         }
     }
@@ -6475,6 +6793,103 @@ impl World {
     fn agent_vendor_buy(&mut self, idx: usize, store: EntityId, kind: ItemKind, count: u32) {
         self.agents[idx].goal = Goal::Idle;
         let _ = self.vendor_buy(EconActor::Agent(idx), store, kind, count);
+    }
+
+    /// Best-margin recipe the agent KNOWS (net of the Energy burn),
+    /// independent of whether the pack can feed it right now — its inputs
+    /// are the materials the agent "plans to craft with" for extraction and
+    /// stash withdraw planning.
+    fn best_known_recipe(&self, idx: usize) -> Option<&'static wilder_crafting::Recipe> {
+        let mut best: Option<(&'static wilder_crafting::Recipe, f32)> = None;
+        for recipe in wilder_crafting::RECIPES {
+            if recipe.station == wilder_crafting::Station::Laboratory
+                || !self.agents[idx].blueprints.contains(recipe.id)
+            {
+                continue;
+            }
+            let in_value: u32 = recipe.inputs.iter().map(|&(k, c)| base_value(k) * c).sum();
+            let out_value = base_value(recipe.output.0) * recipe.output.1;
+            let margin = out_value.saturating_sub(in_value) as f32
+                - recipe.energy as f32 * ENERGY_MILD_VALUE;
+            if margin > 0.0 && best.map(|(_, m)| margin > m).unwrap_or(true) {
+                best = Some((recipe, margin));
+            }
+        }
+        best.map(|(r, _)| r)
+    }
+
+    /// Keeper cargo an Extract errand would stash, per kind: blueprint
+    /// fragments, carried inputs of the best known recipe (materials the
+    /// agent plans to craft with) and spare backpack gear — unless the agent
+    /// leans Trade, in which case gear is sale cargo headed for the book,
+    /// not the vault. Deliberately a simple heuristic; equipped gear lives
+    /// outside the backpack and never shows up here.
+    fn extract_keepers(&self, idx: usize) -> Vec<(ItemKind, u32)> {
+        let agent = &self.agents[idx];
+        let mut keep: Vec<(ItemKind, u32)> = Vec::new();
+        let mut add = |kind: ItemKind, count: u32| {
+            if count > 0 && !keep.iter().any(|&(k, _)| k == kind) {
+                keep.push((kind, count));
+            }
+        };
+        add(ItemKind::BlueprintFragment, agent.count_item(ItemKind::BlueprintFragment));
+        if let Some(recipe) = self.best_known_recipe(idx) {
+            for &(kind, _) in recipe.inputs {
+                add(kind, agent.count_item(kind));
+            }
+        }
+        if !agent.traits.leans(Activity::Trade) {
+            for &kind in agents::WEAPON_PREFERENCE.iter().chain(agents::ARMOR_PREFERENCE.iter())
+            {
+                add(kind, agent.count_item(kind));
+            }
+        }
+        keep
+    }
+
+    /// Reference value of the cargo `extract_keepers` would stash (drives
+    /// the Extract utility, mirroring how `haul_value` drives Sell).
+    fn extract_value(&self, idx: usize) -> u32 {
+        self.extract_keepers(idx)
+            .iter()
+            .map(|&(k, c)| base_value(k).saturating_mul(c))
+            .sum()
+    }
+
+    /// Extract errand arrival: deposit the keeper cargo into the death-safe
+    /// stash through the shared `stash_transfer` path (same 5 m Storage rule
+    /// and Extract ledger legs players get), then — minimal withdraw
+    /// planning — crafters pull back one queue batch of their best known
+    /// recipe's inputs so banking the surplus doesn't stall the workshop
+    /// loop. Deeper withdraw planning (shopping the stash from Craft goals
+    /// en route) is deferred until the simple version proves insufficient.
+    fn agent_extract(&mut self, idx: usize, store: EntityId) {
+        self.agents[idx].goal = Goal::Idle;
+        let keepers = self.extract_keepers(idx);
+        let mut stashed_value = 0u32;
+        for (kind, count) in keepers {
+            if let Ok(moved) =
+                self.stash_transfer(EconActor::Agent(idx), store, kind, count, true)
+            {
+                stashed_value += base_value(kind).saturating_mul(moved);
+            }
+        }
+        if self.agents[idx].traits.leans(Activity::Craft) {
+            if let Some(recipe) = self.best_known_recipe(idx) {
+                for &(kind, per_unit) in recipe.inputs {
+                    // One batch, sized like agent_queue_craft's cap (5).
+                    let want =
+                        (per_unit * 5).saturating_sub(self.agents[idx].count_item(kind));
+                    let _ =
+                        self.stash_transfer(EconActor::Agent(idx), store, kind, want, false);
+                }
+            }
+        }
+        // Learning: secured cargo is realized (risk-removed) value, sampled
+        // at a discount to an actual sale so counters stay attractive.
+        if stashed_value > 0 {
+            self.agents[idx].learn(Activity::Haul, stashed_value as f32 * 0.2);
+        }
     }
 
     /// Live market reference price for an item: the most recent fill when the
@@ -6635,9 +7050,17 @@ impl World {
     }
 
     /// Buy up to `count` of `kind` off the market book at `max_each` or
-    /// better. Mirrors the player MarketBuy ledger legs; sellers (player or
-    /// agent) are credited identically.
+    /// better. Mirrors the player MarketBuy constraints and ledger legs:
+    /// the agent must be standing at a MarketTerminal (5 m / interior, same
+    /// range players trade at — no more remote fills) and sellers (player
+    /// or agent) are credited identically.
     fn agent_market_buy(&mut self, idx: usize, kind: ItemKind, count: u32, max_each: u32) -> bool {
+        // Range parity: the goal routing walks agents to a terminal before
+        // Act fires; enforce it at execution too so no path can fill
+        // remotely.
+        let Some(terminal_pos) = self.market_terminal_near(EconActor::Agent(idx)) else {
+            return false;
+        };
         let market_agent = self.market_party();
         let Some(pos) = self
             .market
@@ -6696,11 +7119,18 @@ impl World {
             fee,
         );
         if fee > 0 {
-            self.ledger.record(TxKind::Fee, buyer_party, market_agent.clone(), TxAmount::Wild { amount: fee }, 0);
-            // Agents trade remotely (cold tier): the fee burns like an
-            // unattended terminal's would.
-            self.ledger.record(TxKind::Fee, market_agent, TxParty::Burn, TxAmount::Wild { amount: fee }, 0);
+            self.ledger.record(
+                TxKind::Fee,
+                buyer_party,
+                market_agent.clone(),
+                TxAmount::Wild { amount: fee },
+                0,
+            );
         }
+        // Fee parity with the player path: the terminal's territory holder
+        // skims the market fee (distribute_commerce burns it on neutral
+        // ground) — agent fills stopped burning it unconditionally.
+        self.distribute_commerce(terminal_pos, fee, market_agent, false);
         self.ledger.trades += 1;
         let buyer_name = self.agents[idx].name.clone();
         self.market_stats.record_fill(kind, price_each, affordable, buyer_name, seller_name);
@@ -6984,6 +7414,7 @@ impl World {
                     purse: Purse::default(),
                     inventory: Inventory::new(),
                     blueprints: Vec::new(),
+                    stash: Vec::new(),
                     pending_jobs: Vec::new(),
                     position,
                     health: 100.0,
@@ -7070,9 +7501,13 @@ impl World {
             // anchors are street centroids and can land on a building tile).
             self.district_spots[di] = first_pos.unwrap_or_else(|| self.nearest_walkable(anchor));
         }
+        // Fresh storefronts open with a modest seeded shelf (persisted stock
+        // entries are left alone — this only fills brand-new vendors).
+        self.ensure_vendor_stock();
     }
 
     fn tick_loot(&mut self) {
+        let now = self.world_seconds();
         // Auto-pickup: walking within range of any loot container (ammo
         // cache, NPC/player drop) grabs it instantly.
         let mut grabbed: Vec<(EntityId, EntityId)> = Vec::new();
@@ -7106,12 +7541,19 @@ impl World {
             let in_supply = container.in_supply;
             let variant = container.variant;
             let picker = player_party(player);
-            // Auto-pickup never sends `denied`: a full backpack next to a
-            // cache would spam the toast every tick.
             if !taken.is_empty() {
                 player.dirty = true;
                 let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
                 let _ = player.tx.send(S2C::GatherResult { gained: taken.clone(), denied: false });
+            } else if !container.items.is_empty() {
+                // Full pack standing on loot: notify, but rate-limited so the
+                // "Backpack full" toast + deny sound don't repeat every tick.
+                if now - player.last_full_deny >= AUTO_PICKUP_DENY_COOLDOWN {
+                    player.last_full_deny = now;
+                    let _ = player
+                        .tx
+                        .send(S2C::GatherResult { gained: Vec::new(), denied: true });
+                }
             }
             if empty {
                 self.loot.remove(&cid);
@@ -8182,6 +8624,15 @@ impl World {
                 Err(e) => tracing::error!("production save failed: {e}"),
             }
         }
+        // Vendor shelves: persist stock when it changed since the last save.
+        if self.vendor_stock_dirty {
+            let shelves: Vec<(EntityId, Vec<ItemStack>)> =
+                self.vendor_stock.iter().map(|(&v, stacks)| (v, stacks.clone())).collect();
+            match self.store.save_meta("vendor_stock", &shelves) {
+                Ok(()) => self.vendor_stock_dirty = false,
+                Err(e) => tracing::error!("vendor stock save failed: {e}"),
+            }
+        }
         // War map: persist region control when it changed since the last save.
         if self.territory_dirty {
             let cells: Vec<(i32, i32, FactionId)> =
@@ -8433,6 +8884,7 @@ pub mod bench {
                 Goal::Defend { .. } => "defend",
                 Goal::Retreat { .. } => "retreat",
                 Goal::Bank { .. } => "bank",
+                Goal::Extract { .. } => "extract",
             };
             *goal_counts.entry(label).or_insert(0) += 1;
         }
@@ -8589,6 +9041,8 @@ mod tests {
             store: store.clone(),
             chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
             market: Vec::new(),
+            vendor_stock: HashMap::new(),
+            vendor_stock_dirty: false,
             next_listing_id: 1,
             next_job_id: 1,
             production: HashMap::new(),
@@ -8668,6 +9122,7 @@ mod tests {
                     inventory
                 },
                 blueprints: Vec::new(),
+                stash: Vec::new(),
                 pending_jobs: Vec::new(),
                 position,
                 health: 100.0,
@@ -8839,7 +9294,7 @@ mod tests {
                 entity,
                 character,
                 inventory: Inventory::new(),
-                stash: Stash::default(),
+                stash: Stash::new(),
                 tx,
                 pending_inputs: Vec::new(),
                 last_input_seq: 0,
@@ -8864,6 +9319,7 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+                last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
         );
@@ -8974,6 +9430,190 @@ mod tests {
     }
 
     #[test]
+    fn vendor_shelves_are_stock_backed() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let (armory, _) = world.nearest_service(contested, EntityKind::Armory).unwrap();
+        // Fresh shelves open with the seeded bootstrap, minted exactly once.
+        let seeded = wilder_economy::seed_stock_count(ItemKind::Knife);
+        assert_eq!(world.vendor_stock_count(armory, ItemKind::Knife), seeded);
+        let minted_at_seed = world.ledger.item_supply(ItemKind::Knife).minted;
+
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), contested);
+        world.agents[idx].purse.credit(Currency::Wild, 1000);
+        // Buying comes OFF the shelf: a transfer, not issuance.
+        assert!(world.vendor_buy(EconActor::Agent(idx), armory, ItemKind::Knife, 1).is_ok());
+        assert_eq!(world.vendor_stock_count(armory, ItemKind::Knife), seeded - 1);
+        assert_eq!(world.ledger.item_supply(ItemKind::Knife).minted, minted_at_seed);
+        // A big ask clamps to what's left; the next one is denied outright.
+        assert!(world.vendor_buy(EconActor::Agent(idx), armory, ItemKind::Knife, 99).is_ok());
+        assert_eq!(world.vendor_stock_count(armory, ItemKind::Knife), 0);
+        assert_eq!(
+            world.vendor_buy(EconActor::Agent(idx), armory, ItemKind::Knife, 1),
+            Err("out of stock".into())
+        );
+    }
+
+    #[test]
+    fn selling_to_a_vendor_stocks_its_shelf_up_to_the_cap() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let (bodega, _) = world.nearest_service(contested, EntityKind::Bodega).unwrap();
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), contested);
+        world.agents[idx].add_item(ItemKind::Iron, 30);
+        let burned_before = world.ledger.item_supply(ItemKind::Iron).burned;
+        assert!(world.vendor_sell(EconActor::Agent(idx), bodega, ItemKind::Iron, 30).is_ok());
+        // Sold goods land on the shelf and STAY in supply (no burn leg).
+        assert_eq!(world.vendor_stock_count(bodega, ItemKind::Iron), 30);
+        assert_eq!(world.ledger.item_supply(ItemKind::Iron).burned, burned_before);
+        // A full shelf refuses the trade — vendors aren't item vacuums.
+        world.vendor_stock_add(bodega, ItemKind::Iron, wilder_economy::VENDOR_STOCK_CAP);
+        world.agents[idx].add_item(ItemKind::Iron, 5);
+        assert!(world.vendor_sell(EconActor::Agent(idx), bodega, ItemKind::Iron, 5).is_err());
+        assert_eq!(world.agents[idx].count_item(ItemKind::Iron), 5, "denied sale keeps goods");
+    }
+
+    #[test]
+    fn vendor_stock_persists_and_never_reseeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RocksStore::open(dir.path()).unwrap());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        std::mem::forget(_tx);
+        let mut world = new_world(store.clone(), rx);
+        let (armory, armory_pos) = world
+            .nearest_service(district_anchor("NEXUS"), EntityKind::Armory)
+            .expect("armory seeded");
+        let seeded = wilder_economy::seed_stock_count(ItemKind::Knife);
+        assert_eq!(world.vendor_stock_count(armory, ItemKind::Knife), seeded);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), armory_pos);
+        world.agents[idx].purse.credit(Currency::Wild, 1000);
+        world.vendor_buy(EconActor::Agent(idx), armory, ItemKind::Knife, 1).unwrap();
+        world.save_all();
+
+        // Restart: the depleted shelf comes back as-is (statics reseed
+        // deterministically so the entity key matches) and the bootstrap
+        // never re-mints over a persisted entry.
+        let (_tx2, rx2) = mpsc::unbounded_channel();
+        std::mem::forget(_tx2);
+        let mut world2 = new_world(store, rx2);
+        assert_eq!(world2.vendor_stock_count(armory, ItemKind::Knife), seeded - 1);
+        let minted = world2.ledger.item_supply(ItemKind::Knife).minted;
+        world2.ensure_vendor_stock();
+        assert_eq!(world2.vendor_stock_count(armory, ItemKind::Knife), seeded - 1);
+        assert_eq!(world2.ledger.item_supply(ItemKind::Knife).minted, minted);
+    }
+
+    #[test]
+    fn agent_market_fees_route_to_territory_holders() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let seller = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
+        world.agents[seller].add_item(ItemKind::Iron, 30);
+        world.agent_market_list(seller);
+        let listing_price =
+            world.market.iter().find(|l| l.kind == ItemKind::Iron).expect("listed").price_each;
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), terminal_pos);
+        // Forum holds the ground under the terminal, with one member on it;
+        // the rebel counterparties get no share of their own fee.
+        let holder = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), terminal_pos);
+        world.territory.insert(region_of(terminal_pos), FACTION_FORUM);
+        let holder_wallet = world.agents[holder].wallet();
+        assert!(world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
+        let fee = listing_price * 10 * MARKET_FEE_PCT / 100;
+        assert!(fee > 0, "test needs a nonzero fee to prove routing");
+        assert_eq!(
+            world.agents[holder].wallet(),
+            holder_wallet + fee,
+            "the market fee is commerce: territory holders skim it"
+        );
+    }
+
+    #[test]
+    fn stash_moves_emit_extract_ledger_legs() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        insert_test_station(&mut world, EntityKind::Building, pos);
+        let entity = spawn_test_player(&mut world, pos);
+        let player = world.players.get_mut(&entity).unwrap();
+        inv::add_items(&mut player.inventory.slots, ItemKind::Iron, 12);
+        world.inventory_action(entity, InventoryAction::Deposit { slot: 0 });
+        let player = &world.players[&entity];
+        assert_eq!(inv::count_items(&player.stash.slots, ItemKind::Iron), 12);
+        assert_eq!(inv::count_items(&player.inventory.slots, ItemKind::Iron), 0);
+        assert_eq!(world.ledger.items_extracted, 12);
+        // The feed carries a typed Extract leg (owner -> storage party).
+        assert!(world.ledger.recent().iter().any(|tx| matches!(tx.kind, TxKind::Extract)));
+        world.inventory_action(entity, InventoryAction::Withdraw { stash_slot: 0 });
+        let player = &world.players[&entity];
+        assert_eq!(inv::count_items(&player.inventory.slots, ItemKind::Iron), 12);
+        assert_eq!(inv::count_items(&player.stash.slots, ItemKind::Iron), 0);
+        assert_eq!(world.ledger.items_withdrawn, 12);
+        // Out of range: the move is refused before anything settles.
+        world.players.get_mut(&entity).unwrap().character.position =
+            pos + Vec3::new(50.0, 0.0, 0.0);
+        world.inventory_action(entity, InventoryAction::Deposit { slot: 0 });
+        assert_eq!(world.ledger.items_extracted, 12, "no terminal in reach, no extract");
+        assert_eq!(inv::count_items(&world.players[&entity].inventory.slots, ItemKind::Iron), 12);
+    }
+
+    #[test]
+    fn agents_extract_keeper_cargo_and_the_stash_survives_death() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::hauler(), contested);
+        let store = insert_test_station(&mut world, EntityKind::Building, contested);
+        // Fragment cargo over the EXTRACT_VALUE threshold: the hauler should
+        // pick the Storage errand over selling or gathering.
+        world.agents[idx].add_item(ItemKind::BlueprintFragment, 12);
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Extract { .. }),
+            "valuable keeper cargo should route to Storage, got {:?}",
+            world.agents[idx].goal
+        );
+        world.agent_extract(idx, store);
+        assert_eq!(world.agents[idx].stash_count(ItemKind::BlueprintFragment), 12);
+        assert_eq!(world.agents[idx].count_item(ItemKind::BlueprintFragment), 0);
+        assert!(world.ledger.items_extracted >= 12);
+        // Death burns the pack, never the vault; the respawned identity
+        // keeps its stash like it keeps its bank and blueprints.
+        world.kill_agent(idx, false);
+        world.agents[idx].respawn_in = 0.0;
+        world.respawn_agent(idx);
+        assert_eq!(world.agents[idx].stash_count(ItemKind::BlueprintFragment), 12);
+    }
+
+    #[test]
+    fn grubstake_draws_kit_from_the_stash_before_minting() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        inv::add_items(&mut world.agents[idx].stash, ItemKind::Pipe, 1);
+        inv::add_items(&mut world.agents[idx].stash, ItemKind::Medkit, 1);
+        let pipe_minted = world.ledger.item_supply(ItemKind::Pipe).minted;
+        let medkit_minted = world.ledger.item_supply(ItemKind::Medkit).minted;
+        let withdrawn = world.ledger.items_withdrawn;
+        world.kill_agent(idx, false);
+        world.agents[idx].respawn_in = 0.0;
+        world.respawn_agent(idx);
+        // The fighter kit came out of the vault: nothing new entered supply.
+        assert_eq!(world.agents[idx].count_item(ItemKind::Pipe), 1);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Medkit), 1);
+        assert_eq!(world.agents[idx].stash_count(ItemKind::Pipe), 0);
+        assert_eq!(world.agents[idx].stash_count(ItemKind::Medkit), 0);
+        assert_eq!(world.ledger.item_supply(ItemKind::Pipe).minted, pipe_minted);
+        assert_eq!(world.ledger.item_supply(ItemKind::Medkit).minted, medkit_minted);
+        assert_eq!(world.ledger.items_withdrawn, withdrawn + 2);
+    }
+
+    #[test]
     fn agent_positions_and_destinations_stay_on_walkable_land() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
@@ -9021,6 +9661,7 @@ mod tests {
             },
             inventory: Inventory::new(),
             blueprints: Vec::new(),
+            stash: Vec::new(),
             pending_jobs: Vec::new(),
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
@@ -9234,7 +9875,7 @@ mod tests {
                 entity,
                 character,
                 inventory: Inventory::new(),
-                stash: Stash::default(),
+                stash: Stash::new(),
                 tx,
                 pending_inputs: Vec::new(),
                 last_input_seq: 0,
@@ -9259,6 +9900,7 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+                last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
         );
@@ -9414,7 +10056,7 @@ mod tests {
                 entity,
                 character,
                 inventory: Inventory::new(),
-                stash: Stash::default(),
+                stash: Stash::new(),
                 tx,
                 pending_inputs: Vec::new(),
                 last_input_seq: 0,
@@ -9439,6 +10081,7 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
+                last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
         );
@@ -9658,6 +10301,13 @@ mod tests {
             .price_each;
         let seller_wallet = world.agents[seller].wallet();
         let buyer_wallet = world.agents[buyer].wallet();
+        // Fills execute at the terminal now: out past 5 m the book refuses,
+        // walking up unlocks it (same range rule players live under).
+        assert!(!world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
+        let (_, terminal_pos) = world
+            .nearest_service(contested, EntityKind::MarketTerminal)
+            .expect("market terminal seeded");
+        world.agents[buyer].position = terminal_pos;
         assert!(world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
         let cost = listing_price * 10;
         let fee = cost * MARKET_FEE_PCT / 100;

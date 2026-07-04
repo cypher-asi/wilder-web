@@ -319,6 +319,10 @@ pub struct VendorOffer {
     pub kind: ItemKind,
     pub buy: u32,
     pub sell: u32,
+    /// Units the vendor actually holds (stock-backed shelves): 0 on a
+    /// buyable line means sold out. Defaults so old clients keep decoding.
+    #[serde(default)]
+    pub stock: u32,
 }
 
 /// A persistent point of interest (service building) for map/legend UI.

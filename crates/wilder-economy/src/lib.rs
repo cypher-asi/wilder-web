@@ -29,6 +29,23 @@ pub const COMMERCE_CUT_PCT: u32 = 10;
 /// Cash dropped per NPC kill: (min, max) inclusive. Doubled in BlownUp zones.
 pub const CASH_DROP_SCAV: (u32, u32) = (1, 5);
 pub const CASH_DROP_RAIDER: (u32, u32) = (3, 10);
+/// Per-kind ceiling on a vendor's held stock: past it the vendor refuses to
+/// buy more of that kind, so storefronts never become infinite item vacuums.
+pub const VENDOR_STOCK_CAP: u32 = 200;
+
+/// Starting stock a fresh vendor is seeded with for one price-table entry it
+/// SELLS (`buy > 0`). Modest on purpose: the shelves are a bootstrap, not a
+/// faucet — everything after the seed arrives from actors selling in.
+pub fn seed_stock_count(kind: ItemKind) -> u32 {
+    match kind {
+        ItemKind::Ammo9mm => 60,
+        ItemKind::Medkit => 6,
+        ItemKind::Flashlight => 6,
+        ItemKind::Pipe | ItemKind::Knife => 3,
+        // Firearms and armor: scarce enough that crafting matters day one.
+        _ => 2,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Zone drop biases

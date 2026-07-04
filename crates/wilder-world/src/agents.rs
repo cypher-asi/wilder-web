@@ -74,6 +74,14 @@ pub const TURN_RATE: f32 = std::f32::consts::TAU;
 pub const RUN_HOLD: f32 = 0.25;
 /// Agents notice dropped loot within this range when re-scoring goals.
 pub const LOOT_SCAN_RANGE: f32 = 60.0;
+/// Stash size shared with players (wilder_persistence::Stash::DEFAULT_SLOTS).
+pub const STASH_SLOTS: usize = 48;
+/// Carried keeper value (MILD) past which an agent scores an Extract run to
+/// a Storage terminal (item analog of the `WEALTH_RETREAT` bank run).
+pub const EXTRACT_VALUE: u32 = 400;
+/// Free backpack volume at or below which extraction pressure kicks in even
+/// under the value threshold (a nearly-full pack routes to Storage).
+pub const EXTRACT_FREE_VOLUME: u32 = 6;
 
 /// Activity classes an agent learns payoffs over. There are no fixed roles:
 /// every agent carries a payoff estimate per class and specializes toward
@@ -245,7 +253,9 @@ pub fn activity_of(goal: Goal) -> Activity {
             Activity::Fight
         }
         Goal::Capture { .. } | Goal::Defend { .. } => Activity::Capture,
-        Goal::Sell { .. } | Goal::Loot { .. } | Goal::Bank { .. } => Activity::Haul,
+        Goal::Sell { .. } | Goal::Loot { .. } | Goal::Bank { .. } | Goal::Extract { .. } => {
+            Activity::Haul
+        }
     }
 }
 
@@ -297,6 +307,9 @@ pub enum Goal {
     Loot { container: EntityId, pos: Vec3 },
     /// Haul wealth to a Bank and deposit it into the death-safe vault.
     Bank { store: EntityId, store_pos: Vec3 },
+    /// Haul keeper cargo (fragments, craft materials, spare gear) to a
+    /// Storage terminal and deposit it into the death-safe stash.
+    Extract { store: EntityId, store_pos: Vec3 },
 }
 
 impl Goal {
@@ -318,6 +331,7 @@ impl Goal {
             Goal::Retreat { to } => Some(*to),
             Goal::Loot { pos, .. } => Some(*pos),
             Goal::Bank { store_pos, .. } => Some(*store_pos),
+            Goal::Extract { store_pos, .. } => Some(*store_pos),
         }
     }
 }
@@ -368,6 +382,10 @@ pub struct AgentSave {
     /// older saves without the field just know the starter set).
     #[serde(default)]
     pub blueprints: Vec<String>,
+    /// Death-safe item stash slots (48, same volume rules as the player
+    /// stash). Older saves without the field start with an empty stash.
+    #[serde(default)]
+    pub stash: Vec<Option<ItemStack>>,
     /// Outstanding production work: (building, job id) of batches this agent
     /// queued and hasn't collected yet.
     #[serde(default)]
@@ -488,6 +506,10 @@ pub struct FactionAgent {
     /// Known blueprint recipe ids. Like `traits` and the banked purse,
     /// blueprint knowledge survives death (the respawned identity keeps it).
     pub blueprints: HashSet<String>,
+    /// Death-safe stash slots (48, shared `inv` volume rules), filled and
+    /// drained through the same Storage terminals players use. Like the
+    /// banked purse, the stash survives death and respawn untouched.
+    pub stash: Vec<Option<ItemStack>>,
     /// (building, job id) of queued production batches awaiting a Collect.
     /// Cleared on death (the dead identity's jobs and buffers are purged).
     pub pending_jobs: Vec<(EntityId, u64)>,
@@ -595,6 +617,10 @@ impl FactionAgent {
 
     pub fn count_item(&self, kind: ItemKind) -> u32 {
         inv::count_items(&self.inventory.slots, kind)
+    }
+
+    pub fn stash_count(&self, kind: ItemKind) -> u32 {
+        inv::count_items(&self.stash, kind)
     }
 
     /// Add items through the shared slotted-inventory rules (36-slot volume
@@ -708,6 +734,7 @@ impl FactionAgent {
             purse: self.purse,
             inventory: self.inventory.clone(),
             blueprints: self.blueprints.iter().cloned().collect(),
+            stash: self.stash.clone(),
             pending_jobs: self.pending_jobs.clone(),
             position: self.position,
             health: self.health,
@@ -739,6 +766,11 @@ impl FactionAgent {
                     blueprints.insert((*id).to_string());
                 }
                 blueprints
+            },
+            stash: {
+                let mut stash = save.stash;
+                stash.resize(STASH_SLOTS, None);
+                stash
             },
             pending_jobs: save.pending_jobs,
             position: save.position,
@@ -970,6 +1002,7 @@ impl FactionAgent {
             Goal::Sell { store_pos, .. }
             | Goal::Buy { store_pos, .. }
             | Goal::Bank { store_pos, .. }
+            | Goal::Extract { store_pos, .. }
             | Goal::BuyMarket { terminal_pos: store_pos, .. }
             | Goal::Trade { terminal_pos: store_pos } => {
                 if self.move_toward(world, store_pos, 3.0, dt, hot) <= 5.0 {
@@ -1098,6 +1131,7 @@ mod tests {
                 purse,
                 inventory,
                 blueprints: Vec::new(),
+                stash: Vec::new(),
                 pending_jobs: Vec::new(),
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,
@@ -1172,6 +1206,7 @@ mod tests {
         a.add_item(ItemKind::Pistol, 1);
         a.equip_best_gear();
         a.blueprints.insert("polymer".to_string());
+        inv::add_items(&mut a.stash, ItemKind::SteelPlate, 4);
         a.pending_jobs.push((42, 7));
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
@@ -1186,6 +1221,8 @@ mod tests {
         assert_eq!(b.inventory.equipped_weapon, Some(ItemKind::Pistol));
         assert!(b.blueprints.contains("polymer"), "researched blueprints must survive");
         assert!(b.blueprints.contains("steel_plate"), "defaults are always known");
+        assert_eq!(b.stash_count(ItemKind::SteelPlate), 4, "stashed goods must survive");
+        assert_eq!(b.stash.len(), STASH_SLOTS);
         assert_eq!(b.pending_jobs, vec![(42, 7)], "queued work notes must survive");
         assert_eq!(b.entity, 99);
     }

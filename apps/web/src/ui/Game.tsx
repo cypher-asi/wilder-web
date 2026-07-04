@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { setMusicEnabled, startAmbience, stopAmbience, stopMusic } from "../assets/audio";
+import {
+  setMusicEnabled,
+  startAmbience,
+  startCrowd,
+  stopAmbience,
+  stopCrowd,
+  stopMusic,
+} from "../assets/audio";
 import { CHARACTER_MODEL, PISTOL_MODEL, preloadModels } from "../assets/catalog";
 import { GameConnection } from "../net/connection";
 import { GameCanvas } from "../render/GameCanvas";
@@ -53,6 +60,7 @@ export function Game() {
     if (!connection) return;
     connection.connect();
     startAmbience();
+    startCrowd();
     // Honour the saved music preference for this session (join was a user
     // gesture, so autoplay is unblocked here).
     setMusicEnabled(useGame.getState().musicOn);
@@ -60,6 +68,7 @@ export function Game() {
       connection.close();
       game.reset();
       stopAmbience();
+      stopCrowd();
       stopMusic();
     };
   }, [connection]);

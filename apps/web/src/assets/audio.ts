@@ -528,3 +528,137 @@ export function stopAmbience() {
   setTimeout(() => ctx.close(), 600);
   ambience = null;
 }
+
+// --- Crowd chatter (synthesized talking bed) -------------------------------
+// A density-driven ambience: a pool of "babbler" voices (formant-filtered
+// noise whose gain is modulated by a slow LFO to fake syllable cadence) plus a
+// steadier "murmur fill" that blends the voices into a wash. One or two nearby
+// agents read as sparse individual talking; a big group swells into a crowd.
+
+interface CrowdVoice {
+  gain: GainNode; // per-voice level (lit as the crowd grows)
+  baseGain: number; // its target level when fully lit
+}
+
+interface Crowd {
+  ctx: AudioContext;
+  master: GainNode;
+  voices: CrowdVoice[];
+  fill: GainNode;
+}
+
+let crowd: Crowd | null = null;
+
+/** Agent count at which the crowd bed reaches its full large-crowd wash. */
+const CROWD_FULL = 12;
+/** Peak master level; kept near the rain bed so it sits under the music. */
+const CROWD_PEAK = 0.2;
+const CROWD_RAMP = 0.4;
+
+/** Long looping noise buffer for the crowd bed (independent of the short
+ * percussive noiseBuffer so its loop point is not audibly periodic). */
+function makeCrowdNoise(ctx: AudioContext): AudioBuffer {
+  const seconds = 3;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  return buf;
+}
+
+/** Build (once) and start the crowd graph, silent until setCrowdLevel runs. */
+export function startCrowd() {
+  if (crowd) return;
+  try {
+    const ctx = new AudioContext();
+    const noise = makeCrowdNoise(ctx);
+
+    const master = ctx.createGain();
+    master.gain.value = 0;
+    master.connect(ctx.destination);
+
+    // Babbler voices: each a noise -> bandpass (vocal formant) -> gain the LFO
+    // opens and closes, so a lone voice sounds like intermittent talking.
+    const voices: CrowdVoice[] = [];
+    const VOICE_COUNT = 6;
+    for (let i = 0; i < VOICE_COUNT; i++) {
+      const src = ctx.createBufferSource();
+      src.buffer = noise;
+      src.loop = true;
+      src.playbackRate.value = 0.85 + Math.random() * 0.4;
+
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 350 + Math.random() * 2000; // vocal formant range
+      bp.Q.value = 3 + Math.random() * 3;
+
+      const voiceGain = ctx.createGain();
+      voiceGain.gain.value = 0;
+
+      // Syllable LFO: pushes the voice gain up and down at a talking cadence.
+      const lfo = ctx.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = 2 + Math.random() * 3; // ~2-5 Hz syllables
+      const lfoDepth = ctx.createGain();
+      lfoDepth.gain.value = 0.5;
+      lfo.connect(lfoDepth).connect(voiceGain.gain);
+
+      src.connect(bp).connect(voiceGain).connect(master);
+      src.start();
+      lfo.start();
+
+      voices.push({ gain: voiceGain, baseGain: 0.7 + Math.random() * 0.3 });
+    }
+
+    // Murmur fill: steady band-limited noise that fills the gaps between voices
+    // so a large group blends into a continuous crowd hum instead of clatter.
+    const fillSrc = ctx.createBufferSource();
+    fillSrc.buffer = noise;
+    fillSrc.loop = true;
+    const fillBp = ctx.createBiquadFilter();
+    fillBp.type = "bandpass";
+    fillBp.frequency.value = 900;
+    fillBp.Q.value = 0.8;
+    const fill = ctx.createGain();
+    fill.gain.value = 0;
+    fillSrc.connect(fillBp).connect(fill).connect(master);
+    fillSrc.start();
+
+    crowd = { ctx, master, voices, fill };
+  } catch {
+    // Audio not available yet (autoplay policy); retried on the next start.
+  }
+}
+
+/**
+ * Steer the crowd bed toward `count` nearby agents. 0 fades to silence; 1-2
+ * lights a couple of gappy voices; approaching CROWD_FULL brings every voice in
+ * and fades up the murmur fill for a dense large-crowd wash.
+ */
+export function setCrowdLevel(count: number) {
+  if (!crowd) return;
+  const { ctx, master, voices, fill } = crowd;
+  const t = ctx.currentTime;
+  const level = Math.max(0, Math.min(1, count / CROWD_FULL));
+
+  master.gain.linearRampToValueAtTime(CROWD_PEAK * level, t + CROWD_RAMP);
+
+  // Light one voice per nearby agent (capped at the pool size): 1-2 agents
+  // leaves most voices silent, so it reads as a few people talking.
+  voices.forEach((v, i) => {
+    const on = i < count;
+    v.gain.gain.linearRampToValueAtTime(on ? v.baseGain : 0, t + CROWD_RAMP);
+  });
+
+  // Fill only comes up once it is genuinely a crowd, and stays subordinate.
+  const fillLevel = Math.max(0, Math.min(1, (count - 2) / (CROWD_FULL - 2)));
+  fill.gain.linearRampToValueAtTime(0.35 * fillLevel, t + CROWD_RAMP);
+}
+
+/** Fade out and tear down the crowd bed. */
+export function stopCrowd() {
+  if (!crowd) return;
+  const { ctx, master } = crowd;
+  master.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+  setTimeout(() => ctx.close(), 600);
+  crowd = null;
+}

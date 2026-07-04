@@ -14,7 +14,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import * as THREE from "three";
-import { setFootsteps } from "../assets/audio";
+import { setCrowdLevel, setFootsteps } from "../assets/audio";
 import { CHARACTER_MODEL, PISTOL_MODEL, useAssetModel } from "../assets/catalog";
 import {
   chunkKey,
@@ -1899,6 +1899,37 @@ function AgentNameplate({ entity }: { entity: GameEntity }) {
  * roster changes only reconcile keys instead of re-rendering every view. */
 const MemoEntityView = memo(EntityView);
 
+/** Radius (m) around the player within which agents feed the crowd bed. */
+const CROWD_RADIUS = 22;
+const CROWD_RADIUS_SQ = CROWD_RADIUS * CROWD_RADIUS;
+/** How often to recount nearby agents (s); the bed ramps between updates. */
+const CROWD_TICK = 0.25;
+
+/**
+ * Drives the synthesized crowd-chatter bed: a few times a second it counts the
+ * agents near the player and steers the talking ambience so it swells from a
+ * couple of voices into a large-crowd murmur. Renders nothing.
+ */
+function CrowdChatter() {
+  const accum = useRef(0);
+  useFrame((_, delta) => {
+    accum.current += delta;
+    if (accum.current < CROWD_TICK) return;
+    accum.current = 0;
+    const px = game.predicted.x;
+    const pz = game.predicted.z;
+    let count = 0;
+    for (const e of game.entities.values()) {
+      if (e.kind !== "Agent") continue;
+      const dx = e.x - px;
+      const dz = e.z - pz;
+      if (dx * dx + dz * dz <= CROWD_RADIUS_SQ) count++;
+    }
+    setCrowdLevel(count);
+  });
+  return null;
+}
+
 export function Entities() {
   // Mount/unmount entity views the moment the spawn/despawn arrives: the
   // roster version bumps synchronously with the network handler (the old
@@ -1910,6 +1941,7 @@ export function Entities() {
       {[...game.entities.values()].map((entity) => (
         <MemoEntityView key={entity.id} entity={entity} />
       ))}
+      <CrowdChatter />
       <TargetReticle />
     </>
   );

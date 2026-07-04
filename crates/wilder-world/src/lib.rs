@@ -5328,7 +5328,29 @@ impl World {
         let has_weapon = self.agents[idx].weapon().damage > FIST.damage
             || agents::WEAPON_PREFERENCE.iter().any(|k| self.agents[idx].count_item(*k) > 0);
         if !has_weapon && wallet >= 30 {
-            if let Some((store, store_pos, appeal)) = self.route_service(pos, EntityKind::Armory) {
+            // Everyone needs a weapon (retaliation, defense); agents
+            // whose fighting has been paying want one much more.
+            let want = 15.0 * traits.mult(Activity::Fight).max(0.8);
+            // Market first: the best weapon class with a live ask at or
+            // under the Armory's counter price arms the agent for less and
+            // clears the book — this is the demand side of the gear market.
+            let market_pick = agents::WEAPON_PREFERENCE
+                .iter()
+                .find_map(|&k| self.market_bargain(k, wallet).map(|p| (k, p)));
+            if let Some((kind, price_each)) = market_pick {
+                if let Some((_, terminal_pos)) =
+                    self.nearest_service(pos, EntityKind::MarketTerminal)
+                {
+                    if want > best.0 {
+                        best = (
+                            want,
+                            Goal::BuyMarket { terminal_pos, kind, count: 1, max_each: price_each },
+                        );
+                    }
+                }
+            } else if let Some((store, store_pos, appeal)) =
+                self.route_service(pos, EntityKind::Armory)
+            {
                 let kind = if wallet >= 360 {
                     ItemKind::Smg
                 } else if wallet >= 170 {
@@ -5338,19 +5360,69 @@ impl World {
                 } else {
                     ItemKind::Pipe
                 };
-                // Everyone needs a weapon (retaliation, defense); agents
-                // whose fighting has been paying want one much more.
-                let score = 15.0 * traits.mult(Activity::Fight).max(0.8) * appeal;
+                let score = want * appeal;
                 if score > best.0 {
                     best = (score, Goal::Buy { store, store_pos, kind, count: 1 });
                 }
             }
         }
         if self.agents[idx].count_item(ItemKind::Medkit) == 0 && wallet >= 60 && has_weapon {
-            if let Some((store, store_pos, appeal)) = self.route_service(pos, EntityKind::Bodega) {
+            // Same market-first routing as weapons: a live medkit ask at or
+            // under the Bodega's price wins the errand.
+            if let Some(price_each) = self.market_bargain(ItemKind::Medkit, wallet) {
+                if let Some((_, terminal_pos)) =
+                    self.nearest_service(pos, EntityKind::MarketTerminal)
+                {
+                    let score = 8.0;
+                    if score > best.0 {
+                        best = (
+                            score,
+                            Goal::BuyMarket {
+                                terminal_pos,
+                                kind: ItemKind::Medkit,
+                                count: 2,
+                                max_each: price_each,
+                            },
+                        );
+                    }
+                }
+            } else if let Some((store, store_pos, appeal)) =
+                self.route_service(pos, EntityKind::Bodega)
+            {
                 let score = 8.0 * appeal;
                 if score > best.0 {
                     best = (score, Goal::Buy { store, store_pos, kind: ItemKind::Medkit, count: 1 });
+                }
+            }
+        }
+        // Ammo top-up: firearm carriers refill their kit reserve off the
+        // book when a fair ask exists — crafted ammo surplus finds real
+        // buyers instead of rotting in packs.
+        if matches!(
+            self.agents[idx].inventory.equipped_weapon,
+            Some(ItemKind::Smg | ItemKind::Pistol)
+        ) && wallet >= 30
+        {
+            let short = agents::kit_reserve(&self.agents[idx], ItemKind::Ammo9mm)
+                .saturating_sub(self.agents[idx].count_item(ItemKind::Ammo9mm));
+            if short > 0 {
+                if let Some(price_each) = self.market_bargain(ItemKind::Ammo9mm, wallet) {
+                    if let Some((_, terminal_pos)) =
+                        self.nearest_service(pos, EntityKind::MarketTerminal)
+                    {
+                        let score = 6.0;
+                        if score > best.0 {
+                            best = (
+                                score,
+                                Goal::BuyMarket {
+                                    terminal_pos,
+                                    kind: ItemKind::Ammo9mm,
+                                    count: short.min(wallet / price_each.max(1)),
+                                    max_each: price_each,
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -5403,11 +5475,19 @@ impl World {
             }
         }
         // Craft-leaning agents missing inputs restock off the market book
-        // when a fair listing exists.
+        // when a fair listing exists. Wanted kinds come from actual recipe
+        // inputs — raw resources AND intermediates (plates, polymer,
+        // boards...) — so every production input has real buy-side demand.
         if traits.leans(Activity::Craft) && best_recipe.is_none() && wallet >= 30 {
-            let wanted = [ItemKind::Iron, ItemKind::Copper, ItemKind::Chemicals, ItemKind::Biomass];
+            let wanted = |kind: ItemKind| {
+                wilder_crafting::RECIPES
+                    .iter()
+                    .filter(|r| r.station != wilder_crafting::Station::Laboratory)
+                    .flat_map(|r| r.inputs.iter())
+                    .any(|&(k, _)| k == kind)
+            };
             let listing = self.market.iter().find(|l| {
-                wanted.contains(&l.kind)
+                wanted(l.kind)
                     && l.price_each <= self.market_ref_price(l.kind).saturating_mul(2)
             });
             if let Some(l) = listing {
@@ -5835,6 +5915,26 @@ impl World {
             Some(p) => p.clamp((base / 2).max(1), base.saturating_mul(3)),
             None => base,
         }
+    }
+
+    /// Cheapest live ask for `kind` the agent can afford, when it beats the
+    /// NPC vendor's counter price (at-or-under: same MILD, but the fill keeps
+    /// the floating market alive). No vendor line for the kind → any
+    /// affordable ask up to twice the market reference qualifies.
+    fn market_bargain(&self, kind: ItemKind, wallet: u32) -> Option<u32> {
+        let ask = self
+            .market
+            .iter()
+            .filter(|l| l.kind == kind && l.count > 0 && l.price_each <= wallet)
+            .map(|l| l.price_each)
+            .min()?;
+        let vendor = wilder_economy::reference_prices(kind).0;
+        let cap = if vendor > 0 {
+            vendor
+        } else {
+            self.market_ref_price(kind).saturating_mul(2)
+        };
+        (ask <= cap).then_some(ask)
     }
 
     /// Walk every agent ask down ~5% toward its price floor (unsold stock

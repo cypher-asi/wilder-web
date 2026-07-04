@@ -7,7 +7,7 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
-import { RefObject, useEffect, useRef, useState } from "react";
+import { RefObject, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   CITY_PARK,
@@ -25,7 +25,9 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { POI_STYLES } from "../game/poi";
-import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
+import { allRegions, REGION_SIZE } from "../game/territory";
+import { GameConnection } from "../net/connection";
+import { CHUNK_SIZE, DangerLevel, FactionId, FactionInfo, TILE_SIZE } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
 
@@ -53,18 +55,51 @@ interface HoloView {
   keys: Record<string, boolean>;
 }
 
-export function HoloMap() {
-  const mapOpen = useGame((s) => s.mapOpen);
+/** Map layer visibility toggles (the M-mode filter panel). */
+interface MapFilters {
+  /** Player blips from the intel stream. */
+  players: boolean;
+  /** Agent/Wape blips per faction id (Wapes are a registered faction). */
+  factions: Record<FactionId, boolean>;
+  /** Service building badges. */
+  pois: boolean;
+  /** Building volumes (the holographic city mass). */
+  buildings: boolean;
+  /** Resource zoning labels. */
+  zones: boolean;
+  /** Faction territory control overlay. */
+  territory: boolean;
+  /** District danger-level (intensity) overlay. */
+  danger: boolean;
+}
+
+const DEFAULT_FILTERS: MapFilters = {
+  players: true,
+  factions: {},
+  pois: true,
+  buildings: true,
+  zones: true,
+  territory: true,
+  danger: false,
+};
+
+/** Effective visibility for a faction's blips (default on). */
+function factionOn(filters: MapFilters, id: FactionId): boolean {
+  return filters.factions[id] ?? true;
+}
+
+export function HoloMap({ connection }: { connection: GameConnection }) {
+  const mapOpen = useGame((s) => s.menuOpen && s.menuTab === "map");
   // Stay mounted after the first open: reopening then skips WebGL context
   // creation, shader compiles, and the whole React scene remount, so M is
   // instant. While closed the canvas is display:none with a stopped frameloop.
   const opened = useRef(false);
   if (mapOpen) opened.current = true;
   if (!opened.current) return null;
-  return <HoloMapView open={mapOpen} />;
+  return <HoloMapView open={mapOpen} connection={connection} />;
 }
 
-function HoloMapView({ open }: { open: boolean }) {
+function HoloMapView({ open, connection }: { open: boolean; connection: GameConnection }) {
   const view = useRef<HoloView>({
     tx: game.predicted.x,
     tz: game.predicted.z,
@@ -79,7 +114,17 @@ function HoloMapView({ open }: { open: boolean }) {
     keys: {},
   });
   const [topDown, setTopDown] = useState(false);
+  const [filters, setFilters] = useState<MapFilters>(DEFAULT_FILTERS);
   const drag = useRef<{ x: number; y: number; button: number } | null>(null);
+
+  // Whole-map intel (actor blips) streams only while the map is open.
+  useEffect(() => {
+    if (!open) return;
+    connection.send({ t: "MapIntelSub", d: { on: true } });
+    return () => {
+      connection.send({ t: "MapIntelSub", d: { on: false } });
+    };
+  }, [open, connection]);
 
   useEffect(() => {
     if (!open) return;
@@ -98,10 +143,10 @@ function HoloMapView({ open }: { open: boolean }) {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (e.code === "Escape") {
-        // Escape spent on closing the map: don't let the relock/unlock
+        // Escape spent on closing the menu: don't let the relock/unlock
         // bounce read as an "open game menu" Escape (see CameraRig).
         cameraState.suppressMenuUntil = performance.now() + 1500;
-        useGame.getState().set({ mapOpen: false });
+        useGame.getState().closeMenu();
       }
       if (e.code === "KeyT") {
         setTopDown((t) => {
@@ -174,9 +219,9 @@ function HoloMapView({ open }: { open: boolean }) {
         style={{ position: "absolute", inset: 0 }}
         frameloop={open ? "always" : "never"}
       >
-        <HoloScene view={view} />
+        <HoloScene view={view} filters={filters} />
       </Canvas>
-      <div className="map-overlay-title">WIAMI</div>
+      <MapFilterPanel filters={filters} setFilters={setFilters} />
       <MapLegend />
       <button
         className="map-view-toggle"
@@ -193,18 +238,21 @@ function HoloMapView({ open }: { open: boolean }) {
   );
 }
 
-function HoloScene({ view }: { view: RefObject<HoloView> }) {
+function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapFilters }) {
   return (
     <>
       <color attach="background" args={["#010409"]} />
       <HoloCamera view={view} />
-      <HoloCity />
+      <HoloCity buildings={filters.buildings} />
+      {filters.territory && <TerritoryLayer />}
+      {filters.danger && <DangerLayer />}
       <SafeZoneOutline />
       <PlayerMarker view={view} />
       <ExtractionMarkers view={view} />
       <AmmoMarkers view={view} />
-      <PoiMarkers view={view} />
-      <ZoneLabels />
+      {filters.pois && <PoiMarkers view={view} />}
+      <BlipLayer filters={filters} />
+      {filters.zones && <ZoneLabels />}
       <DistrictLabels />
       <EffectComposer multisampling={8}>
         <Bloom
@@ -513,7 +561,7 @@ function buildStreets(city: CityGeo): THREE.Mesh {
 /** City fabric, rendered progressively: each piece (ground texture, building
  * + street meshes) mounts as soon as its own load resolves and fades in, so
  * the map overlay and markers are usable immediately even on a cold start. */
-function HoloCity() {
+function HoloCity({ buildings = true }: { buildings?: boolean }) {
   const [ground, setGround] = useState<GroundAsset | null>(null);
   const [geoAssets, setGeoAssets] = useState<GeoAssets | null>(null);
   useEffect(() => {
@@ -548,7 +596,7 @@ function HoloCity() {
       {geoAssets && (
         <>
           <primitive object={geoAssets.streets} dispose={null} />
-          <primitive object={geoAssets.buildings} dispose={null} />
+          <primitive object={geoAssets.buildings} visible={buildings} dispose={null} />
         </>
       )}
     </>
@@ -710,6 +758,427 @@ function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
         </mesh>
       ))}
     </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Living-sim overlays: actor blips, territory control, danger intensity
+// ---------------------------------------------------------------------------
+
+/** Registry color for a faction id (fallback white). */
+function factionCss(factions: FactionInfo[], id: FactionId): string {
+  const f = factions.find((f) => f.id === id);
+  return `#${(f?.color ?? 0xffffff).toString(16).padStart(6, "0")}`;
+}
+
+/** One tracked actor between intel snapshots: interpolate from (sx,sz) at t0
+ * toward the latest target (tx,tz) over `dur` ms so the blip glides instead of
+ * teleporting once a second. */
+interface BlipTrack {
+  kind: number;
+  faction: FactionId;
+  sx: number;
+  sz: number;
+  tx: number;
+  tz: number;
+  t0: number;
+  dur: number;
+  lastSeen: number;
+}
+
+/** Whole-map actor blips from the MapIntel stream, as one point cloud.
+ * Players read bright cyan-white, agents their faction color, and wild Wapes
+ * their faction color dimmed. Positions are interpolated between the ~1 Hz
+ * intel snapshots (matched by stable blip id) so the dots visibly move. */
+function BlipLayer({ filters }: { filters: MapFilters }) {
+  const blips = useGame((s) => s.mapIntel);
+  const factions = useGame((s) => s.factions);
+
+  const tracks = useRef<Map<number, BlipTrack>>(new Map());
+  const lastSnapshot = useRef(0);
+  // Read the latest filters/factions inside useFrame without re-subscribing.
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const factionsRef = useRef(factions);
+  factionsRef.current = factions;
+
+  // Persistent buffers, grown as the actor count climbs.
+  const capacity = useRef(0);
+  const posAttr = useRef<THREE.BufferAttribute | null>(null);
+  const colAttr = useRef<THREE.BufferAttribute | null>(null);
+
+  const ensureCapacity = (n: number) => {
+    if (n <= capacity.current) return;
+    const cap = Math.max(64, 1 << Math.ceil(Math.log2(n)));
+    capacity.current = cap;
+    posAttr.current = new THREE.BufferAttribute(new Float32Array(cap * 3), 3);
+    colAttr.current = new THREE.BufferAttribute(new Float32Array(cap * 3), 3);
+    posAttr.current.setUsage(THREE.DynamicDrawUsage);
+    colAttr.current.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("position", posAttr.current);
+    geometry.setAttribute("color", colAttr.current);
+  };
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setDrawRange(0, 0);
+    return geo;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Seed a base buffer so the first render has a valid (empty) position attr.
+  if (capacity.current === 0) ensureCapacity(64);
+
+  // Ingest each snapshot: retarget every tracked blip from where it currently
+  // sits, spawn new ones, and drop any that vanished.
+  useEffect(() => {
+    const now = performance.now();
+    const dur = lastSnapshot.current
+      ? THREE.MathUtils.clamp(now - lastSnapshot.current, 100, 2000)
+      : 0;
+    lastSnapshot.current = now;
+    const m = tracks.current;
+    for (const b of blips) {
+      const t = m.get(b.id);
+      if (t) {
+        const k = t.dur > 0 ? Math.min(1, (now - t.t0) / t.dur) : 1;
+        t.sx = t.sx + (t.tx - t.sx) * k;
+        t.sz = t.sz + (t.tz - t.sz) * k;
+        t.tx = b.x;
+        t.tz = b.z;
+        t.t0 = now;
+        t.dur = dur;
+        t.kind = b.kind;
+        t.faction = b.faction;
+        t.lastSeen = now;
+      } else {
+        m.set(b.id, {
+          kind: b.kind,
+          faction: b.faction,
+          sx: b.x,
+          sz: b.z,
+          tx: b.x,
+          tz: b.z,
+          t0: now,
+          dur,
+          lastSeen: now,
+        });
+      }
+    }
+    for (const [id, t] of m) {
+      if (t.lastSeen !== now) m.delete(id);
+    }
+  }, [blips]);
+
+  useFrame(() => {
+    const p = posAttr.current;
+    const co = colAttr.current;
+    const f = filtersRef.current;
+    const facs = factionsRef.current;
+    const now = performance.now();
+    const c = new THREE.Color();
+    let i = 0;
+    // Pre-size for the worst case (all tracks visible) so the buffer never
+    // reallocates mid-write.
+    ensureCapacity(tracks.current.size);
+    for (const t of tracks.current.values()) {
+      // kind 0 = players, kind 1 = faction agents, kind 2 = wild Wapes.
+      // Agents and Wapes are both gated by their faction filter row.
+      const show = t.kind === 0 ? f.players : factionOn(f, t.faction);
+      if (!show) continue;
+      const k = t.dur > 0 ? Math.min(1, (now - t.t0) / t.dur) : 1;
+      const x = t.sx + (t.tx - t.sx) * k;
+      const z = t.sz + (t.tz - t.sz) * k;
+      p!.setXYZ(i, x, 12, z);
+      if (t.kind === 0) {
+        c.setRGB(0.7, 2.2, 2.6); // players: bright cyan-white
+      } else {
+        c.set(factionCss(facs, t.faction));
+        if (t.kind === 2) c.multiplyScalar(0.45); // wild Wapes: dim
+        else c.multiplyScalar(1.4); // agents: bloom a touch
+      }
+      co!.setXYZ(i, c.r, c.g, c.b);
+      i++;
+    }
+    if (p && co) {
+      geometry.setDrawRange(0, i);
+      p.needsUpdate = true;
+      co.needsUpdate = true;
+    }
+  });
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <points geometry={geometry} frustumCulled={false} renderOrder={8}>
+      <pointsMaterial
+        size={5}
+        sizeAttenuation={false}
+        vertexColors
+        transparent
+        depthTest={false}
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
+  );
+}
+
+/** Faction territory control: one translucent quad per held region, tinted
+ * with the holder's color. Region state lives in game/territory.ts (module
+ * cache), so this polls it once a second while mounted. */
+function TerritoryLayer() {
+  const factions = useGame((s) => s.factions);
+  const [cells, setCells] = useState(() => allRegions());
+  useEffect(() => {
+    const poll = () => {
+      const next = allRegions();
+      setCells((prev) =>
+        prev.length === next.length &&
+        prev.every(
+          (p, i) => p.rx === next[i].rx && p.rz === next[i].rz && p.faction === next[i].faction,
+        )
+          ? prev
+          : next,
+      );
+    };
+    poll();
+    const timer = setInterval(poll, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const geometry = useMemo(() => {
+    const pos = new Float32Array(cells.length * 4 * 3);
+    const col = new Float32Array(cells.length * 4 * 3);
+    const idx = new Uint32Array(cells.length * 6);
+    const c = new THREE.Color();
+    const pad = REGION_SIZE * 0.04;
+    cells.forEach((cell, i) => {
+      const x0 = cell.rx * REGION_SIZE + pad;
+      const z0 = cell.rz * REGION_SIZE + pad;
+      const x1 = (cell.rx + 1) * REGION_SIZE - pad;
+      const z1 = (cell.rz + 1) * REGION_SIZE - pad;
+      const corners = [
+        [x0, z0],
+        [x1, z0],
+        [x1, z1],
+        [x0, z1],
+      ];
+      c.set(factionCss(factions, cell.faction));
+      for (let k = 0; k < 4; k++) {
+        const o = (i * 4 + k) * 3;
+        pos[o] = corners[k][0];
+        pos[o + 1] = 1.5;
+        pos[o + 2] = corners[k][1];
+        col[o] = c.r;
+        col[o + 1] = c.g;
+        col[o + 2] = c.b;
+      }
+      const v = i * 4;
+      idx.set([v, v + 2, v + 1, v, v + 3, v + 2], i * 6);
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    return geo;
+  }, [cells, factions]);
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <mesh geometry={geometry} frustumCulled={false} renderOrder={2}>
+      <meshBasicMaterial
+        vertexColors
+        transparent
+        opacity={0.16}
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+const DANGER_COLOR: Record<DangerLevel, string> = {
+  Sanctuary: "#2de08c",
+  Guarded: "#4fa8ff",
+  Contested: "#ffb02e",
+  Warzone: "#ff3860",
+};
+
+const DANGER_LABEL: Record<DangerLevel, string> = {
+  Sanctuary: "SANCTUARY — no combat",
+  Guarded: "GUARDED — home turf, defense only",
+  Contested: "CONTESTED — open faction war",
+  Warzone: "WARZONE — max risk, boosted yields",
+};
+
+/** District danger intensity: a translucent disc per district anchor, sized
+ * to roughly half the gap to its nearest neighbor so the discs read as a
+ * heat overlay without pretending to be exact Voronoi cells. */
+function DangerLayer() {
+  const districts = useGame((s) => s.districts);
+  const discs = useMemo(() => {
+    return districts.map((d) => {
+      let nearest = Infinity;
+      for (const o of districts) {
+        if (o === d) continue;
+        const dist = Math.hypot(o.x - d.x, o.z - d.z);
+        if (dist < nearest) nearest = dist;
+      }
+      const radius = THREE.MathUtils.clamp(
+        nearest === Infinity ? 600 : nearest * 0.48,
+        250,
+        1400,
+      );
+      return { ...d, radius };
+    });
+  }, [districts]);
+  return (
+    <group>
+      {discs.map((d) => (
+        <mesh
+          key={d.name}
+          position={[d.x, 1, d.z]}
+          rotation={[-Math.PI / 2, 0, 0]}
+          renderOrder={3}
+        >
+          <circleGeometry args={[d.radius, 48]} />
+          <meshBasicMaterial
+            color={DANGER_COLOR[d.danger]}
+            transparent
+            opacity={0.1}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
+      {discs.map((d) => (
+        <mesh
+          key={`${d.name}-ring`}
+          position={[d.x, 1.2, d.z]}
+          rotation={[-Math.PI / 2, 0, 0]}
+          renderOrder={3}
+        >
+          <ringGeometry args={[d.radius * 0.985, d.radius, 64]} />
+          <meshBasicMaterial
+            color={DANGER_COLOR[d.danger]}
+            transparent
+            opacity={0.55}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Filter panel (DOM)
+// ---------------------------------------------------------------------------
+
+function FilterRow({
+  label,
+  color,
+  on,
+  toggle,
+}: {
+  label: string;
+  color?: string;
+  on: boolean;
+  toggle: () => void;
+}) {
+  return (
+    <div className={`map-filter-row ${on ? "on" : ""}`} onClick={toggle}>
+      <span
+        className="map-filter-dot"
+        style={{ background: on ? (color ?? "var(--accent)") : "transparent", borderColor: color ?? "var(--accent)" }}
+      />
+      <span className="map-filter-label">{label}</span>
+    </div>
+  );
+}
+
+/** Left-hand layer toggles: who's on the map and which overlays draw. */
+function MapFilterPanel({
+  filters,
+  setFilters,
+}: {
+  filters: MapFilters;
+  setFilters: (f: MapFilters) => void;
+}) {
+  const factions = useGame((s) => s.factions);
+  const districts = useGame((s) => s.districts);
+  const set = (patch: Partial<MapFilters>) => setFilters({ ...filters, ...patch });
+  return (
+    <div
+      className="map-filters"
+      onPointerDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
+    >
+      <div className="map-legend-title">FILTERS</div>
+      <div className="map-filter-section">ACTORS</div>
+      <FilterRow
+        label="PLAYERS"
+        color="#9ff4ff"
+        on={filters.players}
+        toggle={() => set({ players: !filters.players })}
+      />
+      {factions.map((f) => (
+        <FilterRow
+          key={f.id}
+          label={f.name.toUpperCase()}
+          color={factionCss(factions, f.id)}
+          on={factionOn(filters, f.id)}
+          toggle={() =>
+            set({ factions: { ...filters.factions, [f.id]: !factionOn(filters, f.id) } })
+          }
+        />
+      ))}
+      <div className="map-filter-section">LAYERS</div>
+      <FilterRow
+        label="LOCATIONS"
+        on={filters.pois}
+        toggle={() => set({ pois: !filters.pois })}
+      />
+      <FilterRow
+        label="BUILDINGS"
+        on={filters.buildings}
+        toggle={() => set({ buildings: !filters.buildings })}
+      />
+      <FilterRow
+        label="ZONING"
+        color="#ffd696"
+        on={filters.zones}
+        toggle={() => set({ zones: !filters.zones })}
+      />
+      <FilterRow
+        label="TERRITORY"
+        color="#ff3860"
+        on={filters.territory}
+        toggle={() => set({ territory: !filters.territory })}
+      />
+      <FilterRow
+        label="INTENSITY"
+        color="#ffb02e"
+        on={filters.danger}
+        toggle={() => set({ danger: !filters.danger })}
+      />
+      {filters.danger && districts.length > 0 && (
+        <div className="map-filter-danger-key">
+          {(Object.keys(DANGER_COLOR) as DangerLevel[]).map((lvl) => (
+            <div key={lvl} className="map-filter-row" title={DANGER_LABEL[lvl]}>
+              <span className="map-filter-dot" style={{ background: DANGER_COLOR[lvl], borderColor: DANGER_COLOR[lvl] }} />
+              <span className="map-filter-label">{lvl.toUpperCase()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

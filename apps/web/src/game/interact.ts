@@ -39,10 +39,14 @@ export function openServicePanel(kind: EntityKind, entityId: number): void {
     game.send?.({ t: "Interact", d: { entity_id: entityId } });
     return;
   }
-  // Plain Building: the stash — open the backpack/inventory screen.
+  // Plain Building: the stash — open the backpack/inventory tab of the menu.
   if (kind === "Building") {
-    const willOpen = !ui.inventoryOpen;
-    ui.set({ inventoryOpen: willOpen });
-    if (willOpen) game.send?.({ t: "Interact", d: { entity_id: entityId } });
+    const willOpen = !(ui.menuOpen && ui.menuTab === "inventory");
+    if (willOpen) {
+      ui.openMenu("inventory");
+      game.send?.({ t: "Interact", d: { entity_id: entityId } });
+    } else {
+      ui.closeMenu();
+    }
   }
 }

@@ -360,6 +360,7 @@ function WeaponRow({
 }
 
 export function InventoryScreen({ connection }: { connection: GameConnection }) {
+  const open = useGame((s) => s.menuOpen && s.menuTab === "inventory");
   const inventory = useGame((s) => s.inventory);
   const stash = useGame((s) => s.stash);
   const nearStash = useGame((s) => s.nearStash);
@@ -383,7 +384,7 @@ export function InventoryScreen({ connection }: { connection: GameConnection }) 
     setSelected(null);
   });
 
-  if (!inventory) return null;
+  if (!open || !inventory) return null;
 
   // Capacity is volume-based: bulky items consume several cells.
   const used = usedVolume(inventory.slots);

@@ -11,6 +11,9 @@
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
+import { chunkKey } from "../game/collision";
+import { interiorRegistry } from "../game/interiors";
+import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { perf } from "../perf/perf";
 import { game, useGame } from "../state/game";
 import { styleRuntime } from "./styles";
@@ -44,6 +47,9 @@ export const cameraState = {
   // lock via the browser's built-in Escape-unlocks behavior; that unlock
   // must not be read as "open the game menu".
   suppressMenuUntil: 0,
+  // Mouse-look pitch offset (radians) relative to the zoom-derived base
+  // pitch. Lives here (not a component ref) so dev tooling can steer it.
+  pitchOffset: 0,
 };
 
 // Debug handle for development tooling (mirrors window.__game in state/game).
@@ -73,8 +79,9 @@ const nextTargetScratch = new THREE.Vector3();
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
 const PITCH_FAR = THREE.MathUtils.degToRad(62);
-/** Pitch band floor at normal zoom; the low end is near-horizontal. */
-const PITCH_MIN = THREE.MathUtils.degToRad(5);
+/** Pitch band floor at normal zoom; dips below the horizon so the camera can
+ * drop low and angle up to see tall buildings / the sky. */
+const PITCH_MIN = THREE.MathUtils.degToRad(-25);
 const PITCH_MAX = THREE.MathUtils.degToRad(80);
 
 // Over-the-shoulder blend: fully engaged at OTS_NEAR m of zoom, fully off at
@@ -100,10 +107,105 @@ const FOV_OTS = 55;
  */
 const LOOK_AHEAD_FRAC = 0.12;
 
+/**
+ * Lateral framing: slide the character off toward the left of the frame (the
+ * camera looks slightly right of the body) so the crosshair at screen center
+ * sits on open space instead of on top of the character. Sized as a fraction
+ * of the zoom distance so the on-screen offset stays roughly constant.
+ */
+const OFFCENTER_FRAC = 0.16;
+/**
+ * The off-center framing fades back to a centered view once you pull far
+ * enough out — a tactical overview reads better with the character in the
+ * middle and the cursor visible all around it. Full off-center below
+ * OFFCENTER_FADE_START; centered by OFFCENTER_FADE_END.
+ */
+const OFFCENTER_FADE_START = 70;
+const OFFCENTER_FADE_END = 120;
+
 /** Mouse-look sensitivity (radians per pixel of pointer-lock movement). */
 const LOOK_SENS = 0.0032;
 /** RMB-drag sensitivity when unlocked (legacy orbit feel). */
 const DRAG_SENS = 0.005;
+
+// --- Camera wall collision -------------------------------------------------
+
+/** Gap (m) kept between the camera and the wall that clipped it. */
+const OCCLUDE_PAD = 0.5;
+/** The occlusion clamp never pulls the camera closer than this to the head. */
+const OCCLUDE_MIN_FRAC = 0.04;
+/** Extra roaming margin (m) around a walk-in room for the confined camera. */
+const ROOM_CAM_MARGIN = 1.5;
+/** Ground offset of building bases (render/building.ts GROUND_Y). */
+const BUILDING_BASE_Y = 0.14;
+
+/**
+ * Smallest t in (0, 1] where the head->camera segment enters a building
+ * volume (footprint x full height + parapet), or 1 when the view is clear.
+ * Buildings only — props, low interior walls and front bands never block
+ * the camera. `skipKey` excludes one building (the room the player is in).
+ */
+function cameraOcclusionT(
+  hx: number,
+  hy: number,
+  hz: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  skipChunk: string | null,
+  skipBuilding: number,
+): number {
+  const dx = cx - hx;
+  const dy = cy - hy;
+  const dz = cz - hz;
+  const cx0 = Math.floor(Math.min(hx, cx) / CHUNK_SIZE);
+  const cx1 = Math.floor(Math.max(hx, cx) / CHUNK_SIZE);
+  const cz0 = Math.floor(Math.min(hz, cz) / CHUNK_SIZE);
+  const cz1 = Math.floor(Math.max(hz, cz) / CHUNK_SIZE);
+  let best = 1;
+  for (let gz = cz0; gz <= cz1; gz++) {
+    for (let gx = cx0; gx <= cx1; gx++) {
+      const key = chunkKey(gx, gz);
+      const chunk = game.chunks.chunks.get(key);
+      if (!chunk) continue;
+      const ox = gx * CHUNK_SIZE;
+      const oz = gz * CHUNK_SIZE;
+      for (let bi = 0; bi < chunk.buildings.length; bi++) {
+        if (bi === skipBuilding && key === skipChunk) continue;
+        const b = chunk.buildings[bi];
+        const top = BUILDING_BASE_Y + 4.5 + (b.stories - 1) * 3 + 1.0;
+        // 3D slab test of the segment against the building volume.
+        let tmin = 0;
+        let tmax = 1;
+        let miss = false;
+        for (let axis = 0; axis < 3 && !miss; axis++) {
+          const o = axis === 0 ? hx : axis === 1 ? hy : hz;
+          const d = axis === 0 ? dx : axis === 1 ? dy : dz;
+          const lo =
+            axis === 0 ? ox + b.tx0 * TILE_SIZE : axis === 1 ? 0 : oz + b.tz0 * TILE_SIZE;
+          const hi =
+            axis === 0 ? ox + b.tx1 * TILE_SIZE : axis === 1 ? top : oz + b.tz1 * TILE_SIZE;
+          if (Math.abs(d) < 1e-8) {
+            if (o < lo || o > hi) miss = true;
+            continue;
+          }
+          let t1 = (lo - o) / d;
+          let t2 = (hi - o) / d;
+          if (t1 > t2) {
+            const tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+          }
+          if (t1 > tmin) tmin = t1;
+          if (t2 < tmax) tmax = t2;
+          if (tmin > tmax) miss = true;
+        }
+        if (!miss && tmin < best) best = tmin;
+      }
+    }
+  }
+  return best;
+}
 
 /** 0 = normal follow camera, 1 = full over-the-shoulder view. */
 function shoulderBlend(): number {
@@ -134,12 +236,11 @@ function pitchBand(): { base: number; min: number } {
 
 type UiState = ReturnType<typeof useGame.getState>;
 
-/** Panels that need the OS cursor back (pointer lock released while open). */
+/** Panels that need the OS cursor back (pointer lock released while open). The
+ * central menu (map/economy/leaderboard/inventory/settings/exit) is a single
+ * `menuOpen` flag now. */
 function uiBlocksPointerLock(s: UiState): boolean {
   return (
-    s.inventoryOpen ||
-    s.mapOpen ||
-    s.economyOpen ||
     s.menuOpen ||
     s.chatOpen ||
     s.craftOpen ||
@@ -152,9 +253,16 @@ export function CameraRig() {
   const { camera, gl, scene, events } = useThree();
   const target = useRef(new THREE.Vector3());
   const keys = useRef({ q: false, e: false });
-  const pitchOffset = useRef(0);
   const dragging = useRef(false);
   const lastPointer = useRef({ x: 0, y: 0 });
+  /** Smoothed occlusion fraction: snaps in fast, recovers slowly. */
+  const occT = useRef(1);
+  /** 0 = street camera, 1 = confined to the walk-in room (blended). */
+  const insideBlend = useRef(0);
+  /** Last room the player stood in (host building excluded from occlusion,
+   * bounds confine the camera); fields are mutated in place, no per-frame
+   * allocations. */
+  const roomRef = useRef({ key: "", building: -1, x0: 0, z0: 0, x1: 0, z1: 0 });
 
   useEffect(() => {
     const canvas = gl.domElement;
@@ -184,17 +292,10 @@ export function CameraRig() {
       if (!locked) {
         dragging.current = false;
         cameraState.dragging = false;
-        // Escape exits pointer lock at the browser level without the keydown
-        // ever reaching the page, so an unlock with no panel open is the
-        // Escape shortcut: bring up the game menu (matches PlayerInput's
-        // unlocked Escape handling). Skip it right after an Escape that
-        // closed a panel — that press already did its job.
-        if (
-          !uiBlocksPointerLock(useGame.getState()) &&
-          performance.now() > cameraState.suppressMenuUntil
-        ) {
-          useGame.getState().set({ menuOpen: true });
-        }
+        // Escape exits pointer lock at the browser level (returning the OS
+        // cursor) without ever reaching the page — that first press just frees
+        // the mouse. The menu is opened by a *second* Escape, which now lands
+        // as a normal keydown in PlayerInput because the page is unlocked.
       }
     };
 
@@ -235,8 +336,8 @@ export function CameraRig() {
         // free-look too — the RMB flag only freezes character facing.
         cameraState.yaw += event.movementX * LOOK_SENS;
         const { base, min } = pitchBand();
-        pitchOffset.current = THREE.MathUtils.clamp(
-          pitchOffset.current + event.movementY * LOOK_SENS,
+        cameraState.pitchOffset = THREE.MathUtils.clamp(
+          cameraState.pitchOffset + event.movementY * LOOK_SENS,
           min - base,
           PITCH_MAX - base,
         );
@@ -250,8 +351,8 @@ export function CameraRig() {
       // orbits like the legacy scheme and persists on release.
       cameraState.yaw += dx * DRAG_SENS;
       const { base, min } = pitchBand();
-      pitchOffset.current = THREE.MathUtils.clamp(
-        pitchOffset.current + dy * DRAG_SENS,
+      cameraState.pitchOffset = THREE.MathUtils.clamp(
+        cameraState.pitchOffset + dy * DRAG_SENS,
         min - base,
         PITCH_MAX - base,
       );
@@ -341,7 +442,7 @@ export function CameraRig() {
     const shoulderT = shoulderBlend();
     const { base: basePitch, min: pitchMin } = pitchBand();
     const pitch = THREE.MathUtils.clamp(
-      basePitch + pitchOffset.current,
+      basePitch + cameraState.pitchOffset,
       pitchMin,
       PITCH_MAX,
     );
@@ -362,7 +463,21 @@ export function CameraRig() {
     // Shoulder view: raise the look target to eye height and slide the whole
     // rig over the right shoulder (perpendicular to camera forward).
     const lookY = THREE.MathUtils.lerp(LOOK_HEIGHT, OTS_EYE_HEIGHT, shoulderT);
-    const shoulder = OTS_SHOULDER_OFFSET * shoulderT;
+    // General off-center framing along camera-right: pushes the character to
+    // the left of the frame at normal/close zoom, then fades to a centered
+    // view as you pull far out (so the tactical overview reads with the cursor
+    // visible around the character). Also fades as the shoulder view engages,
+    // which supplies its own (larger) shoulder slide instead.
+    const offCenterFade =
+      1 -
+      THREE.MathUtils.smoothstep(
+        cameraState.distance,
+        OFFCENTER_FADE_START,
+        OFFCENTER_FADE_END,
+      );
+    const offCenter =
+      cameraState.distance * OFFCENTER_FRAC * offCenterFade * (1 - shoulderT);
+    const side = OTS_SHOULDER_OFFSET * shoulderT + offCenter;
     // Lead the look target ahead of the character along camera-forward so the
     // crosshair shows where you can shoot; fades out as the shoulder view
     // (which uses the shoulder offset instead) engages.
@@ -370,17 +485,87 @@ export function CameraRig() {
     const forwardZ = -Math.sin(yaw);
     const lookAhead = cameraState.distance * LOOK_AHEAD_FRAC * (1 - shoulderT);
     const lookX =
-      target.current.x + offX + Math.sin(yaw) * shoulder + forwardX * lookAhead;
+      target.current.x + offX + Math.sin(yaw) * side + forwardX * lookAhead;
     const lookZ =
-      target.current.z + offZ - Math.cos(yaw) * shoulder + forwardZ * lookAhead;
+      target.current.z + offZ - Math.cos(yaw) * side + forwardZ * lookAhead;
 
     const horizontal = Math.cos(pitch) * cameraState.distance;
     const height = Math.sin(pitch) * cameraState.distance;
-    camera.position.set(
-      lookX + Math.cos(yaw) * horizontal,
-      lookY + height,
-      lookZ + Math.sin(yaw) * horizontal,
+    const desX = lookX + Math.cos(yaw) * horizontal;
+    const desY = lookY + height;
+    const desZ = lookZ + Math.sin(yaw) * horizontal;
+
+    // --- Wall collision ----------------------------------------------------
+    // Inside a walk-in room the exterior shell is hidden, so instead of
+    // testing walls the camera is confined to the room's footprint; on the
+    // street, buildings between the player's head and the lens pull the
+    // camera in so walls never cross the view. Both blend smoothly.
+    const room = interiorRegistry.roomAt(target.current.x, target.current.z, 0.3);
+    if (room) {
+      const r = roomRef.current;
+      r.key = chunkKey(room.coord.x, room.coord.z);
+      r.building = room.building;
+      r.x0 = room.bounds[0];
+      r.z0 = room.bounds[1];
+      r.x1 = room.bounds[2];
+      r.z1 = room.bounds[3];
+    }
+    insideBlend.current +=
+      ((room ? 1 : 0) - insideBlend.current) * Math.min(1, dt * 6);
+    const headX = target.current.x;
+    const headY = lookY + 0.4;
+    const headZ = target.current.z;
+    // Occlusion clamp (the host building of the current/last room is exempt —
+    // its shell is hidden while the confinement takes over).
+    const skipHost = insideBlend.current > 0.01 && roomRef.current.building >= 0;
+    const rawT = cameraOcclusionT(
+      headX,
+      headY,
+      headZ,
+      desX,
+      desY,
+      desZ,
+      skipHost ? roomRef.current.key : null,
+      skipHost ? roomRef.current.building : -1,
     );
+    occT.current =
+      rawT < occT.current
+        ? THREE.MathUtils.lerp(occT.current, rawT, Math.min(1, dt * 16))
+        : THREE.MathUtils.lerp(occT.current, rawT, Math.min(1, dt * 4));
+    const segLen = Math.max(
+      1e-4,
+      Math.hypot(desX - headX, desY - headY, desZ - headZ),
+    );
+    const tEff = Math.max(occT.current - OCCLUDE_PAD / segLen, OCCLUDE_MIN_FRAC);
+    const occX = headX + (desX - headX) * tEff;
+    const occY = headY + (desY - headY) * tEff;
+    const occZ = headZ + (desZ - headZ) * tEff;
+    // Room confinement: pull the camera in ALONG its view ray until it sits
+    // inside the room rect (plus margin). Scaling the ray instead of clamping
+    // X/Z per axis keeps the full outdoor pitch range available inside — a
+    // low pan just brings the lens closer instead of snapping top-down.
+    const blend = insideBlend.current;
+    let finalX = occX;
+    let finalY = occY;
+    let finalZ = occZ;
+    if (blend > 0.001) {
+      const r = roomRef.current;
+      const ddx = desX - headX;
+      const ddz = desZ - headZ;
+      let tRoom = 1;
+      if (ddx > 1e-6) tRoom = Math.min(tRoom, (r.x1 + ROOM_CAM_MARGIN - headX) / ddx);
+      else if (ddx < -1e-6) tRoom = Math.min(tRoom, (r.x0 - ROOM_CAM_MARGIN - headX) / ddx);
+      if (ddz > 1e-6) tRoom = Math.min(tRoom, (r.z1 + ROOM_CAM_MARGIN - headZ) / ddz);
+      else if (ddz < -1e-6) tRoom = Math.min(tRoom, (r.z0 - ROOM_CAM_MARGIN - headZ) / ddz);
+      tRoom = Math.max(tRoom, OCCLUDE_MIN_FRAC);
+      const confX = headX + ddx * tRoom;
+      const confY = headY + (desY - headY) * tRoom;
+      const confZ = headZ + ddz * tRoom;
+      finalX = THREE.MathUtils.lerp(occX, confX, blend);
+      finalY = THREE.MathUtils.lerp(occY, confY, blend);
+      finalZ = THREE.MathUtils.lerp(occZ, confZ, blend);
+    }
+    camera.position.set(finalX, finalY, finalZ);
     camera.lookAt(lookX, lookY, lookZ);
 
     // The default 34° FOV is telephoto — right for the pulled-back view but

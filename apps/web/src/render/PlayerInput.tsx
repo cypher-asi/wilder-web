@@ -118,28 +118,34 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       // Dead: the death overlay owns the keyboard (any key respawns); no game
       // action should fire underneath it.
       if (useGame.getState().death) return;
-      // While the fullscreen map is open only map keys work (HoloMap handles
-      // Escape/T itself); everything else must not reach the paused game.
-      if (useGame.getState().mapOpen && event.code !== "KeyM") return;
-      // Same for the economy dashboard (it handles Escape itself).
-      if (useGame.getState().economyOpen && event.code !== "KeyK") return;
-      // While the game menu is open, Escape (resume) is the only game key.
+      // While the central menu is open, only the section shortcut keys switch
+      // tabs (Map/Economy/Inventory handle Escape themselves); every other key
+      // is swallowed so nothing reaches the paused game underneath.
       if (useGame.getState().menuOpen) {
-        if (event.code === "Escape" && !event.repeat) {
+        if (event.code === "KeyM") {
           event.preventDefault();
-          useGame.getState().set({ menuOpen: false });
+          useGame.getState().toggleMap();
+        } else if (event.code === "KeyK") {
+          event.preventDefault();
+          useGame.getState().toggleEconomy();
+        } else if (
+          event.code === "KeyB" ||
+          event.code === "KeyI" ||
+          event.code === "Tab"
+        ) {
+          event.preventDefault();
+          useGame.getState().toggleInventory();
         }
         return;
       }
       if (event.code === "Escape" && !event.repeat) {
         event.preventDefault();
-        // Escape closes any visibly open panel first; with nothing open it
-        // brings up the game menu. Flags can be set while the panel renders
-        // nothing (no inventory yet, walked away from a station) — those
+        // Escape closes any visibly open contextual panel first; with nothing
+        // open it brings up the central menu on the Map tab. Flags can be set
+        // while the panel renders nothing (walked away from a station) — those
         // must not swallow the keypress.
         const ui = useGame.getState();
         const panelVisible =
-          (ui.inventoryOpen && ui.inventory !== null) ||
           (ui.craftOpen && ui.nearStation !== null) ||
           (ui.marketOpen && ui.nearMarket) ||
           (ui.vendorOpen && ui.nearVendor !== null);
@@ -150,13 +156,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
           // that unlock as "open the game menu".
           cameraState.suppressMenuUntil = performance.now() + 1500;
           ui.set({
-            inventoryOpen: false,
             craftOpen: false,
             marketOpen: false,
             vendorOpen: false,
           });
         } else {
-          ui.set({ menuOpen: true });
+          ui.openMenu("map");
         }
         return;
       }
@@ -505,7 +510,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       const px = game.rendered.x;
       const pz = game.rendered.z;
       // cameraState.yaw points from player toward the camera; forward is the
-      // opposite direction.
+      // opposite direction. Fallback only — when the crosshair ray hits the
+      // ground the facing is derived from that point instead, because the
+      // off-center camera framing puts the character left of screen center,
+      // so raw camera-forward no longer passes through the crosshair.
       game.aim.yaw = cameraState.yaw + Math.PI;
       // Screen center is the aim reference for everything (crosshair,
       // reticle, fire target).
@@ -519,6 +527,13 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (raycaster.current.ray.intersectPlane(groundPlane.current, centerHit)) {
         game.aim.x = centerHit.x;
         game.aim.z = centerHit.z;
+        // Face the crosshair's ground point (guarded against the degenerate
+        // camera-on-top-of-player case where atan2 gets unstable).
+        const dx = centerHit.x - px;
+        const dz = centerHit.z - pz;
+        if (dx * dx + dz * dz > 0.25) {
+          game.aim.yaw = Math.atan2(dz, dx);
+        }
       } else {
         // Looking above the horizon: aim far along forward on the ground.
         game.aim.x = px + Math.cos(game.aim.yaw) * 50;

@@ -35,12 +35,12 @@ const pointerLockEvents: typeof events = (store) => ({
 });
 
 export function GameCanvas({ connection }: { connection: GameConnection }) {
-  // While the fullscreen map is open, stop rendering the world entirely (the
-  // scene stays mounted so closing the map resumes instantly). The game menu
-  // pauses rendering too but keeps the last frame visible behind its dim
-  // backdrop.
-  const mapOpen = useGame((s) => s.mapOpen);
+  // While the central menu is open, stop rendering the world entirely (the
+  // scene stays mounted so closing it resumes instantly). On the Map tab the
+  // canvas is hidden because the map draws its own canvas; the other tabs keep
+  // the last frozen frame visible behind their overlays.
   const menuOpen = useGame((s) => s.menuOpen);
+  const mapOpen = useGame((s) => s.menuOpen && s.menuTab === "map");
   return (
     <Canvas
       shadows

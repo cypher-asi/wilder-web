@@ -388,6 +388,18 @@ export const initialAbilities = (): Record<AbilityKind, AbilityUiState> => ({
   Overcharge: { readyAt: 0, cooldown: 0, activeUntil: 0 },
 });
 
+/**
+ * Sections of the unified central menu (Escape). Each is reachable by its own
+ * shortcut key, which opens the menu straight on that tab.
+ */
+export type MenuTab =
+  | "map"
+  | "leaderboard"
+  | "economy"
+  | "inventory"
+  | "settings"
+  | "exit";
+
 interface UiState {
   connected: boolean;
   joined: boolean;
@@ -409,7 +421,6 @@ interface UiState {
   position: Vec3;
   inventory: Inventory | null;
   stash: (ItemStack | null)[] | null;
-  inventoryOpen: boolean;
   chat: ChatLine[];
   chatOpen: boolean;
   lastError: string | null;
@@ -451,14 +462,13 @@ interface UiState {
   nearVendor: { kind: EntityKind; id: number } | null;
   /** Vendor panel visibility (auto-closes when leaving the vendor). */
   vendorOpen: boolean;
-  /** Fullscreen city map overlay (M key). */
-  mapOpen: boolean;
-  /** Fullscreen economy ledger dashboard (K key). */
-  economyOpen: boolean;
   /** Live ledger snapshot: aggregate stats + tx feed (newest first). */
   economy: { stats: EconomyStats; feed: EconTx[] } | null;
-  /** Pause/game menu overlay (Escape). */
+  /** Central full-screen game menu (Escape). Hosts every full-screen section
+   * (map, leaderboard, economy, inventory, settings, exit) as a tab. */
   menuOpen: boolean;
+  /** Which section of the central menu is showing. */
+  menuTab: MenuTab;
   /** Active visual style preset (persisted to localStorage). */
   visualStyle: VisualStyleId;
   /** Main-music on/off (persisted to localStorage). */
@@ -481,6 +491,12 @@ interface UiState {
   celebrateLevelUp: (level: number) => void;
   pushWalletToast: (text: string) => void;
   expireWalletToast: (id: number) => void;
+  /** Open the central menu on `tab` (or switch to it if already open). */
+  openMenu: (tab: MenuTab) => void;
+  /** Close the central menu. */
+  closeMenu: () => void;
+  /** Toggle the central menu: open on `tab`, or close if already showing it. */
+  toggleMenuTab: (tab: MenuTab) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
@@ -530,7 +546,6 @@ export const useGame: import("zustand").UseBoundStore<
   position: [0, 0, 0],
   inventory: null,
   stash: null,
-  inventoryOpen: false,
   chat: [],
   chatOpen: false,
   lastError: null,
@@ -553,10 +568,9 @@ export const useGame: import("zustand").UseBoundStore<
   vendor: null,
   nearVendor: null,
   vendorOpen: false,
-  mapOpen: false,
-  economyOpen: false,
   economy: null,
   menuOpen: false,
+  menuTab: "map",
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
   pickupFeed: [],
@@ -582,17 +596,40 @@ export const useGame: import("zustand").UseBoundStore<
     })),
   expireWalletToast: (id) =>
     set((s) => ({ walletToasts: s.walletToasts.filter((t) => t.id !== id) })),
-  toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
-  toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
-  toggleEconomy: () => set((s) => ({ economyOpen: !s.economyOpen })),
-  toggleMenu: () => set((s) => ({ menuOpen: !s.menuOpen })),
+  openMenu: (tab) => set({ menuOpen: true, menuTab: tab }),
+  closeMenu: () => set({ menuOpen: false }),
+  toggleMenuTab: (tab) =>
+    set((s) =>
+      s.menuOpen && s.menuTab === tab
+        ? { menuOpen: false }
+        : { menuOpen: true, menuTab: tab },
+    ),
+  toggleInventory: () =>
+    set((s) =>
+      s.menuOpen && s.menuTab === "inventory"
+        ? { menuOpen: false }
+        : { menuOpen: true, menuTab: "inventory" },
+    ),
+  toggleMap: () =>
+    set((s) =>
+      s.menuOpen && s.menuTab === "map"
+        ? { menuOpen: false }
+        : { menuOpen: true, menuTab: "map" },
+    ),
+  toggleEconomy: () =>
+    set((s) =>
+      s.menuOpen && s.menuTab === "economy"
+        ? { menuOpen: false }
+        : { menuOpen: true, menuTab: "economy" },
+    ),
+  toggleMenu: () =>
+    set((s) =>
+      s.menuOpen ? { menuOpen: false } : { menuOpen: true, menuTab: "map" },
+    ),
   closeOverlays: () =>
     set({
       menuOpen: false,
-      mapOpen: false,
-      economyOpen: false,
       chatOpen: false,
-      inventoryOpen: false,
       craftOpen: false,
       marketOpen: false,
       vendorOpen: false,

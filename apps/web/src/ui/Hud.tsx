@@ -8,7 +8,6 @@ import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
-import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
 import { RED_HEX } from "./colors";
@@ -23,7 +22,6 @@ import { PerfPanel } from "./PerfPanel";
 export function Hud({ connection }: { connection: GameConnection }) {
   const connected = useGame((s) => s.connected);
   const joined = useGame((s) => s.joined);
-  const inventoryOpen = useGame((s) => s.inventoryOpen);
 
   // Warm the fullscreen map's assets (geo fetch + worker ground bake) once
   // the world has spawned in, so the first M press is instant. Idle-deferred
@@ -51,10 +49,6 @@ export function Hud({ connection }: { connection: GameConnection }) {
             <PositionReadout />
           </div>
           <div className="comms-panel">
-            <div className="comms-controls">
-              <StylePicker />
-              <MusicToggle />
-            </div>
             <ChatWindow connection={connection} />
           </div>
           <ExtractionBar />
@@ -65,7 +59,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
-          {inventoryOpen && <InventoryScreen connection={connection} />}
+          <InventoryScreen connection={connection} />
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
           <VendorPanel connection={connection} />
@@ -181,41 +175,6 @@ function Crosshair() {
         <circle cx={0} cy={0} r={1.4} fill="currentColor" />
       </svg>
     </div>
-  );
-}
-
-/** Visual style dropdown: switches the whole render look live. */
-function StylePicker() {
-  const visualStyle = useGame((s) => s.visualStyle);
-  const setVisualStyle = useGame((s) => s.setVisualStyle);
-  return (
-    <select
-      className="style-picker"
-      value={visualStyle}
-      onChange={(e) => setVisualStyle(e.target.value as VisualStyleId)}
-      title="Visual style"
-    >
-      {VISUAL_STYLE_IDS.map((id) => (
-        <option key={id} value={id}>
-          {STYLES[id].label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-/** Persistent HUD button toggling the main music on/off. */
-function MusicToggle() {
-  const musicOn = useGame((s) => s.musicOn);
-  const setMusicOn = useGame((s) => s.setMusicOn);
-  return (
-    <button
-      className={`music-toggle${musicOn ? " on" : ""}`}
-      onClick={() => setMusicOn(!musicOn)}
-      title={musicOn ? "Music on — click to mute" : "Music off — click to play"}
-    >
-      ♪
-    </button>
   );
 }
 
@@ -552,7 +511,7 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
 /** Bottom-right backpack: quick-glance grid + button to the full inventory. */
 function BackpackBar() {
   const inventory = useGame((s) => s.inventory);
-  const inventoryOpen = useGame((s) => s.inventoryOpen);
+  const inventoryOpen = useGame((s) => s.menuOpen && s.menuTab === "inventory");
   const toggleInventory = useGame((s) => s.toggleInventory);
 
   const slots = inventory?.slots ?? [];
@@ -1434,15 +1393,16 @@ function DeathScreen() {
   useEffect(() => {
     if (!death) return;
     setShown(0);
+    const CHARS_PER_TICK = 8;
     const timer = setInterval(() => {
       setShown((n) => {
         if (n >= body.length) {
           clearInterval(timer);
           return n;
         }
-        return n + 1;
+        return n + CHARS_PER_TICK;
       });
-    }, 12);
+    }, 8);
     return () => clearInterval(timer);
   }, [death?.at]);
 
@@ -1458,8 +1418,9 @@ function DeathScreen() {
     return () => window.clearTimeout(timeout);
   }, [death?.at]);
 
-  // Any key / click respawns: first press finishes the typewriter, the next
-  // dismisses. Clicking always dismisses so the overlay can't get stuck.
+  // A keyboard key respawns: first press finishes the typewriter, the next
+  // dismisses. Mouse clicks are intentionally ignored so a stray click during
+  // combat can't skip the death screen - the player must reboot deliberately.
   useEffect(() => {
     if (!death) return;
     const dismiss = () => useGame.getState().set({ death: null });
@@ -1469,15 +1430,9 @@ function DeathScreen() {
       if (shown < body.length) setShown(body.length);
       else dismiss();
     };
-    const onPointer = (e: PointerEvent) => {
-      e.preventDefault();
-      dismiss();
-    };
     window.addEventListener("keydown", onKey, true);
-    window.addEventListener("pointerdown", onPointer, true);
     return () => {
       window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("pointerdown", onPointer, true);
     };
   }, [death, shown, body.length]);
 

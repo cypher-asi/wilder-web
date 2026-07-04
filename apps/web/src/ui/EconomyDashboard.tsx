@@ -6,10 +6,13 @@
 // with a full snapshot (EconomyState) and then pushes per-tick batches
 // (EconomyTxs) while the screen stays open.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
 import {
+  Board,
   EconTx,
+  FactionId,
+  FactionInfo,
   ItemKind,
   TxAmount,
   TxKind,
@@ -99,9 +102,9 @@ function Party({ party }: { party: TxParty }) {
     case "Agent":
       return <span className="econ-party econ-party-agent">{party.d.name}</span>;
     case "Mint":
-      return <span className="econ-party econ-party-kernel">KERNEL</span>;
+      return <span className="econ-party econ-party-kernel">GIBSON</span>;
     case "Burn":
-      return <span className="econ-party econ-party-kernel">KERNEL</span>;
+      return <span className="econ-party econ-party-kernel">GIBSON</span>;
   }
 }
 
@@ -289,7 +292,7 @@ function matchesFeedFilter(tx: EconTx, f: FeedFilter): boolean {
 
 function TxRow({ tx, now }: { tx: EconTx; now: number }) {
   return (
-    <div className="econ-row">
+    <div className="econ-row" data-seq={tx.seq}>
       <span className="econ-hash" title={tx.hash}>
         {shortHash(tx.hash)}
       </span>
@@ -330,6 +333,34 @@ function TxFeed() {
     [feed, filter],
   );
 
+  // New transactions are prepended (newest first) and the feed is capped, so
+  // rows get added at the top while old ones fall off the bottom — scrollHeight
+  // stays roughly constant and can't be used to detect the shift. Instead we
+  // anchor to a concrete row (the previous top row, keyed by seq): after each
+  // update we measure how far that row moved and add the difference back into
+  // scrollTop, keeping the rows the user is reading exactly in place. When the
+  // user is at the very top we leave scrollTop at 0 so newest rows keep flowing.
+  const listRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<{ seq: number; offsetTop: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const prev = anchorRef.current;
+    // Only compensate when the user is scrolled away from the top; at the top
+    // we let scrollTop stay 0 so the newest rows keep streaming into view.
+    if (prev && el.scrollTop > 0) {
+      const node = el.querySelector<HTMLElement>(`[data-seq="${prev.seq}"]`);
+      if (node) {
+        const shift = node.offsetTop - prev.offsetTop;
+        if (shift !== 0) el.scrollTop += shift;
+      }
+    }
+    const first = el.querySelector<HTMLElement>("[data-seq]");
+    anchorRef.current = first
+      ? { seq: Number(first.dataset.seq), offsetTop: first.offsetTop }
+      : null;
+  }, [shown]);
+
   return (
     <div className="econ-panel econ-feed">
       <div className="econ-panel-title">
@@ -366,7 +397,7 @@ function TxFeed() {
         <span>ITEM / AMOUNT</span>
         <span className="num">FEE</span>
       </div>
-      <div className="econ-feed-list">
+      <div className="econ-feed-list" ref={listRef}>
         {feed.length === 0 && (
           <div className="econ-empty">No transactions yet — the ledger records every economic event.</div>
         )}
@@ -382,17 +413,196 @@ function TxFeed() {
 }
 
 // ---------------------------------------------------------------------------
+// Leaderboards (LeaderboardState pushes while subscribed)
+// ---------------------------------------------------------------------------
+
+/** Registry color for a faction id as a CSS hex string (white if unknown). */
+function factionColor(factions: FactionInfo[], id: FactionId): string {
+  const f = factions.find((f) => f.id === id);
+  return `#${(f?.color ?? 0xffffff).toString(16).padStart(6, "0")}`;
+}
+
+function factionName(factions: FactionInfo[], id: FactionId): string {
+  return factions.find((f) => f.id === id)?.name ?? "Unaligned";
+}
+
+/** Value formatting per board category. */
+function boardValue(category: string, value: number): string {
+  return category === "Wealth" ? `${value.toLocaleString()} WILD` : value.toLocaleString();
+}
+
+function FactionStandingsStrip() {
+  const leaderboard = useGame((s) => s.leaderboard);
+  const factions = useGame((s) => s.factions);
+  if (!leaderboard) return null;
+  return (
+    <div className="econ-lb-factions">
+      {leaderboard.factions.map((f) => {
+        const color = factionColor(factions, f.faction);
+        return (
+          <div key={f.faction} className="econ-lb-faction" style={{ borderColor: color }}>
+            <div className="econ-lb-faction-name" style={{ color }}>
+              {factionName(factions, f.faction).toUpperCase()}
+            </div>
+            <div className="econ-lb-faction-grid">
+              <span className="econ-lb-stat-label">MEMBERS</span>
+              <span className="num">{f.members.toLocaleString()}</span>
+              <span className="econ-lb-stat-label">KILLS</span>
+              <span className="num">{f.kills.toLocaleString()}</span>
+              <span className="econ-lb-stat-label">DEATHS</span>
+              <span className="num econ-burned">{f.deaths.toLocaleString()}</span>
+              <span className="econ-lb-stat-label">TREASURY</span>
+              <span className="num econ-live">{f.treasury.toLocaleString()} WILD</span>
+              <span className="econ-lb-stat-label">REGIONS</span>
+              <span className="num">{f.regions_held.toLocaleString()}</span>
+              <span className="econ-lb-stat-label">DISTRICTS</span>
+              <span className="num">{f.districts_held.toLocaleString()}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BoardPanel({ board }: { board: Board }) {
+  const factions = useGame((s) => s.factions);
+  const [factionFilter, setFactionFilter] = useState<FactionId | "all">("all");
+  const rows = board.rows.filter(
+    (r) => factionFilter === "all" || r.faction === factionFilter,
+  );
+  return (
+    <div className="econ-panel econ-lb-board">
+      <div className="econ-panel-title">
+        {board.category.toUpperCase()}
+        <span className="econ-panel-sub">TOP {board.rows.length}</span>
+      </div>
+      <div className="econ-tabs">
+        <div
+          className={`econ-tab ${factionFilter === "all" ? "active" : ""}`}
+          onClick={() => setFactionFilter("all")}
+        >
+          ALL
+        </div>
+        {factions.map((f) => (
+          <div
+            key={f.id}
+            className={`econ-tab ${factionFilter === f.id ? "active" : ""}`}
+            onClick={() => setFactionFilter(f.id)}
+          >
+            {f.name.toUpperCase()}
+          </div>
+        ))}
+      </div>
+      <div className="econ-lb-row econ-lb-head">
+        <span className="num">#</span>
+        <span>NAME</span>
+        <span>GUILD</span>
+        <span className="num">{board.category === "Wealth" ? "WEALTH" : board.category.toUpperCase()}</span>
+      </div>
+      <div className="econ-lb-list">
+        {rows.length === 0 && <div className="econ-empty">No competitors yet.</div>}
+        {rows.map((r, i) => (
+          <div key={`${r.name}-${i}`} className="econ-lb-row">
+            <span className="num econ-lb-rank">{i + 1}</span>
+            <span
+              className="econ-lb-name"
+              style={{ color: factionColor(factions, r.faction) }}
+            >
+              {r.name}
+            </span>
+            <span className="econ-lb-guild">{r.guild ?? "—"}</span>
+            <span className="num">{boardValue(board.category, r.value)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GuildStandings() {
+  const leaderboard = useGame((s) => s.leaderboard);
+  const factions = useGame((s) => s.factions);
+  if (!leaderboard) return null;
+  return (
+    <div className="econ-panel econ-lb-guilds">
+      <div className="econ-panel-title">
+        GUILD STANDINGS
+        <span className="econ-panel-sub">{leaderboard.guilds.length} GUILDS</span>
+      </div>
+      <div className="econ-lb-guild-row econ-lb-head">
+        <span>GUILD</span>
+        <span>FACTION</span>
+        <span className="num">MEMBERS</span>
+        <span className="num">KILLS</span>
+        <span className="num">WEALTH</span>
+      </div>
+      <div className="econ-lb-list">
+        {leaderboard.guilds.length === 0 && (
+          <div className="econ-empty">No guild activity recorded yet.</div>
+        )}
+        {leaderboard.guilds.map((g) => (
+          <div key={g.name} className="econ-lb-guild-row">
+            <span className="econ-lb-name">{g.name}</span>
+            <span style={{ color: factionColor(factions, g.faction) }}>
+              {factionName(factions, g.faction)}
+            </span>
+            <span className="num">{g.members.toLocaleString()}</span>
+            <span className="num">{g.kills.toLocaleString()}</span>
+            <span className="num econ-live">{g.wealth.toLocaleString()} WILD</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LeaderboardView() {
+  const leaderboard = useGame((s) => s.leaderboard);
+  const [category, setCategory] = useState("Wealth");
+  if (!leaderboard) {
+    return <div className="econ-empty">Awaiting leaderboard data…</div>;
+  }
+  const board =
+    leaderboard.boards.find((b) => b.category === category) ?? leaderboard.boards[0];
+  return (
+    <div className="econ-lb">
+      <FactionStandingsStrip />
+      <div className="econ-tabs econ-lb-cats">
+        {leaderboard.boards.map((b) => (
+          <div
+            key={b.category}
+            className={`econ-tab ${board?.category === b.category ? "active" : ""}`}
+            onClick={() => setCategory(b.category)}
+          >
+            {b.category.toUpperCase()}
+          </div>
+        ))}
+      </div>
+      <div className="econ-lb-body">
+        {board && <BoardPanel key={board.category} board={board} />}
+        <GuildStandings />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard shell
 // ---------------------------------------------------------------------------
 
 export function EconomyDashboard({ connection }: { connection: GameConnection }) {
-  const open = useGame((s) => s.economyOpen);
+  // The ledger and the leaderboards are now two top-level tabs of the central
+  // menu; both share the same live EconomySub subscription (the server pushes
+  // LeaderboardState alongside the economy snapshot while subscribed).
+  const open = useGame((s) => s.menuOpen && (s.menuTab === "economy" || s.menuTab === "leaderboard"));
+  const isLedger = useGame((s) => s.menuTab === "economy");
 
   // Closing spends the Escape/click: suppress the pointer-lock bounce so it does
   // not read as an "open game menu" Escape (see CameraRig).
   const close = () => {
     cameraState.suppressMenuUntil = performance.now() + 1500;
-    useGame.getState().set({ economyOpen: false });
+    useGame.getState().closeMenu();
   };
 
   useEffect(() => {
@@ -413,16 +623,15 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
 
   return (
     <div className="map-overlay econ-overlay">
-      <div className="map-overlay-title">ECONOMY LEDGER</div>
       <KpiStrip />
-      <div className="econ-body">
-        <TxFeed />
-        <SupplyPanel />
-      </div>
-      <div className="econ-footer econ-footer-close" onClick={close}>
-        <span className="invx-keycap">K</span> / <span className="invx-keycap">ESC</span>
-        <span className="invx-footer-hint">CLOSE</span>
-      </div>
+      {isLedger ? (
+        <div className="econ-body">
+          <TxFeed />
+          <SupplyPanel />
+        </div>
+      ) : (
+        <LeaderboardView />
+      )}
     </div>
   );
 }

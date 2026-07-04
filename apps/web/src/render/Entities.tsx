@@ -303,8 +303,10 @@ function applyMannequinPalette(
     m.opacity = 1;
     if (f.joints) {
       if (tron) {
+        // Joints carry the faction tint so Forum reads red and Wapes amber
+        // through and through (no teal interior on hostile bodies).
         m.color.set(0x04080c);
-        m.emissive.set(hostile ? tint || RED_NUM : 0x4fd0e0);
+        m.emissive.set(tint || (hostile ? RED_NUM : 0x4fd0e0));
         m.emissiveIntensity = hostile ? 2.6 : 3.2;
         m.roughness = 0.3;
         m.metalness = 0.6;
@@ -316,10 +318,15 @@ function applyMannequinPalette(
         m.metalness = 0.5;
       }
     } else if (tron) {
-      // Tron shell: black silhouette with a faint teal self-glow so the
-      // body reads against the black city.
+      // Tron shell: black silhouette with a faint self-glow so the body
+      // reads against the black city — faction-tinted when one is set so
+      // hostile bodies carry no teal at all.
       m.color.set(0x040a0e);
-      m.emissive.set(0x0d4552);
+      if (tint) {
+        m.emissive.set(tint).multiplyScalar(0.28);
+      } else {
+        m.emissive.set(0x0d4552);
+      }
       m.emissiveIntensity = 0.35;
       m.roughness = 0.4;
       m.metalness = 0.75;

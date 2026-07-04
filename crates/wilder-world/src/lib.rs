@@ -4166,7 +4166,7 @@ impl World {
         }
         for n in self.npcs.values() {
             if n.alive() {
-                consider(n.entity, n.position, FACTION_FORUM, &mut best);
+                consider(n.entity, n.position, FACTION_WAPES, &mut best);
             }
         }
         let center = ChunkCoord::from_world(pos);
@@ -4647,10 +4647,11 @@ impl World {
             for mut save in saves {
                 // Sanitize restored positions: older saves can hold agents
                 // stranded over open water (pre-walkability-guard drift).
-                // Snap those back to their staging ground.
+                // Scatter them around their staging ground — a deterministic
+                // snap would stack every stranded agent on one exact point.
                 if !self.chunks.walkable(save.position.x, save.position.z) {
                     let spot = save.home_spot.unwrap_or_else(|| self.district_spot(save.home));
-                    save.position = self.nearest_walkable(spot);
+                    save.position = self.walkable_spot_near(spot, 25.0);
                 }
                 let entity = self.alloc_entity();
                 let agent = FactionAgent::from_save(entity, save);

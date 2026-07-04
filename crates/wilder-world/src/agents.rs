@@ -241,6 +241,10 @@ pub struct FactionAgent {
     /// Suppresses wealth-triggered retreats right after one completed.
     pub retreat_cooldown: f32,
     pub anim: AnimState,
+    /// Seconds left holding the Attack pose after a swing. A single-tick
+    /// (50 ms) Attack blip would be dropped between replication snapshots,
+    /// making fights read as idle glitching on clients.
+    pub anim_hold: f32,
 }
 
 impl FactionAgent {
@@ -408,6 +412,7 @@ impl FactionAgent {
             attack_cooldown: 0.0,
             retreat_cooldown: 0.0,
             anim: AnimState::Idle,
+            anim_hold: 0.0,
         }
     }
 
@@ -440,8 +445,13 @@ impl FactionAgent {
         self.yaw = to.z.atan2(to.x);
         if hot {
             let before = self.position;
+            // Never step past the steering target: a fixed-length step that
+            // overshoots the destination leaves the agent ping-ponging across
+            // it (180° yaw flip every tick) whenever the leftover distance
+            // falls inside the arrival radius band.
+            let move_dt = dt.min(to.length() / AGENT_SPEED);
             self.position =
-                step_move_speed(world, self.position, to.x, to.z, AGENT_SPEED, dt);
+                step_move_speed(world, self.position, to.x, to.z, AGENT_SPEED, move_dt);
             if (self.position - before).length_squared() < 1e-8 {
                 // Stuck against geometry: ask for a real path (once).
                 if self.path.is_empty()
@@ -507,6 +517,7 @@ impl FactionAgent {
         self.anim = AnimState::Idle;
         self.attack_cooldown = (self.attack_cooldown - dt).max(0.0);
         self.retreat_cooldown = (self.retreat_cooldown - dt).max(0.0);
+        self.anim_hold = (self.anim_hold - dt).max(0.0);
         self.decision_timer -= dt;
 
         match self.goal {
@@ -586,7 +597,14 @@ impl FactionAgent {
                     if self.attack_cooldown <= 0.0 {
                         self.attack_cooldown = weapon.cooldown.max(0.6);
                         self.anim = AnimState::Attack;
+                        self.anim_hold = 0.5;
                         return AgentEvent::Attack { target: tid, damage: weapon.damage };
+                    }
+                    // Keep the swing pose up between attacks: a single-tick
+                    // Attack blip vanishes between replication snapshots and
+                    // fights read as idle stutter on clients.
+                    if self.anim_hold > 0.0 {
+                        self.anim = AnimState::Attack;
                     }
                 } else if dist > 60.0 {
                     return AgentEvent::NeedsGoal; // lost the leash
@@ -698,6 +716,42 @@ mod tests {
         let before = a.position;
         a.tick(&Open, 1.0, false, None);
         assert!((a.position - before).length() > 3.0, "cold agent should advance");
+    }
+
+    #[test]
+    fn hot_movement_settles_at_destination_without_oscillating() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.position = Vec3::new(0.0, 0.0, 0.0);
+        // 3.4 m = 10 full 0.325 m steps + 0.15 m: an unclamped fixed-length
+        // step overshoots the spot into the far side of the 0.1 m arrival
+        // radius and ping-pongs (180° yaw flip per tick) forever.
+        a.goal = Goal::Gather { spot: Vec3::new(3.4, 0.0, 0.0), pulls_left: 10, timer: 100.0 };
+        a.decision_timer = 1000.0;
+        let dt = 0.05;
+        for _ in 0..200 {
+            a.tick(&Open, dt, true, None);
+        }
+        assert!(
+            (a.position.x - 3.4).abs() < 0.11,
+            "agent should settle on the spot: {:?}",
+            a.position
+        );
+        // Once settled, further ticks must not swing the yaw around.
+        let yaw_before = a.yaw;
+        for _ in 0..20 {
+            a.tick(&Open, dt, true, None);
+        }
+        let mut dy = (a.yaw - yaw_before).abs();
+        if dy > std::f32::consts::PI {
+            dy = 2.0 * std::f32::consts::PI - dy;
+        }
+        assert!(dy < 0.01, "yaw flipped by {dy} rad while standing at the spot");
     }
 
     #[test]

@@ -274,7 +274,7 @@ export type VendorActionMsg =
 
 export type C2S =
   | Tagged<"Authenticate", { token: string }>
-  | Tagged<"JoinWorld", { character_id: string }>
+  | Tagged<"JoinWorld", { character_id: string; spectate?: boolean }>
   | Tagged<
       "MoveInput",
       { seq: number; dx: number; dz: number; yaw: number; run: boolean }
@@ -302,6 +302,7 @@ export type C2S =
   | TaggedUnit<"AgentHireList">
   | Tagged<"AgentSub", { on: boolean }>
   | Tagged<"AgentDetailSub", { agent_id: string | null }>
+  | Tagged<"WatchAgent", { agent_id: string | null }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -581,6 +582,8 @@ export interface EconomyStats {
  */
 export interface AgentSummary {
   agent_id: string;
+  /** Live replicated entity id of this agent's body (fresh per respawn). */
+  entity_id: number;
   name: string;
   faction: FactionId;
   guild: string;

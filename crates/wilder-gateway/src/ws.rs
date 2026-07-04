@@ -60,7 +60,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
                     error: (!ok).then(|| "invalid session".to_string()),
                 });
             }
-            C2S::JoinWorld { character_id } => {
+            C2S::JoinWorld { character_id, spectate } => {
                 let Some(account_id) = account else {
                     let _ = out_tx.send(S2C::Error { message: "authenticate first".into() });
                     continue;
@@ -73,6 +73,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
                 let _ = state.world.tx.send(WorldCmd::Join {
                     account: account_id,
                     character_id,
+                    spectate,
                     tx: out_tx.clone(),
                     reply: reply_tx,
                 });

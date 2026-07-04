@@ -22,7 +22,7 @@ export function MobileShell({ connection }: { connection: GameConnection }) {
       {!connected && <div className="disconnect-banner">RECONNECTING…</div>}
       <div className="m-content">
         {tab === "agents" && <AgentsTab connection={connection} />}
-        {tab === "watch" && <WatchTab />}
+        {tab === "watch" && <WatchTab connection={connection} />}
         {tab === "map" && <MapTab />}
         {tab === "economy" && <EconomyTab />}
         {tab === "trade" && <TradeTab />}

@@ -942,6 +942,8 @@ pub enum WorldCmd {
     Join {
         account: AccountId,
         character_id: CharacterId,
+        /// Spectator join: load the character but embody no avatar.
+        spectate: bool,
         tx: mpsc::UnboundedSender<S2C>,
         reply: oneshot::Sender<Result<EntityId, String>>,
     },
@@ -1014,6 +1016,17 @@ struct Player {
     /// Owned agent being watched in detail (`AgentDetailSub`), as an index
     /// into `World::agents`. Validated against ownership on every push.
     agent_detail: Option<usize>,
+    /// Spectator connection (mobile shell): the character is loaded and the
+    /// connection fully works (wallet, subscriptions, chunk streaming) but
+    /// no avatar is embodied — never replicated, never targetable, never
+    /// simulated by the movement/combat/pickup passes.
+    spectator: bool,
+    /// Owned agent the 3D follow camera tracks (`C2S::WatchAgent`), as an
+    /// index into `World::agents`. Slot indices are stable across respawn,
+    /// so the anchor survives the agent dying and coming back. While set,
+    /// chunk streaming + entity replication center on the agent's position
+    /// and the agent is pinned to the Hot tier.
+    watch_anchor: Option<usize>,
     /// World-clock seconds of the last "backpack full" deny sent for
     /// auto-pickup. Rate-limits the toast so standing on loot with a full
     /// pack doesn't spam it every tick.
@@ -1226,6 +1239,20 @@ impl Player {
             faction: self.character.faction,
         }
     }
+}
+
+/// Where a player's interest centers: the watched agent's position while a
+/// `WatchAgent` anchor is set (dead or alive — the slot's position is where
+/// the body fell until respawn relocates it), otherwise the avatar/character
+/// position. Chunk streaming, entity replication, hot-tier classification
+/// and the agent-dot feed all read this. A free function (not a method) so
+/// it can be called while `self.players` is mutably borrowed.
+fn interest_center(agents: &[FactionAgent], player: &Player) -> Vec3 {
+    player
+        .watch_anchor
+        .and_then(|idx| agents.get(idx))
+        .map(|a| a.position)
+        .unwrap_or(player.character.position)
 }
 
 struct LootContainer {
@@ -1669,8 +1696,8 @@ impl World {
 
     fn handle_cmd(&mut self, cmd: WorldCmd) {
         match cmd {
-            WorldCmd::Join { account, character_id, tx, reply } => {
-                let result = self.join(account, character_id, tx);
+            WorldCmd::Join { account, character_id, spectate, tx, reply } => {
+                let result = self.join(account, character_id, tx, spectate);
                 let _ = reply.send(result);
             }
             WorldCmd::Msg { entity, msg } => self.handle_msg(entity, msg),
@@ -1683,6 +1710,7 @@ impl World {
         account: AccountId,
         character_id: CharacterId,
         tx: mpsc::UnboundedSender<S2C>,
+        spectate: bool,
     ) -> Result<EntityId, String> {
         let character = self
             .store
@@ -1744,7 +1772,10 @@ impl World {
 
         let entity = self.alloc_entity();
         let mut character = character;
-        if !position_clear(&self.chunks, character.position.x, character.position.z) {
+        // Spectators are never embodied, so a blocked saved position doesn't
+        // matter — and leaving it untouched keeps persistence-on-leave a
+        // no-op for the position, as promised.
+        if !spectate && !position_clear(&self.chunks, character.position.x, character.position.z) {
             character.position = SPAWN;
         }
 
@@ -1780,6 +1811,8 @@ impl World {
             map_intel: false,
             agent_sub: false,
             agent_detail: None,
+            spectator: spectate,
+            watch_anchor: None,
             last_full_deny: f64::NEG_INFINITY,
             dirty: true,
         };
@@ -1819,7 +1852,7 @@ impl World {
         }
 
         self.players.insert(entity, player);
-        tracing::info!(entity, "player joined");
+        tracing::info!(entity, spectate, "player joined");
         Ok(entity)
     }
 
@@ -1836,6 +1869,25 @@ impl World {
     }
 
     fn handle_msg(&mut self, entity: EntityId, msg: C2S) {
+        // Spectators have no avatar in the world: silently drop every
+        // embodied action (movement, combat, world interaction). Economy,
+        // agent and map subscriptions still flow below.
+        if self.players.get(&entity).is_some_and(|p| p.spectator)
+            && matches!(
+                msg,
+                C2S::MoveInput { .. }
+                    | C2S::MoveTo { .. }
+                    | C2S::StopMove { .. }
+                    | C2S::Roll { .. }
+                    | C2S::SetCrouch { .. }
+                    | C2S::Attack { .. }
+                    | C2S::UseAbility { .. }
+                    | C2S::Interact { .. }
+                    | C2S::UseItem { .. }
+            )
+        {
+            return;
+        }
         match msg {
             C2S::MoveInput { seq, dx, dz, yaw, run } => {
                 if let Some(player) = self.players.get_mut(&entity) {
@@ -1928,6 +1980,7 @@ impl World {
             C2S::AgentHireList => self.agent_hire_list(entity),
             C2S::AgentSub { on } => self.agent_sub(entity, on),
             C2S::AgentDetailSub { agent_id } => self.agent_detail_sub(entity, agent_id),
+            C2S::WatchAgent { agent_id } => self.watch_agent(entity, agent_id),
             C2S::MapIntelSub { on } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.map_intel = on;
@@ -2082,7 +2135,7 @@ impl World {
             .chain(
                 self.players
                     .values()
-                    .filter(|p| p.entity != entity && p.character.health > 0.0)
+                    .filter(|p| p.entity != entity && !p.spectator && p.character.health > 0.0)
                     .map(|p| (p.entity, p.character.position)),
             )
             .collect();
@@ -3368,7 +3421,10 @@ impl World {
         let mut pulls: Vec<(EntityId, EntityId)> = Vec::new();
         for &(building, owner) in self.production_outputs.keys() {
             let OwnerId::Player(char_id) = owner else { continue };
-            if let Some(p) = self.players.values().find(|p| p.character.id == char_id) {
+            // Spectators aren't standing anywhere; no ghost auto-collect.
+            if let Some(p) =
+                self.players.values().find(|p| p.character.id == char_id && !p.spectator)
+            {
                 pulls.push((p.entity, building));
             }
         }
@@ -3471,7 +3527,8 @@ impl World {
             entry.2 += strength;
         };
         for p in self.players.values() {
-            if p.character.health > 0.0 {
+            // Spectators hold no ground and feed no intel.
+            if !p.spectator && p.character.health > 0.0 {
                 add(p.character.position, p.character.faction, true, PLAYER_INTEL_STRENGTH);
             }
         }
@@ -4723,6 +4780,11 @@ impl World {
 
     fn apply_movement(&mut self) {
         for player in self.players.values_mut() {
+            // Spectators have no body to move (their inputs are dropped at
+            // the message layer too; this keeps the sim honest regardless).
+            if player.spectator {
+                continue;
+            }
             player.moved_this_tick = false;
             player.ran_this_tick = false;
             player.attack_cooldown = (player.attack_cooldown - TICK_DT).max(0.0);
@@ -4843,7 +4905,7 @@ impl World {
             }
         }
         for p in self.players.values() {
-            if p.character.health > 0.0 {
+            if !p.spectator && p.character.health > 0.0 {
                 bodies.push((Body::Player, p.character.position));
             }
         }
@@ -5104,6 +5166,10 @@ impl World {
     /// (position, faction, alive) of a combat-capable entity.
     fn combatant(&self, id: EntityId) -> Option<(Vec3, FactionId, bool)> {
         if let Some(p) = self.players.get(&id) {
+            // Spectators aren't in the world: no combat in either direction.
+            if p.spectator {
+                return None;
+            }
             return Some((p.character.position, p.character.faction, p.character.health > 0.0));
         }
         self.agent_by_entity
@@ -5351,7 +5417,10 @@ impl World {
         let mut hot_chunks: HashSet<ChunkCoord> = HashSet::new();
         let mut hot_exit_chunks: HashSet<ChunkCoord> = HashSet::new();
         for p in self.players.values() {
-            let c = ChunkCoord::from_world(p.character.position);
+            // Interest center, not raw avatar position: a spectator watching
+            // an agent heats the ground around the AGENT, so its surroundings
+            // (other agents included) are embodied for the follow camera.
+            let c = ChunkCoord::from_world(interest_center(&self.agents, p));
             for dz in -(HOT_RADIUS_CHUNKS + 1)..=(HOT_RADIUS_CHUNKS + 1) {
                 for dx in -(HOT_RADIUS_CHUNKS + 1)..=(HOT_RADIUS_CHUNKS + 1) {
                     let coord = ChunkCoord::new(c.x + dx, c.z + dz);
@@ -5362,6 +5431,13 @@ impl World {
                 }
             }
         }
+        // Watched agents are pinned Hot no matter where they roam: exempt
+        // from demotion and force-promoted below.
+        let watched: HashSet<u32> = self
+            .players
+            .values()
+            .filter_map(|p| p.watch_anchor.map(|idx| idx as u32))
+            .collect();
 
         // Player-driven tier classification: sweep the previous hot set for
         // demotions (left the exit zone, died) and promote cold agents found
@@ -5370,7 +5446,8 @@ impl World {
         let mut next_hot: Vec<u32> = Vec::with_capacity(self.hot_agents.len() + 64);
         for i in std::mem::take(&mut self.hot_agents) {
             let agent = &mut self.agents[i as usize];
-            if agent.alive() && hot_exit_chunks.contains(&agent.chunk()) {
+            if agent.alive() && (hot_exit_chunks.contains(&agent.chunk()) || watched.contains(&i))
+            {
                 next_hot.push(i);
             } else {
                 agent.tier = Tier::Cold;
@@ -5384,6 +5461,16 @@ impl World {
                     agent.tier = Tier::Hot;
                     next_hot.push(i);
                 }
+            }
+        }
+        // Force-promote watched agents the chunk sweep didn't reach (their
+        // watcher may be a spectator whose interest is the agent itself, so
+        // this is usually already covered — but never rely on it).
+        for &i in &watched {
+            let agent = &mut self.agents[i as usize];
+            if agent.alive() && agent.tier == Tier::Cold {
+                agent.tier = Tier::Hot;
+                next_hot.push(i);
             }
         }
         self.hot_agents = next_hot;
@@ -6571,7 +6658,7 @@ impl World {
             }
         };
         for p in self.players.values() {
-            if p.character.health > 0.0 {
+            if !p.spectator && p.character.health > 0.0 {
                 consider(p.entity, p.character.position, p.character.faction, &mut best);
             }
         }
@@ -7699,6 +7786,10 @@ impl World {
         // cache, agent/player drop) grabs it instantly.
         let mut grabbed: Vec<(EntityId, EntityId)> = Vec::new();
         for player in self.players.values() {
+            // A spectator's ghost position never vacuums loot.
+            if player.spectator {
+                continue;
+            }
             for container in self.loot.values() {
                 if (container.position - player.character.position).length() <= LOOT_PICKUP_RADIUS {
                     grabbed.push((player.entity, container.entity));
@@ -7790,6 +7881,9 @@ impl World {
     fn tick_currency_pickups(&mut self) {
         let mut grabbed: Vec<(EconActor, EntityId, Currency, u32)> = Vec::new();
         for player in self.players.values() {
+            if player.spectator {
+                continue;
+            }
             for pickup in self.pickups.values() {
                 if (pickup.position - player.character.position).length()
                     <= CURRENCY_PICKUP_RADIUS
@@ -7853,6 +7947,9 @@ impl World {
     fn tick_regen(&mut self) {
         let safehouses = self.safehouse_positions();
         for player in self.players.values_mut() {
+            if player.spectator {
+                continue;
+            }
             let coord = ChunkCoord::from_world(player.character.position);
             let sheltered = is_safe_chunk(coord)
                 || safehouses
@@ -7996,7 +8093,8 @@ impl World {
         let q = |v: f32| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let mut blips: Vec<AgentBlip> = Vec::new();
         for p in self.players.values() {
-            if p.character.health <= 0.0 {
+            // Spectators are invisible everywhere, the map included.
+            if p.spectator || p.character.health <= 0.0 {
                 continue;
             }
             blips.push(AgentBlip {
@@ -8111,7 +8209,9 @@ impl World {
     /// subscription — this is a live-map LOD layer, not a menu overlay).
     fn broadcast_agent_dots(&self) {
         for p in self.players.values() {
-            let blips = self.nearby_agent_dots(p.character.position);
+            // Dots ring the interest center (the watched agent while
+            // anchored), matching where the camera actually is.
+            let blips = self.nearby_agent_dots(interest_center(&self.agents, p));
             let _ = p.tx.send(S2C::AgentDots { blips });
         }
     }
@@ -8290,6 +8390,7 @@ impl World {
         let a = &self.agents[idx];
         AgentSummary {
             agent_id: a.agent_id,
+            entity_id: a.entity,
             name: a.name.clone(),
             faction: a.faction,
             guild: a.guild.clone(),
@@ -8417,10 +8518,14 @@ impl World {
             }
         }
         self.agent_logs.remove(&agent_id);
-        // Anyone watching this agent's detail loses access with the dismissal.
+        // Anyone watching this agent (detail stream or follow camera) loses
+        // access with the dismissal.
         for p in self.players.values_mut() {
             if p.agent_detail == Some(idx) {
                 p.agent_detail = None;
+            }
+            if p.watch_anchor == Some(idx) {
+                p.watch_anchor = None;
             }
         }
         self.send_agent_result(entity, true, None);
@@ -8486,6 +8591,33 @@ impl World {
         let detail = self.agent_detail_snapshot(idx);
         if let Some(player) = self.players.get(&entity) {
             let _ = player.tx.send(S2C::AgentDetail(detail));
+        }
+    }
+
+    /// `C2S::WatchAgent`: anchor this connection's interest (chunk streaming
+    /// + entity replication) on one OWNED agent for the 3D follow camera.
+    /// `None` clears the anchor. Like `agent_detail_sub`, the anchor is the
+    /// agent's slot index, which respawn reuses — so a watched agent that
+    /// dies keeps its watcher and the camera sees the fresh identity respawn.
+    fn watch_agent(&mut self, entity: EntityId, agent_id: Option<AgentId>) {
+        let Some(agent_id) = agent_id else {
+            if let Some(player) = self.players.get_mut(&entity) {
+                player.watch_anchor = None;
+            }
+            return;
+        };
+        let Some(player) = self.players.get(&entity) else { return };
+        let char_id = player.character.id;
+        let Some(idx) = self.agents.iter().position(|a| a.agent_id == agent_id) else {
+            self.send_agent_result(entity, false, Some("agent not found".into()));
+            return;
+        };
+        if self.agents[idx].owner != Some(char_id) {
+            self.send_agent_result(entity, false, Some("not your agent".into()));
+            return;
+        }
+        if let Some(player) = self.players.get_mut(&entity) {
+            player.watch_anchor = Some(idx);
         }
     }
 
@@ -8904,7 +9036,8 @@ impl World {
         let mut all_needed: HashSet<ChunkCoord> = HashSet::new();
         let mut newly_seen: Vec<ChunkCoord> = Vec::new();
         for player in self.players.values_mut() {
-            let center = ChunkCoord::from_world(player.character.position);
+            // A WatchAgent anchor re-centers streaming on the agent.
+            let center = ChunkCoord::from_world(interest_center(&self.agents, player));
             let new_view = view_set(center);
             if new_view != player.view {
                 let (entered, exited) = diff_view(&player.view, &new_view);
@@ -8940,6 +9073,11 @@ impl World {
 
         let mut all: Vec<Replicated> = Vec::new();
         for p in self.players.values() {
+            // Spectators have no body: never replicated to anyone (not even
+            // themselves — the mobile client has no local avatar).
+            if p.spectator {
+                continue;
+            }
             all.push(Replicated {
                 id: p.entity,
                 chunk: ChunkCoord::from_world(p.character.position),
@@ -9137,9 +9275,14 @@ impl World {
 
             // Cap the hot agents shipped to this player to the nearest K.
             // The pre-pass ranks agents in view by distance; `agent_keep`
-            // is None when everyone fits under the cap.
+            // is None when everyone fits under the cap. Distances measure
+            // from the interest center (the watched agent while anchored),
+            // and the watched agent itself always survives the cap — the
+            // follow camera must never lose its subject.
             let mut agent_rank: Vec<(EntityId, f32)> = Vec::new();
-            let ppos = player.character.position;
+            let ppos = interest_center(&self.agents, player);
+            let watch_entity: Option<EntityId> =
+                player.watch_anchor.and_then(|idx| self.agents.get(idx)).map(|a| a.entity);
             for r in &all {
                 if r.is_agent && player.view.contains(&r.chunk) {
                     agent_rank.push((r.id, (r.snap.position - ppos).length_squared()));
@@ -9150,6 +9293,9 @@ impl World {
                     agent_rank.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
                     let mut keep: HashSet<EntityId> =
                         agent_rank[..REPLICATED_AGENT_CAP].iter().map(|(id, _)| *id).collect();
+                    if let Some(id) = watch_entity {
+                        keep.insert(id);
+                    }
                     // Hysteresis: already-known agents past the cap survive up
                     // to the softer keep limit instead of despawning at once.
                     for (id, _) in &agent_rank[REPLICATED_AGENT_CAP..] {
@@ -9497,7 +9643,7 @@ pub mod bench {
             };
             store.create_character(&character).expect("bench character");
             let (ptx, prx) = mpsc::unbounded_channel();
-            let entity = world.join(account.id, character.id, ptx).expect("bench join");
+            let entity = world.join(account.id, character.id, ptx, false).expect("bench join");
             player_rx.push((entity, prx));
         }
 
@@ -9607,6 +9753,72 @@ pub mod bench {
             world.market.len()
         );
         println!("econ: goals {goals}");
+
+        // Economy health: is every stage of the loop (mine -> refine/build ->
+        // research -> vendor/market, fueled by Energy) actually moving at
+        // this scale? Prints the numbers, then a single OK/ISSUES verdict.
+        let stats = world.ledger.stats(cfg.players as u32, world.agents_alive());
+        let resources_minted: u64 = wilder_economy::RESOURCES
+            .iter()
+            .map(|&k| stats.items.iter().find(|s| s.kind == k).map_or(0, |s| s.minted))
+            .sum();
+        let crafted: u64 = world.stats.actors.values().map(|a| a.crafted).sum();
+        let researched_agents = world
+            .agents
+            .iter()
+            .filter(|a| a.blueprints.len() > DEFAULT_BLUEPRINTS.len())
+            .count();
+        let vendor_consumables: u32 = world
+            .vendor_stock
+            .values()
+            .flat_map(|stock| stock.iter())
+            .filter(|s| matches!(s.kind, ItemKind::Ammo9mm | ItemKind::Medkit))
+            .map(|s| s.count)
+            .sum();
+        let wapes =
+            world.stats.factions.get(&FACTION_WAPES).cloned().unwrap_or_default();
+        println!(
+            "econ: gathered={resources_minted} crafted={crafted} research={} researched-agents={researched_agents}",
+            stats.blueprints_learned
+        );
+        println!(
+            "econ: energy minted={} burned={} | vendor consumable stock={vendor_consumables}",
+            stats.energy_minted, stats.energy_burned
+        );
+        println!(
+            "econ: deaths={} | wape kills={} wape deaths={}",
+            stats.deaths, wapes.kills, wapes.deaths
+        );
+        let mut issues: Vec<&str> = Vec::new();
+        if resources_minted == 0 {
+            issues.push("no node gathers (mining dead)");
+        }
+        if crafted == 0 {
+            issues.push("no production output (industry dead)");
+        }
+        if stats.blueprints_learned == 0 && researched_agents == 0 {
+            issues.push("no research activity");
+        }
+        if vendor_consumables == 0 {
+            issues.push("vendor consumable stock flatlined");
+        }
+        if fills == 0 {
+            issues.push("no market fills");
+        }
+        if stats.energy_minted == 0 {
+            issues.push("no Energy faucet activity");
+        }
+        if stats.energy_burned > stats.energy_minted.saturating_mul(10).max(100) {
+            issues.push("Energy burn dwarfs the faucet (industry will starve)");
+        }
+        if wapes.kills + wapes.deaths == 0 {
+            issues.push("Wapes never fought");
+        }
+        if issues.is_empty() {
+            println!("econ health: OK");
+        } else {
+            println!("econ health: {} ISSUE(S): {}", issues.len(), issues.join("; "));
+        }
     }
 }
 
@@ -10136,7 +10348,7 @@ mod tests {
         };
         world.store.create_character(&character).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let entity = world.join(account.id, character.id, tx).unwrap();
+        let entity = world.join(account.id, character.id, tx, false).unwrap();
         let player = &world.players[&entity];
         assert_eq!(player.character.faction, FACTION_WAPES);
         assert_eq!(player.spawn_data().faction, FACTION_WAPES);
@@ -10144,6 +10356,82 @@ mod tests {
             player_party(player),
             TxParty::Player { faction: FACTION_WAPES, .. }
         ));
+    }
+
+    #[test]
+    fn spectator_join_spawns_no_avatar_and_watch_agent_anchors_interest() {
+        let (mut world, _dir) = test_world();
+        // A regular embodied player standing at spawn.
+        let observer = insert_test_player(&mut world, SPAWN);
+
+        // Spectator joins through the real join path.
+        let account = world.store.create_account("watcher", "pw").unwrap();
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: account.id,
+            name: "WATCHER".into(),
+            appearance: Appearance::default(),
+            position: SPAWN,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.store.create_character(&character).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        std::mem::forget(_rx);
+        let spec = world.join(account.id, character.id, tx, true).unwrap();
+        assert!(world.players[&spec].spectator);
+
+        // Movement input from a spectator is dropped at the message layer.
+        world.handle_msg(
+            spec,
+            C2S::MoveInput { seq: 1, dx: 1.0, dz: 0.0, yaw: 0.0, run: false },
+        );
+        assert!(world.players[&spec].pending_inputs.is_empty());
+
+        // The spectator is never replicated to anyone (no avatar entity),
+        // and can't be damaged.
+        world.update_interest();
+        world.replicate();
+        assert!(world.players[&observer].known_entities.contains(&observer));
+        assert!(!world.players[&observer].known_entities.contains(&spec));
+        assert!(!world.players[&spec].known_entities.contains(&spec));
+        assert!(!world.deal_damage(observer, spec, 10.0, None));
+
+        // Watching a NON-owned agent is refused and sets no anchor.
+        let far = SPAWN + Vec3::new(800.0, 0.0, 0.0);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), far);
+        let agent_id = world.agents[idx].agent_id;
+        world.handle_msg(spec, C2S::WatchAgent { agent_id: Some(agent_id) });
+        assert_eq!(world.players[&spec].watch_anchor, None);
+
+        // Owned: the anchor sets and chunk interest re-centers on the agent.
+        world.agents[idx].owner = Some(character.id);
+        world.owned_agents.entry(character.id).or_default().push(idx);
+        world.handle_msg(spec, C2S::WatchAgent { agent_id: Some(agent_id) });
+        assert_eq!(world.players[&spec].watch_anchor, Some(idx));
+        world.update_interest();
+        let agent_chunk = ChunkCoord::from_world(far);
+        assert!(world.players[&spec].view.contains(&agent_chunk));
+        assert!(!world.players[&spec].view.contains(&ChunkCoord::from_world(SPAWN)));
+
+        // The watched agent is pinned Hot and replicates to the spectator.
+        world.tick_agents();
+        assert_eq!(world.agents[idx].tier, Tier::Hot);
+        world.replicate();
+        let agent_entity = world.agents[idx].entity;
+        assert!(world.players[&spec].known_entities.contains(&agent_entity));
+
+        // Clearing the anchor falls back to the character's last position.
+        world.handle_msg(spec, C2S::WatchAgent { agent_id: None });
+        assert_eq!(world.players[&spec].watch_anchor, None);
+        world.update_interest();
+        assert!(world.players[&spec].view.contains(&ChunkCoord::from_world(SPAWN)));
     }
 
     #[test]
@@ -10226,8 +10514,10 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
-            agent_sub: false,
-            agent_detail: None,
+                agent_sub: false,
+                agent_detail: None,
+                spectator: false,
+                watch_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -10812,8 +11102,10 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
-            agent_sub: false,
-            agent_detail: None,
+                agent_sub: false,
+                agent_detail: None,
+                spectator: false,
+                watch_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -10996,8 +11288,10 @@ mod tests {
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
-            agent_sub: false,
-            agent_detail: None,
+                agent_sub: false,
+                agent_detail: None,
+                spectator: false,
+                watch_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },

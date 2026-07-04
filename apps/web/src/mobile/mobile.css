@@ -449,6 +449,238 @@ body,
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Watch tab: transparent overlay above the live 3D canvas (follow camera).
+   The HUD never blocks the canvas — pointer events only on interactive bits;
+   the gesture layer underneath owns the orbit/zoom touches.
+--------------------------------------------------------------------------- */
+
+.m-watch {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Empty state (nothing to watch): opaque like the other tabs. */
+.m-watch-solid {
+  background: #05060a;
+}
+
+.m-watch-gesture {
+  position: absolute;
+  inset: 0;
+  /* Own every touch: no browser panning/zooming while orbiting. */
+  touch-action: none;
+}
+
+.m-watch-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 5, 10, 0.45);
+  pointer-events: none;
+}
+
+.m-watch-veil-text {
+  font: 800 15px/1 var(--font-display);
+  letter-spacing: 0.34em;
+  color: var(--accent);
+  text-shadow: 0 0 16px var(--accent-dim);
+  animation: m-watch-veil-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes m-watch-veil-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.m-watch-hud {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  pointer-events: none;
+}
+
+/* --- Top card: watched agent vitals ---------------------------------------- */
+
+.m-watch-card {
+  align-self: flex-start;
+  min-width: 220px;
+  max-width: 78%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  background: rgba(4, 10, 18, 0.78);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.m-watch-card-note {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+.m-watch-card-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.m-watch-mild {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+  white-space: nowrap;
+}
+
+.m-watch-activity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+/* --- Bottom stack: agent switcher chips + live action ticker --------------- */
+
+.m-watch-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m-watch-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  pointer-events: auto;
+  /* Horizontal pan scrolls the strip; taps hit the chips. */
+  touch-action: pan-x;
+  padding: 2px;
+}
+
+.m-watch-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.m-watch-chip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 44px;
+  min-width: 96px;
+  padding: 8px 12px;
+  background: rgba(4, 10, 18, 0.78);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font-family: var(--font-display);
+  text-align: left;
+  cursor: pointer;
+}
+
+.m-watch-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.m-watch-chip-name {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+.m-watch-chip-hp {
+  display: block;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--steel-border);
+  overflow: hidden;
+}
+
+.m-watch-chip-hp-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #1f7fc4, var(--accent));
+  transition: width 0.25s;
+}
+
+.m-watch-chip-hp-fill.low {
+  background: linear-gradient(90deg, #7a2530, var(--alert));
+}
+
+.m-watch-ticker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.m-watch-ticker-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  background: rgba(4, 10, 18, 0.7);
+  border-left: 2px solid var(--accent-dim);
+  font-size: 11px;
+  animation: m-watch-ticker-in 0.25s ease-out;
+}
+
+@keyframes m-watch-ticker-in {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.m-watch-ticker-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.m-watch-ticker-age {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 /* --- Hire offers in the sheet ---------------------------------------------------- */
 
 .m-ag-offer {

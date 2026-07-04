@@ -17,6 +17,7 @@ import {
   playZoneLost,
 } from "../assets/audio";
 import { interiorRegistry } from "../game/interiors";
+import { isMobile } from "../mobile/useIsMobile";
 import {
   applyTerritory,
   MY_FACTION,
@@ -147,7 +148,12 @@ export class GameConnection {
     switch (msg.t) {
       case "AuthResult": {
         if (msg.d.ok) {
-          this.send({ t: "JoinWorld", d: { character_id: this.characterId } });
+          // The mobile shell joins as a spectator: no avatar is embodied,
+          // the Watch tab's follow camera anchors interest via WatchAgent.
+          this.send({
+            t: "JoinWorld",
+            d: { character_id: this.characterId, spectate: isMobile() },
+          });
         } else {
           ui.set({ lastError: msg.d.error ?? "auth failed" });
         }

@@ -11,6 +11,7 @@ import { Chunks } from "./Chunks";
 import { CityProxy } from "./CityProxy";
 import { CombatFx } from "./CombatFx";
 import { Entities } from "./Entities";
+import { FollowCamera } from "./FollowCamera";
 import { Interiors } from "./Interior";
 import { Ocean } from "./Ocean";
 import { PlayerInput } from "./PlayerInput";
@@ -86,8 +87,11 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         <Interiors />
         <Entities />
         <CombatFx />
-        <CameraRig />
-        <PlayerInput connection={connection} />
+        {/* Mobile joins as a spectator: no local avatar exists, so the
+            desktop rig (pointer lock, player follow) and the input sender
+            are replaced by the Watch tab's agent follow camera. */}
+        {mobile ? <FollowCamera /> : <CameraRig />}
+        {!mobile && <PlayerInput connection={connection} />}
         {!mobile && <Effects />}
       </SunsetAtmosphere>
     </Canvas>

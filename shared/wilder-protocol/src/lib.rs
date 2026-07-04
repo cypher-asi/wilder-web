@@ -19,8 +19,15 @@ pub const REGION_CHUNKS: i32 = 2;
 pub enum C2S {
     /// Bind this connection to a session (token from HTTP login).
     Authenticate { token: String },
-    /// Spawn a character into the world (must be authenticated).
-    JoinWorld { character_id: CharacterId },
+    /// Spawn a character into the world (must be authenticated). With
+    /// `spectate` the character is loaded as usual (wallet, subscriptions,
+    /// `WorldJoined` reply) but no avatar entity is embodied in the world:
+    /// nothing to see, kill or collide with. Used by the mobile shell.
+    JoinWorld {
+        character_id: CharacterId,
+        #[serde(default)]
+        spectate: bool,
+    },
     /// Direct movement input (WASD). `(dx, dz)` is a normalized XZ direction in
     /// world space; `yaw` is the facing (twin-stick aim), which may differ from
     /// the move direction (strafe/backpedal).
@@ -84,6 +91,12 @@ pub enum C2S {
     /// `AgentDetail` and re-pushes ~1 Hz; `None` unsubscribes. Watching an
     /// agent you don't own answers with an `AgentResult` error.
     AgentDetailSub { agent_id: Option<AgentId> },
+    /// Follow one OWNED agent with the 3D camera (mobile Watch tab). `Some`
+    /// anchors this connection's interest (chunk streaming + entity
+    /// replication) on the agent's position and pins the agent to the Hot
+    /// tier; `None` clears the anchor. Watching an agent you don't own
+    /// answers with an `AgentResult` error.
+    WatchAgent { agent_id: Option<AgentId> },
     Chat { text: String },
     Pong { nonce: u32 },
 }
@@ -425,6 +438,10 @@ fn is_one_u16(v: &u16) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
     pub agent_id: AgentId,
+    /// Live replicated entity id of this agent's body (fresh per respawn).
+    /// Lets the Watch tab's follow camera look the entity up directly.
+    #[serde(default)]
+    pub entity_id: EntityId,
     pub name: String,
     pub faction: FactionId,
     pub guild: String,

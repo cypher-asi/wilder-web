@@ -23,14 +23,9 @@ export function App() {
 
   switch (screen) {
     case "boot":
-      return (
-        <div className="screen">
-          <div className="panel">
-            <h1 className="logo">WILDER</h1>
-            <p className="tagline">jacking in...</p>
-          </div>
-        </div>
-      );
+      // Plain black through boot; the game then fades in from the same black
+      // via <JoinVeil /> once the world is ready. No loading/branding flash.
+      return <div style={{ position: "fixed", inset: 0, background: "#05060a" }} />;
     case "login":
       return <Login />;
     case "characters":

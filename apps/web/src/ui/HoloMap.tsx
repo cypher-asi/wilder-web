@@ -24,7 +24,7 @@ import {
   getCityMapManifest,
   onCityMapReady,
 } from "../game/citymap";
-import { POI_STYLES } from "../game/poi";
+import { POI_STYLES, LEGEND_CATEGORIES, CATEGORY_COLOR, type LegendCategory } from "../game/poi";
 import { allRegions, REGION_SIZE } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import {
@@ -1351,66 +1351,78 @@ function ZoneLabels() {
   );
 }
 
-/** DOM legend panel: what every marker on the map means. */
+/** A single legend entry. `icon` is SVG path data (POIs); `glyph` is a literal
+ *  character rendered in the badge (zones/markers without an icon path). */
+interface LegendEntry {
+  category: LegendCategory;
+  label: string;
+  desc: string;
+  icon?: string;
+  glyph?: string;
+}
+
+/** Non-POI markers (zones, extraction, ammo) folded into the same categories. */
+const STATIC_LEGEND_ENTRIES: LegendEntry[] = [
+  { category: "LOGISTICS", label: "EXTRACTION", desc: "Channel to bank loot", glyph: "◆" },
+  { category: "COMBAT", label: "AMMO CACHE", desc: "Free 9mm rounds", glyph: "●" },
+  { category: "SAFE", label: "SAFE ZONE", desc: "No hostiles, health regen", glyph: "▢" },
+  { category: "DANGER", label: "ENEMY TERRITORY", desc: "25% tax on gather & extract", glyph: "▣" },
+];
+
+/** DOM legend panel: markers grouped by function under colored category headers. */
 function MapLegend() {
   const pois = useGame((s) => s.pois);
   // Only list building kinds that actually exist in the world.
   const kinds = [...new Set(pois.map((p) => p.kind))];
+  const entries: LegendEntry[] = [
+    ...kinds.flatMap((kind) => {
+      const style = POI_STYLES[kind];
+      return style
+        ? [{ category: style.category, label: style.label, desc: style.desc, icon: style.icon }]
+        : [];
+    }),
+    ...STATIC_LEGEND_ENTRIES,
+  ];
+
   return (
     <div className="map-legend">
       <div className="map-legend-title">LEGEND</div>
-      {kinds.map((kind) => {
-        const style = POI_STYLES[kind];
-        if (!style) return null;
+      {LEGEND_CATEGORIES.map((cat) => {
+        const rows = entries.filter((e) => e.category === cat.id);
+        if (rows.length === 0) return null;
+        const color = CATEGORY_COLOR[cat.id];
         return (
-          <div key={kind} className="map-legend-row" title={style.desc}>
-            <span className="map-legend-badge" style={{ borderColor: style.color, color: style.color }}>
-              <svg
-                viewBox="0 0 24 24"
-                width="11"
-                height="11"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d={style.icon} />
-              </svg>
-            </span>
-            <span className="map-legend-label">{style.label}</span>
-            <span className="map-legend-desc">{style.desc}</span>
+          <div key={cat.id} className="map-legend-group">
+            <div className="map-legend-group-title" style={{ color }}>
+              {cat.label}
+            </div>
+            {rows.map((entry) => (
+              <div key={entry.label} className="map-legend-row" title={entry.desc}>
+                <span className="map-legend-badge" style={{ borderColor: color, color }}>
+                  {entry.icon ? (
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="11"
+                      height="11"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d={entry.icon} />
+                    </svg>
+                  ) : (
+                    entry.glyph
+                  )}
+                </span>
+                <span className="map-legend-label">{entry.label}</span>
+                <span className="map-legend-desc">{entry.desc}</span>
+              </div>
+            ))}
           </div>
         );
       })}
-      <div className="map-legend-row">
-        <span className="map-legend-badge" style={{ borderColor: "#ffcf55", color: "#ffcf55" }}>
-          ◆
-        </span>
-        <span className="map-legend-label">EXTRACTION</span>
-        <span className="map-legend-desc">Channel to bank loot</span>
-      </div>
-      <div className="map-legend-row">
-        <span className="map-legend-badge" style={{ borderColor: "#ffbe28", color: "#ffbe28" }}>
-          ●
-        </span>
-        <span className="map-legend-label">AMMO CACHE</span>
-        <span className="map-legend-desc">Free 9mm rounds</span>
-      </div>
-      <div className="map-legend-row">
-        <span className="map-legend-badge" style={{ borderColor: "#29d98c", color: "#29d98c" }}>
-          ▢
-        </span>
-        <span className="map-legend-label">SAFE ZONE</span>
-        <span className="map-legend-desc">No hostiles, health regen</span>
-      </div>
-      <div className="map-legend-row">
-        <span className="map-legend-badge" style={{ borderColor: "#ff4d5e", color: "#ff4d5e" }}>
-          ▣
-        </span>
-        <span className="map-legend-label">ENEMY TERRITORY</span>
-        <span className="map-legend-desc">25% tax on gather & extract</span>
-      </div>
     </div>
   );
 }

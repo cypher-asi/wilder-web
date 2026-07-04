@@ -2193,6 +2193,23 @@ body {
   text-shadow: var(--hud-glow);
 }
 
+.map-legend-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.map-legend-group + .map-legend-group {
+  margin-top: 6px;
+}
+
+.map-legend-group-title {
+  font: 800 9px/1 var(--font-display);
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
 .map-legend-row {
   display: flex;
   align-items: center;
@@ -3622,6 +3639,7 @@ body {
 /* Territory standings: full-width row under the board + guild columns. */
 .econ-lb-zones {
   grid-column: 1 / -1;
+  border: none;
 }
 
 /* Two columns inside the territory panel: owners list + live squares grid. */
@@ -3640,11 +3658,10 @@ body {
 }
 
 .econ-lb-terr-subhead {
-  font-size: 9px;
+  font-size: 12px;
   letter-spacing: 0.16em;
   color: var(--text-dim);
   padding: 4px 6px;
-  border-bottom: 1px solid var(--steel-border);
 }
 
 .econ-lb-terr-grid {
@@ -3669,7 +3686,6 @@ body {
 
 .econ-lb-zone {
   padding: 6px 6px 8px;
-  border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
 .econ-lb-zone-head {
@@ -3682,12 +3698,12 @@ body {
 
 .econ-lb-zone-name {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 15px;
   letter-spacing: 0.04em;
 }
 
 .econ-lb-zone-owner {
-  font-size: 9px;
+  font-size: 12px;
   letter-spacing: 0.16em;
   font-variant-numeric: tabular-nums;
 }

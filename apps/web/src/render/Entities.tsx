@@ -303,7 +303,7 @@ function applyMannequinPalette(
     m.opacity = 1;
     if (f.joints) {
       if (tron) {
-        // Joints carry the faction tint so Forum reads red and Wapes amber
+        // Joints carry the faction tint so Forum reads red and Wapes violet
         // through and through (no teal interior on hostile bodies).
         m.color.set(0x04080c);
         m.emissive.set(tint || (hostile ? RED_NUM : 0x4fd0e0));
@@ -729,7 +729,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 
   // Glowing silhouette border: faction color for agents and wild Wapes
   // (NPCs), blue for players. Enemy-red now comes from the Forum faction tint
-  // itself, so Wapes read amber rather than a generic hostile red.
+  // itself, so Wapes read violet rather than a generic hostile red.
   useEffect(() => {
     if (!model) return;
     const color =
@@ -1322,11 +1322,11 @@ function signTexture(kind: EntityKind): { tex: THREE.CanvasTexture; aspect: numb
   const pad = 14;
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
-  ctx.font = "700 40px Rajdhani, system-ui, sans-serif";
+  ctx.font = "700 40px dDin, system-ui, sans-serif";
   const tw = Math.ceil(ctx.measureText(style.label).width);
   canvas.width = tw + pad * 2;
   canvas.height = 64;
-  ctx.font = "700 40px Rajdhani, system-ui, sans-serif";
+  ctx.font = "700 40px dDin, system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "rgba(5, 10, 18, 0.55)";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1369,7 +1369,7 @@ function shopSignMaterial(kind: EntityKind): { mat: THREE.MeshBasicMaterial; asp
   if (entry) return entry;
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
-  const font = "700 54px Rajdhani, system-ui, sans-serif";
+  const font = "700 54px dDin, system-ui, sans-serif";
   const applyFont = () => {
     ctx.font = font;
     ctx.letterSpacing = "5px";
@@ -1881,7 +1881,7 @@ function AgentNameplate({ entity }: { entity: GameEntity }) {
             ref={label}
             style={{
               color,
-              font: "600 11px/1.1 'Rajdhani', 'Segoe UI', sans-serif",
+              font: "600 11px/1.1 'dDin', 'Segoe UI', sans-serif",
               letterSpacing: "0.08em",
               textShadow: "0 0 4px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.9)",
               whiteSpace: "nowrap",

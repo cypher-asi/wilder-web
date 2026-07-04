@@ -233,7 +233,7 @@ class DamageNumberPool {
     const { ctx } = e;
     const text = String(Math.round(damage));
     ctx.clearRect(0, 0, DMG_CANVAS_W, DMG_CANVAS_H);
-    ctx.font = "800 26px Orbitron, 'Segoe UI', system-ui, sans-serif";
+    ctx.font = "800 26px dDin, 'Segoe UI', system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     // Two passes to match the CSS text-shadow: dark drop + red glow.

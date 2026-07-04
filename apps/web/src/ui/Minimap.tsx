@@ -199,7 +199,7 @@ export function Minimap() {
       }
 
       // Controlled territory: translucent cells in the holding faction's
-      // registry color (Rebels blue, Forum red, Wapes amber). Allied ground
+      // registry color (Rebels blue, Forum red, Wapes violet). Allied ground
       // renders too — fainter, so hostile cells still pop — which keeps the
       // map honest against the leaderboard's territory counts.
       for (const { rx, rz, faction } of allRegions()) {
@@ -231,7 +231,7 @@ export function Minimap() {
           ctx.fill();
         } else if (entity.kind === "Npc" || entity.kind === "Agent") {
           // Faction blip: agents and wild Wapes both use their faction tint
-          // (Rebels blue, Forum red, Wapes amber).
+          // (Rebels blue, Forum red, Wapes violet).
           const color =
             entity.tint > 0
               ? `#${entity.tint.toString(16).padStart(6, "0")}`
@@ -305,7 +305,7 @@ export function Minimap() {
 
       // North marker.
       ctx.fillStyle = "rgba(234, 247, 255, 0.85)";
-      ctx.font = "700 10px Rajdhani, system-ui, sans-serif";
+      ctx.font = "700 10px dDin, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("N", SIZE / 2, 13);
     };

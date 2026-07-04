@@ -1,3 +1,21 @@
+/* dDin: the single self-hosted font wilderworld.com uses for all text.
+   Only 400 and 700 ship; heavier weights fall back to faux-bold on 700. */
+@font-face {
+  font-family: "dDin";
+  src: url("/fonts/ddin.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "dDin";
+  src: url("/fonts/ddin-bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #04060b;
   /* Translucent holo panel: layered glass over the world. */
@@ -57,8 +75,8 @@
     transparent 2px,
     transparent 6px
   );
-  --font-display: "Orbitron", "Segoe UI", system-ui, sans-serif;
-  --font-body: "Rajdhani", "Segoe UI", system-ui, sans-serif;
+  --font-display: "dDin", "Segoe UI", system-ui, sans-serif;
+  --font-body: "dDin", "Segoe UI", system-ui, sans-serif;
   /* Static RGB-split for title text (subtle chromatic aberration). */
   --rgb-split:
     -1px 0 rgba(255, 70, 70, 0.5),
@@ -3344,8 +3362,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.14em;
   color: #eaf6ff;
-  background: rgba(79, 195, 255, 0.12);
-  border: 1px solid rgba(79, 195, 255, 0.4);
+  background: transparent;
   text-shadow: 0 0 10px rgba(79, 195, 255, 0.55);
   animation: bsod-glitch 0.7s steps(1) 1 both;
 }

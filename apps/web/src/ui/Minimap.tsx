@@ -1,6 +1,6 @@
 // Corner minimap (top-right): a live north-up crop of the city tile grid
-// centered on the player, with entity blips (NPCs, players, extraction
-// points) and the safe-zone outline. Click (or M) opens the fullscreen map.
+// centered on the player, with entity blips (NPCs, players, service
+// buildings) and the safe-zone outline. Click (or M) opens the fullscreen map.
 //
 // The base layer is drawn from the raw tile grid (not the baked image):
 // dark streets with buildings as glowing outlined shapes, holo-map style.
@@ -33,9 +33,9 @@ import { game, useGame } from "../state/game";
 import { RED_HEX } from "./colors";
 
 /** Canvas size in CSS px (square panel with notched corners). */
-const SIZE = 230;
+const SIZE = 276;
 /** Screen px per world meter. */
-const SCALE = 1.35;
+const SCALE = 1.62;
 /** Extra px margin around the view in the cached base layer. */
 const PAD = 28;
 const BSIZE = SIZE + PAD * 2;
@@ -232,16 +232,7 @@ export function Minimap() {
         if (entity.id === game.localEntityId) continue;
         const [sx, sy] = toScreen(entity.x, entity.z);
         if (sx < -8 || sy < -8 || sx > SIZE + 8 || sy > SIZE + 8) continue;
-        if (entity.kind === "ExtractionPoint") {
-          ctx.fillStyle = "#ffffff";
-          ctx.beginPath();
-          ctx.moveTo(sx, sy - 5);
-          ctx.lineTo(sx + 5, sy);
-          ctx.lineTo(sx, sy + 5);
-          ctx.lineTo(sx - 5, sy);
-          ctx.closePath();
-          ctx.fill();
-        } else if (entity.kind === "Npc" || entity.kind === "Agent") {
+        if (entity.kind === "Npc" || entity.kind === "Agent") {
           // Faction blip: agents and wild Wapes both use their faction tint
           // (Rebels blue, Forum red, Wapes violet).
           const color =

@@ -139,9 +139,6 @@ pub enum S2C {
     /// Authoritative ability state for the receiving player (on use + join).
     AbilityUpdate { ability: AbilityKind, cooldown: f32, active: f32 },
     Died { by: Option<String>, lost_items: bool },
-    ExtractStart { seconds: f32 },
-    ExtractCancel,
-    ExtractResult { success: bool, banked: Vec<ItemStack> },
     /// Everything a pickup/gather actually added to the backpack. `denied` is
     /// set when nothing fit (drives the "Backpack full" toast + deny sound).
     GatherResult {

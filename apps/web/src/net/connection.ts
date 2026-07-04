@@ -504,7 +504,6 @@ export class GameConnection {
           .filter((s): s is import("./protocol").ItemStack => s !== null)
           .map((s) => ({ kind: s.kind, count: s.count }));
         ui.set({
-          extracting: null,
           death: {
             by: msg.d.by,
             lostItems,
@@ -519,28 +518,6 @@ export class GameConnection {
           text: `You died${msg.d.by ? ` to ${msg.d.by}` : ""}.${msg.d.lost_items ? " Your carried items were dropped." : ""}`,
           system: true,
         });
-        break;
-      }
-      case "ExtractStart": {
-        ui.set({ extracting: { seconds: msg.d.seconds, startedAt: performance.now() } });
-        break;
-      }
-      case "ExtractCancel": {
-        ui.set({ extracting: null });
-        ui.pushChat({ from: "system", text: "Extraction cancelled.", system: true });
-        break;
-      }
-      case "ExtractResult": {
-        ui.set({ extracting: null });
-        if (msg.d.success) {
-          void playSfx("sfx_pickup", 0.5);
-          const total = msg.d.banked.reduce((n, s) => n + s.count, 0);
-          ui.pushChat({
-            from: "system",
-            text: `Extraction successful. ${total} item(s) banked to your stash.`,
-            system: true,
-          });
-        }
         break;
       }
       case "GatherResult": {

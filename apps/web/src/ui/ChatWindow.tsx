@@ -27,7 +27,6 @@ const MOCK_STATUS: { text: string; tone: "good" | "bad" | "info" }[] = [
   { text: "Shield fully recharged.", tone: "good" },
   { text: "Level up! You are now level 3.", tone: "info" },
   { text: "Left Safe Zone — hostiles ahead.", tone: "bad" },
-  { text: "Extraction point available 120m NE.", tone: "info" },
 ];
 
 export function ChatWindow({ connection }: { connection: GameConnection }) {

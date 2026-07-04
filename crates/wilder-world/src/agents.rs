@@ -65,10 +65,6 @@ pub const TURN_RATE: f32 = std::f32::consts::TAU;
 pub const RUN_HOLD: f32 = 0.25;
 /// Agents notice dropped loot within this range when re-scoring goals.
 pub const LOOT_SCAN_RANGE: f32 = 60.0;
-/// Minimum haul value (reference MILD) before an extraction run appeals.
-pub const EXTRACT_MIN_HAUL: u32 = 60;
-/// Agents only consider extraction beacons within this range.
-pub const EXTRACT_SEEK_RANGE: f32 = 250.0;
 
 /// Activity classes an agent learns payoffs over. There are no fixed roles:
 /// every agent carries a payoff estimate per class and specializes toward
@@ -230,7 +226,7 @@ pub fn activity_of(goal: Goal) -> Activity {
             Activity::Fight
         }
         Goal::Capture { .. } | Goal::Defend { .. } => Activity::Capture,
-        Goal::Sell { .. } | Goal::Loot { .. } | Goal::Extract { .. } => Activity::Haul,
+        Goal::Sell { .. } | Goal::Loot { .. } => Activity::Haul,
     }
 }
 
@@ -272,8 +268,6 @@ pub enum Goal {
     Retreat { to: Vec3 },
     /// Walk to a dropped loot container and grab its contents.
     Loot { container: EntityId, pos: Vec3 },
-    /// Channel at an extraction point to ship carried goods off-map.
-    Extract { point_pos: Vec3, timer: f32 },
 }
 
 impl Goal {
@@ -292,7 +286,6 @@ impl Goal {
             Goal::Defend { to, .. } => Some(*to),
             Goal::Retreat { to } => Some(*to),
             Goal::Loot { pos, .. } => Some(*pos),
-            Goal::Extract { point_pos, .. } => Some(*point_pos),
         }
     }
 }
@@ -390,8 +383,8 @@ pub fn base_value(kind: ItemKind) -> u32 {
     }
 }
 
-/// Personal kit an agent hangs onto when extracting: weapons, ammo and meds
-/// keep it combat-effective; everything else is cargo.
+/// Personal kit an agent hangs onto: weapons, ammo and meds keep it
+/// combat-effective; everything else is sellable cargo.
 pub fn is_kit(kind: ItemKind) -> bool {
     matches!(
         kind,
@@ -963,23 +956,6 @@ impl FactionAgent {
                     AgentEvent::Act
                 }
             }
-            Goal::Extract { point_pos, timer } => {
-                if self.move_toward(world, point_pos, 1.5, dt, hot) > 2.5 {
-                    return AgentEvent::None;
-                }
-                // Channeling on the pad, same discipline as players: stand
-                // still and wait out the timer.
-                self.anim = AnimState::Gather;
-                let next = timer - dt;
-                if let Goal::Extract { timer, .. } = &mut self.goal {
-                    *timer = next;
-                }
-                if next <= 0.0 {
-                    AgentEvent::Act // world banks the haul and re-goals
-                } else {
-                    AgentEvent::None
-                }
-            }
             Goal::Retreat { to } => {
                 if self.move_toward(world, to, 4.0, dt, hot) > 8.0 {
                     return AgentEvent::None;
@@ -1164,32 +1140,6 @@ mod tests {
         // Timer fired well short of the store: ask for a fresh decision so
         // live congestion can reroute the errand instead of locking it in.
         assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::NeedsGoal);
-    }
-
-    #[test]
-    fn extract_goal_channels_then_acts() {
-        struct Open;
-        impl CollisionWorld for Open {
-            fn walkable(&self, _: f32, _: f32) -> bool {
-                true
-            }
-        }
-        let mut a = sample_agent();
-        a.position = Vec3::new(10.0, 0.0, 10.0);
-        a.goal = Goal::Extract { point_pos: Vec3::new(11.0, 0.0, 10.0), timer: 3.0 };
-        a.decision_timer = 100.0;
-        // First slices walk + channel; the timer must run down before Act.
-        let mut ticks_to_act = 0;
-        loop {
-            ticks_to_act += 1;
-            match a.tick(&Open, 1.0, false, None) {
-                AgentEvent::Act => break,
-                _ if ticks_to_act > 20 => panic!("extract never completed"),
-                _ => {}
-            }
-        }
-        assert!(ticks_to_act >= 3, "channel should take at least the timer");
-        assert_eq!(a.anim, AnimState::Gather, "channeling shows a working pose");
     }
 
     #[test]

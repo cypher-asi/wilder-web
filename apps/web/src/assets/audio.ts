@@ -303,6 +303,59 @@ export function playAmmo(volume = 0.6) {
 }
 
 /**
+ * Hollow metallic "click-clack" for pulling the trigger on an empty chamber:
+ * a sharp high-passed noise transient (the firing pin / hammer snap) plus a
+ * short muted tonal knock, with no low-end body so it reads unmistakably as a
+ * dry fire rather than a shot. Deliberately dry and hollow — the audible cue
+ * that you're out of ammo. Fully synthesized.
+ */
+export function playDryFire(volume = 0.5) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  // Two fast snaps: hammer fall then the mechanism catching — "click-clack".
+  const snaps = [
+    { at: 0, hp: 3200, dur: 0.03, knob: 520 },
+    { at: 0.045, hp: 4200, dur: 0.025, knob: 720 },
+  ];
+  for (const s of snaps) {
+    const start = t0 + s.at;
+    // High-passed noise transient: bright, thin, no thump — the pin snap.
+    const src = ctx.createBufferSource();
+    src.buffer = getNoiseBuffer(ctx);
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = s.hp;
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(volume, start); // hard attack, no ramp
+    nGain.gain.exponentialRampToValueAtTime(0.001, start + s.dur);
+    src.connect(hp).connect(nGain).connect(ctx.destination);
+    src.start(start);
+    src.stop(start + s.dur + 0.02);
+    src.onended = () => {
+      src.disconnect();
+      hp.disconnect();
+      nGain.disconnect();
+    };
+    // Muted tonal knock gives the click a tiny bit of pitched body.
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(s.knob, start);
+    osc.frequency.exponentialRampToValueAtTime(s.knob * 0.5, start + 0.02);
+    const oGain = ctx.createGain();
+    oGain.gain.setValueAtTime(volume * 0.4, start);
+    oGain.gain.exponentialRampToValueAtTime(0.001, start + 0.03);
+    osc.connect(oGain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + 0.05);
+    osc.onended = () => {
+      osc.disconnect();
+      oGain.disconnect();
+    };
+  }
+}
+
+/**
  * Soft muffled "thunk" for grabbing a physical item (resources, materials,
  * gear). A short triangle pluck dropping in pitch — distinct from the coin
  * chime (currency) and the cartridge clack (ammo).

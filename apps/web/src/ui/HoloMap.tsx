@@ -368,7 +368,6 @@ function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapF
       {filters.danger && <DangerLayer />}
       <SafeZoneOutline />
       <PlayerMarker view={view} />
-      <ExtractionMarkers view={view} />
       <AmmoMarkers view={view} />
       {filters.pois && <PoiMarkers view={view} />}
       <BlipLayer filters={filters} />
@@ -821,50 +820,6 @@ function PlayerMarker({ view }: { view: RefObject<HoloView> }) {
           opacity={0.8}
         />
       </mesh>
-    </group>
-  );
-}
-
-/** Amber diamonds on every replicated extraction point. */
-function ExtractionMarkers({ view }: { view: RefObject<HoloView> }) {
-  const [points, setPoints] = useState<{ id: number; x: number; z: number }[]>([]);
-  useEffect(() => {
-    const poll = () => {
-      const next: { id: number; x: number; z: number }[] = [];
-      for (const e of game.entities.values()) {
-        if (e.kind === "ExtractionPoint") next.push({ id: e.id, x: e.x, z: e.z });
-      }
-      setPoints((prev) =>
-        prev.length === next.length && prev.every((p, i) => p.id === next[i].id)
-          ? prev
-          : next,
-      );
-    };
-    poll();
-    const timer = setInterval(poll, 500);
-    return () => clearInterval(timer);
-  }, []);
-  const group = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    const g = group.current;
-    if (!g) return;
-    const s = Math.min(Math.max(5, view.current.sDist * 0.011), 45);
-    const pulse = 1 + 0.15 * Math.sin(clock.elapsedTime * 3);
-    for (const child of g.children) child.scale.setScalar(s * pulse);
-  });
-  return (
-    <group ref={group}>
-      {points.map((p) => (
-        <mesh key={p.id} position={[p.x, 8, p.z]}>
-          <octahedronGeometry args={[1]} />
-          <meshBasicMaterial
-            color={new THREE.Color(2.2, 1.6, 0.35)}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
-            transparent
-          />
-        </mesh>
-      ))}
     </group>
   );
 }
@@ -1372,7 +1327,11 @@ function PoiMarkers({ view }: { view: RefObject<HoloView> }) {
 
 const zoneLabelCache = new Map<string, THREE.Sprite>();
 
-/** Always-visible dim labels naming the resource zones around the hub. */
+/** Full-brightness opacity a zone label fades toward once it has screen room. */
+const ZONE_LABEL_OPACITY = 0.75;
+
+/** Dim labels naming the resource zones; faded in only when zoomed close
+ *  enough that they no longer overlap (see ZoneLabels). */
 function makeZoneLabelSprite(name: string): THREE.Sprite {
   let sprite = zoneLabelCache.get(name);
   if (sprite) return sprite;
@@ -1396,7 +1355,8 @@ function makeZoneLabelSprite(name: string): THREE.Sprite {
     transparent: true,
     depthTest: false,
     sizeAttenuation: false,
-    opacity: 0.75,
+    // Driven per-frame by ZoneLabels' overlap-aware fade.
+    opacity: 0,
   });
   sprite = new THREE.Sprite(mat);
   const k = 0.02;
@@ -1406,10 +1366,64 @@ function makeZoneLabelSprite(name: string): THREE.Sprite {
   return sprite;
 }
 
+/** Scratch NDC vector reused each frame (no per-frame allocation). */
+const zoneLabelProj = new THREE.Vector3();
+
 function ZoneLabels() {
   const zones = useGame((s) => s.zones);
+  const group = useRef<THREE.Group>(null);
+  // The labels are a fixed screen size, so the only thing that changes with
+  // zoom is how far apart their anchors project. Fade them all together based
+  // on the tightest pair: hidden while any two overlap, revealed once the
+  // closest pair clears by a small breathing margin.
+  useFrame(({ camera, size }) => {
+    const g = group.current;
+    if (!g) return;
+    const proj = camera.projectionMatrix.elements;
+    type Box = { x: number; y: number; hw: number; hh: number; on: boolean };
+    const boxes: Box[] = [];
+    for (const child of g.children) {
+      const sprite = child as THREE.Sprite;
+      zoneLabelProj.copy(sprite.position).project(camera);
+      const on = zoneLabelProj.z < 1; // in front of the camera
+      // Fixed on-screen footprint from the non-attenuated sprite scale.
+      const hw = (sprite.scale.x * proj[0] * 0.5 * size.width) / 2;
+      const hh = (sprite.scale.y * proj[5] * 0.5 * size.height) / 2;
+      boxes.push({
+        x: ((zoneLabelProj.x + 1) / 2) * size.width,
+        y: ((1 - zoneLabelProj.y) / 2) * size.height,
+        hw,
+        hh,
+        on,
+      });
+    }
+    // Smallest normalized separation across all visible pairs: <1 means the
+    // pair's boxes overlap on one axis.
+    let tightest = Infinity;
+    for (let i = 0; i < boxes.length; i++) {
+      const a = boxes[i];
+      if (!a.on) continue;
+      for (let j = i + 1; j < boxes.length; j++) {
+        const b = boxes[j];
+        if (!b.on) continue;
+        const sepX = Math.abs(a.x - b.x) / (a.hw + b.hw);
+        const sepY = Math.abs(a.y - b.y) / (a.hh + b.hh);
+        // A pair is only overlapping when it collides on BOTH axes; use the
+        // looser axis so labels stacked in a column still count as clear.
+        tightest = Math.min(tightest, Math.max(sepX, sepY));
+      }
+    }
+    // 1.0 = boxes just touching; require ~1.15 of breathing room before full.
+    const factor = THREE.MathUtils.smoothstep(tightest, 1, 1.15);
+    const target = factor * ZONE_LABEL_OPACITY;
+    for (const child of g.children) {
+      const m = (child as THREE.Sprite).material as THREE.SpriteMaterial;
+      m.opacity += (target - m.opacity) * 0.2;
+      child.visible = m.opacity > 0.01;
+    }
+  });
   return (
-    <group>
+    <group ref={group}>
       {zones.map((z) => (
         <primitive
           key={z.kind}
@@ -1432,12 +1446,11 @@ interface LegendEntry {
   glyph?: string;
 }
 
-/** Non-POI markers (zones, extraction, ammo) folded into the same categories. */
+/** Non-POI markers (zones, ammo) folded into the same categories. */
 const STATIC_LEGEND_ENTRIES: LegendEntry[] = [
-  { category: "LOGISTICS", label: "EXTRACTION", desc: "Channel to bank loot", glyph: "◆" },
   { category: "COMBAT", label: "AMMO CACHE", desc: "Free 9mm rounds", glyph: "●" },
   { category: "SAFE", label: "SAFE ZONE", desc: "No hostiles, health regen", glyph: "▢" },
-  { category: "DANGER", label: "ENEMY TERRITORY", desc: "25% tax on gather & extract", glyph: "▣" },
+  { category: "DANGER", label: "ENEMY TERRITORY", desc: "25% tax on gather", glyph: "▣" },
 ];
 
 /** DOM legend panel: markers grouped by function under colored category headers. */

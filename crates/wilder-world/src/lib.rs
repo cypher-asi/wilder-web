@@ -73,11 +73,9 @@ const HUB_STAGE_REBELS: Vec3 = Vec3::new(180.0, 0.0, 180.0);
 const HUB_STAGE_FORUM: Vec3 = Vec3::new(-180.0, 0.0, -180.0);
 /// Version stamp for the seeded agent distribution. Bump when the seeding
 /// layout changes so persisted worlds discard the old population and reseed.
-const AGENT_SEED_LAYOUT: u32 = 2;
+const AGENT_SEED_LAYOUT: u32 = 3;
 /// Chunks with |x|<=SAFE_RADIUS and |z|<=SAFE_RADIUS are the safe hub.
 const SAFE_RADIUS: i32 = 1;
-/// Seconds an extraction channel takes.
-const EXTRACT_SECONDS: f32 = 5.0;
 /// Congestion model for service routing (Bodega/Armory/craft stations).
 /// A storefront comfortably serves this many agents at once; each peer
 /// already committed there past that softens its appeal, so a cohort splits
@@ -189,7 +187,6 @@ const TIMING_LOG_TICKS: u64 = 600;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TickPhase {
     Movement,
-    Extraction,
     Npcs,
     Agents,
     Separation,
@@ -206,11 +203,10 @@ enum TickPhase {
 }
 
 impl TickPhase {
-    const COUNT: usize = 15;
+    const COUNT: usize = 14;
 
     const ALL: [TickPhase; TickPhase::COUNT] = [
         TickPhase::Movement,
-        TickPhase::Extraction,
         TickPhase::Npcs,
         TickPhase::Agents,
         TickPhase::Separation,
@@ -229,7 +225,6 @@ impl TickPhase {
     fn name(self) -> &'static str {
         match self {
             TickPhase::Movement => "movement",
-            TickPhase::Extraction => "extraction",
             TickPhase::Npcs => "npcs",
             TickPhase::Agents => "agents",
             TickPhase::Separation => "separation",
@@ -392,14 +387,16 @@ fn capture_pivotality(mine: u32, enemy: u32) -> f32 {
 
 /// Marginal value of one more friendly body holding a region we DO hold.
 /// Empty-but-held ground persists (no defense needed); ground with enemies
-/// on it flips the moment our last body leaves, so thin defenses score high.
+/// on it flips the moment our last body leaves, so thin defenses score high
+/// — and higher than walk-in claims of equal-value ground, because a flip
+/// loses income we already collect.
 fn defend_pivotality(mine: u32, enemy: u32) -> f32 {
     if enemy == 0 {
         0.0
     } else if mine == 0 {
-        1.2 // about to flip: most urgent territory play there is
+        1.5 // about to flip: most urgent territory play there is
     } else {
-        0.9 / mine as f32
+        1.2 / mine as f32
     }
 }
 
@@ -908,8 +905,6 @@ struct Player {
     stim_speed_time: f32,
     /// Overcharge: weapon damage multiplier seconds left.
     overcharge_time: f32,
-    /// Active extraction channel: (extraction point entity, seconds left).
-    extracting: Option<(EntityId, f32)>,
     /// Known blueprint recipe ids.
     blueprints: HashSet<String>,
     /// Production queues per building entity (personal queues, Phase 3).
@@ -1512,7 +1507,6 @@ impl World {
             stim_heal_left: 0.0,
             stim_speed_time: 0.0,
             overcharge_time: 0.0,
-            extracting: None,
             blueprints,
             production: HashMap::new(),
             wallet,
@@ -1604,14 +1598,12 @@ impl World {
             C2S::MoveInput { seq, dx, dz, yaw, run } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.path.clear();
-                    player.extracting = None;
                     player.pending_inputs.push((seq, dx, dz, yaw, run, TICK_DT));
                 }
             }
             C2S::MoveTo { seq, x, z } => {
                 let Some(player) = self.players.get_mut(&entity) else { return };
                 player.last_input_seq = player.last_input_seq.max(seq);
-                player.extracting = None;
                 let from = player.character.position;
                 match find_path(&self.chunks.nav(), from, Vec3::new(x, 0.0, z)) {
                     Some(path) => player.path = path,
@@ -1640,7 +1632,6 @@ impl World {
                         return;
                     }
                     player.path.clear();
-                    player.extracting = None;
                     player.crouching = false;
                     player.roll_time = ROLL_DURATION;
                     player.roll_dir = (dx / len, dz / len);
@@ -2380,7 +2371,7 @@ impl World {
             return;
         }
 
-        // Static entity (extraction point / stash terminal)?
+        // Static entity (stash terminal / service building)?
         let Some(static_entity) = self.statics.get(&target) else { return };
         let kind = static_entity.kind;
         let pos = static_entity.position;
@@ -2399,11 +2390,6 @@ impl World {
             return;
         }
         match kind {
-            EntityKind::ExtractionPoint => {
-                player.path.clear();
-                player.extracting = Some((target, EXTRACT_SECONDS));
-                let _ = player.tx.send(S2C::ExtractStart { seconds: EXTRACT_SECONDS });
-            }
             EntityKind::Building => {
                 // Stash terminal: just push current stash state (opens the UI).
                 let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
@@ -3722,7 +3708,6 @@ impl World {
         let step_start = Instant::now();
 
         self.timed(TickPhase::Movement, |w| w.apply_movement());
-        self.timed(TickPhase::Extraction, |w| w.tick_extraction());
         self.timed(TickPhase::Npcs, |w| w.tick_npcs());
         self.timed(TickPhase::Agents, |w| w.tick_agents());
         self.timed(TickPhase::Separation, |w| w.separate_characters());
@@ -4011,83 +3996,6 @@ impl World {
         }
     }
 
-    fn tick_extraction(&mut self) {
-        let mut completed: Vec<EntityId> = Vec::new();
-        for player in self.players.values_mut() {
-            let Some((point, remaining)) = player.extracting.as_mut() else { continue };
-            // Cancel if the player wandered off.
-            let point_pos = self.statics.get(point).map(|s| s.position);
-            let near = point_pos
-                .map(|p| (p - player.character.position).length() < 4.0)
-                .unwrap_or(false);
-            if !near || player.moved_this_tick {
-                player.extracting = None;
-                let _ = player.tx.send(S2C::ExtractCancel);
-                continue;
-            }
-            *remaining -= TICK_DT;
-            if *remaining <= 0.0 {
-                completed.push(player.entity);
-            }
-        }
-        for entity in completed {
-            // Extracting from hostile-held territory forfeits part of the haul.
-            let taxed = self
-                .players
-                .get(&entity)
-                .map(|p| self.region_hostile_to(p.character.position, FACTION_REBELS))
-                .unwrap_or(false);
-            let Some(player) = self.players.get_mut(&entity) else { continue };
-            player.extracting = None;
-            let extractor = player_party(player);
-            // Bank everything carried into the stash.
-            let mut banked: Vec<ItemStack> = Vec::new();
-            for slot in player.inventory.slots.iter_mut() {
-                if let Some(stack) = slot.take() {
-                    let bankable = apply_territory_tax(stack.count, taxed);
-                    // The territory tax seizes (burns) part of the haul.
-                    if stack.count > bankable {
-                        self.ledger.record(
-                            TxKind::Burn,
-                            extractor.clone(),
-                            TxParty::Burn,
-                            TxAmount::Item { kind: stack.kind, count: stack.count - bankable },
-                            0,
-                        );
-                    }
-                    let rem = inv::add_items(&mut player.stash.slots, stack.kind, bankable);
-                    let banked_count = bankable - rem;
-                    if banked_count > 0 {
-                        banked.push(ItemStack { kind: stack.kind, count: banked_count });
-                        // Extraction is a self-transfer: backpack -> stash.
-                        self.ledger.record(
-                            TxKind::Extract,
-                            extractor.clone(),
-                            extractor.clone(),
-                            TxAmount::Item { kind: stack.kind, count: banked_count },
-                            0,
-                        );
-                    }
-                    if rem > 0 {
-                        *slot = Some(ItemStack { kind: stack.kind, count: rem });
-                    }
-                }
-            }
-            // Return to the hub.
-            player.character.position = SPAWN;
-            player.character.health = player.character.max_health;
-            player.character.shield = player.character.max_shield;
-            player.path.clear();
-            player.dirty = true;
-            let _ = player.tx.send(S2C::ExtractResult { success: true, banked });
-            let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-            let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
-            self.persist_player_entity(entity);
-            // A completed extraction charges the runner's Energy reserve.
-            self.grant_energy(entity, 5);
-        }
-    }
-
     /// Positions of every Safehouse building (a handful at most).
     fn safehouse_positions(&self) -> Vec<Vec3> {
         self.statics
@@ -4232,7 +4140,6 @@ impl World {
         }
         self.ledger.deaths += 1;
         // Equipped gear survives (jacket stays on your back).
-        player.extracting = None;
         player.path.clear();
         player.character.health = player.character.max_health;
         player.character.shield = player.character.max_shield;
@@ -4779,7 +4686,9 @@ impl World {
         let position = self.walkable_spot_near(spot, 12.0);
         let (agent_id, name) = mint_agent_name(faction);
         let old_entity = self.agents[idx].entity;
-        // The dead identity leaves the boards; its faction/guild legacy stays.
+        // The dead identity leaves the boards; its faction/guild legacy stays
+        // — and so do its learned traits (death already charged the fatal
+        // activity in kill_agent), so agents grow and evolve across lives.
         self.stats.retire(self.agents[idx].agent_id);
         let entity = self.alloc_entity();
         {
@@ -4803,21 +4712,26 @@ impl World {
         self.agent_by_entity.insert(entity, idx);
         // Alive again at the staging ground: back into the spatial grid.
         self.regrid_agent(idx);
-        // Fresh identities start with a modest grubstake and role kit.
+        // Fresh identities start with a modest grubstake and a kit that
+        // follows the learned disposition.
         self.grubstake_agent(idx);
     }
 
-    /// Mint a starting wallet + role kit to an agent (seed or respawn).
+    /// Mint a starting wallet + kit to an agent (seed or respawn). The kit
+    /// follows the agent's learned disposition: proven fighters come back
+    /// armed, proven crafters come back with inputs.
     fn grubstake_agent(&mut self, idx: usize) {
         use rand::Rng;
         let wallet = self.rng.random_range(40..120u32);
-        let role = self.agents[idx].role;
-        let kit: &[(ItemKind, u32)] = match role {
-            Role::Scavenger => &[],
-            Role::Trader => &[],
-            Role::Crafter => &[(ItemKind::Iron, 8), (ItemKind::Copper, 6)],
-            Role::Enforcer => &[(ItemKind::Pipe, 1), (ItemKind::Medkit, 1)],
-            Role::Raider => &[(ItemKind::Knife, 1)],
+        let traits = self.agents[idx].traits;
+        let kit: &[(ItemKind, u32)] = if traits.mult(Activity::Fight) >= 1.2
+            || traits.mult(Activity::Capture) >= 1.2
+        {
+            &[(ItemKind::Pipe, 1), (ItemKind::Medkit, 1)]
+        } else if traits.mult(Activity::Craft) >= 1.2 {
+            &[(ItemKind::Iron, 8), (ItemKind::Copper, 6)]
+        } else {
+            &[]
         };
         let party = self.agents[idx].party();
         self.agents[idx].wallet += wallet;
@@ -4977,7 +4891,7 @@ impl World {
     /// does emerges from what it has seen pay off on the ground it's on.
     fn decide_agent(&mut self, idx: usize) {
         use rand::Rng;
-        let (pos, traits, faction, health_frac, wallet, carried, haul, entity, retreat_cd) = {
+        let (pos, traits, faction, health_frac, wallet, carried, entity, retreat_cd) = {
             let a = &self.agents[idx];
             (
                 a.position,
@@ -4986,7 +4900,6 @@ impl World {
                 a.health / a.max_health,
                 a.wallet,
                 a.carried_value(),
-                a.haul_value(),
                 a.entity,
                 a.retreat_cooldown,
             )
@@ -5025,16 +4938,18 @@ impl World {
             .sum::<f32>()
             / total.max(1) as f32;
         let danger_mult = if danger_here == DangerLevel::Warzone { 1.5 } else { 1.0 };
-        let gather_mult = match role {
-            Role::Scavenger => 1.6,
-            Role::Raider => 1.0,
-            Role::Crafter => 0.8,
-            Role::Trader => 0.4,
-            Role::Enforcer => 0.2,
+        // Enemy-held ground taxes the yield; the scorer prices that in
+        // (execution already applies the tax) so gathering naturally drifts
+        // onto friendly or free ground — another reason to want territory.
+        let tax_mult = if self.region_hostile_to(pos, faction) {
+            1.0 - TERRITORY_TAX_PCT as f32 / 100.0
+        } else {
+            1.0
         };
+        let gather_mult = traits.mult(Activity::Gather);
         let stacks = self.agents[idx].inventory.len();
         if stacks < agents::MAX_STACKS - 4 {
-            let score = ev * danger_mult * gather_mult * 2.0;
+            let score = ev * danger_mult * tax_mult * gather_mult * 2.0;
             if score > best.0 {
                 let spot = self.walkable_spot_near(pos, 30.0);
                 best = (
@@ -5052,12 +4967,9 @@ impl World {
         // march to the Bodega, sell nothing, and re-pick Sell forever — a
         // permanent statue crowd at the door. Destinations come from the
         // congestion-aware router so packed storefronts price themselves out.
-        let sell_mult = match role {
-            Role::Trader => 1.4,
-            Role::Scavenger => 1.2,
-            _ => 1.0,
-        };
-        let want_market = role == Role::Trader && self.market.len() < MARKET_BOOK_CAP;
+        let sell_mult = traits.mult(Activity::Haul);
+        let want_market =
+            traits.mult(Activity::Trade) >= 1.2 && self.market.len() < MARKET_BOOK_CAP;
         let sell_plan = if want_market {
             self.route_service(pos, EntityKind::MarketTerminal)
                 .map(|r| (true, market_list_value(&self.agents[idx]), r))
@@ -5081,11 +4993,7 @@ impl World {
         // Ammo caches (variant 1) are world spawns left for players; agents
         // only chase death drops. ---
         if stacks < agents::MAX_STACKS - 2 {
-            let loot_mult = match role {
-                Role::Scavenger => 1.5,
-                Role::Raider => 1.3,
-                _ => 0.9,
-            };
+            let loot_mult = traits.mult(Activity::Haul);
             let mut best_loot: Option<(f32, EntityId, Vec3)> = None;
             for c in self.loot.values() {
                 if c.variant != 0 {
@@ -5113,30 +5021,6 @@ impl World {
             }
         }
 
-        // --- Extract: ship a big haul off-map at an extraction beacon. Pays
-        // full reference value (better than vendor floor, taxed on hostile
-        // ground), so runners with heavy packs prefer a nearby beacon. ---
-        if haul >= agents::EXTRACT_MIN_HAUL {
-            if let Some((_, point_pos)) = self.nearest_service(pos, EntityKind::ExtractionPoint) {
-                let dist = (point_pos - pos).length();
-                if dist <= agents::EXTRACT_SEEK_RANGE {
-                    let extract_mult = match role {
-                        Role::Raider => 1.4,
-                        Role::Scavenger => 1.3,
-                        Role::Trader => 0.8,
-                        _ => 1.0,
-                    };
-                    // Weighted above Sell's 0.08/value: extraction pays full
-                    // reference value where vendors pay floor minus the cut.
-                    let score = haul as f32 * 0.15 * extract_mult
-                        * (1.0 - 0.5 * dist / agents::EXTRACT_SEEK_RANGE);
-                    if score > best.0 {
-                        best = (score, Goal::Extract { point_pos, timer: EXTRACT_SECONDS });
-                    }
-                }
-            }
-        }
-
         // --- BuyGear: arm up when the wallet allows ---
         let has_weapon = [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife]
             .iter()
@@ -5152,7 +5036,9 @@ impl World {
                 } else {
                     ItemKind::Pipe
                 };
-                let score = if role.is_combatant() { 40.0 } else { 15.0 } * appeal;
+                // Everyone needs a weapon (retaliation, defense); agents
+                // whose fighting has been paying want one much more.
+                let score = 15.0 * traits.mult(Activity::Fight).max(0.8) * appeal;
                 if score > best.0 {
                     best = (score, Goal::Buy { store, store_pos, kind, count: 1 });
                 }
@@ -5167,12 +5053,8 @@ impl World {
             }
         }
 
-        // --- Craft: best-margin recipe the agent can feed (Crafter bias) ---
-        let craft_mult = match role {
-            Role::Crafter => 2.0,
-            Role::Trader => 0.6,
-            _ => 0.3,
-        };
+        // --- Craft: best-margin recipe the agent can feed ---
+        let craft_mult = traits.mult(Activity::Craft);
         let mut best_recipe: Option<(&'static wilder_crafting::Recipe, f32)> = None;
         for recipe in wilder_crafting::RECIPES {
             if recipe.station == wilder_crafting::Station::Laboratory {
@@ -5214,9 +5096,9 @@ impl World {
                 }
             }
         }
-        // Crafters missing inputs restock off the market book when a fair
-        // listing exists.
-        if role == Role::Crafter && best_recipe.is_none() && wallet >= 30 {
+        // Craft-leaning agents missing inputs restock off the market book
+        // when a fair listing exists.
+        if traits.mult(Activity::Craft) >= 1.2 && best_recipe.is_none() && wallet >= 30 {
             let wanted = [ItemKind::Iron, ItemKind::Copper, ItemKind::Chemicals, ItemKind::Biomass];
             let listing = self.market.iter().find(|l| {
                 wanted.contains(&l.kind)
@@ -5242,8 +5124,9 @@ impl World {
             }
         }
 
-        // --- Trade: arbitrage underpriced listings (Trader role) ---
-        if role == Role::Trader && wallet >= 20 {
+        // --- Trade: arbitrage underpriced listings ---
+        if wallet >= 20 {
+            let trade_mult = traits.mult(Activity::Trade);
             let bargain = self.market.iter().any(|l| {
                 let market_ref = self.market_ref_price(l.kind);
                 l.price_each.saturating_mul(10) <= market_ref.saturating_mul(7)
@@ -5253,7 +5136,7 @@ impl World {
                 if let Some((_, terminal_pos)) =
                     self.nearest_service(pos, EntityKind::MarketTerminal)
                 {
-                    let score = 25.0;
+                    let score = 18.0 * trade_mult;
                     if score > best.0 {
                         best = (score, Goal::Trade { terminal_pos });
                     }
@@ -5261,26 +5144,110 @@ impl World {
             }
         }
 
-        // --- Patrol / Hunt: combat roles look for trouble ---
-        if role.is_combatant() && has_weapon {
-            let fight_mult = match role {
-                Role::Enforcer => 1.8,
-                Role::Raider => 1.5,
-                _ => 0.0,
-            };
-            // Nearest hostile the rules would let us hit right now.
+        // --- Fight: hunt a hostile the rules let us hit right now ---
+        // Any armed agent weighs this; the learned Fight weight and the
+        // local force balance (from field intel) decide whether trouble is
+        // worth it. Outgunned agents rationally pass; a strong local
+        // majority presses the advantage.
+        let my_region = region_of(pos);
+        let local = self.field_intel.get(&my_region).copied().unwrap_or_default();
+        let (_, local_enemies, my_str, enemy_str) = local.sides(faction);
+        let own_str = self.agents[idx].strength();
+        let advantage = if local_enemies == 0 {
+            0.5
+        } else {
+            (my_str + own_str) / (my_str + own_str + enemy_str).max(1.0)
+        };
+        if has_weapon {
+            let fight_mult = traits.mult(Activity::Fight);
             if let Some(target) = self.find_hostile_target(entity, pos, faction) {
-                let score = 50.0 * fight_mult;
+                let score = 30.0 * fight_mult * 2.0 * advantage;
                 if score > best.0 {
                     best = (score, Goal::Hunt { target });
                 }
-            } else {
-                // No target in sight: push toward the agent's assigned front.
-                let to = self.patrol_front(idx);
-                let score = 6.0 * fight_mult;
-                if score > best.0 {
-                    best = (score, Goal::Patrol { to });
+            }
+        }
+
+        // --- Capture / Defend: territory as a first-class goal ---
+        // Scan the local neighborhood (this region + 8 neighbors) and score
+        // each cell by observed worth x marginal impact of one more body
+        // (pivotality under the Halo capture rules) x survival odds. Nobody
+        // piles onto safely-held ground and nobody feeds a hopeless fight —
+        // that's the best-response core that makes front lines emerge.
+        {
+            let cap_mult = traits.mult(Activity::Capture);
+            let exposure = ((wallet + carried) as f32 / 500.0).min(1.0);
+            let mut best_play: Option<(f32, (i32, i32), bool)> = None;
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let r = (my_region.0 + dx, my_region.1 + dz);
+                    if region_is_protected(r) {
+                        continue;
+                    }
+                    let center = region_center(r);
+                    if !matches!(
+                        districts::danger_at(center),
+                        DangerLevel::Contested | DangerLevel::Warzone
+                    ) {
+                        continue; // sanctuary / guarded ground can't be taken
+                    }
+                    let cell = self.field_intel.get(&r).copied().unwrap_or_default();
+                    let (mine, enemy, my_s, enemy_s) = cell.sides(faction);
+                    // Fighting for ground with enemies on it needs a weapon.
+                    if enemy > 0 && !has_weapon {
+                        continue;
+                    }
+                    let defend = cell.controller == faction;
+                    let pivot = if defend {
+                        defend_pivotality(mine, enemy)
+                    } else {
+                        capture_pivotality(mine, enemy)
+                    };
+                    if pivot <= 0.0 {
+                        continue;
+                    }
+                    // Worth = base claim value + observed commerce flowing
+                    // through the cell (ground with storefronts matters).
+                    let value = 8.0 + (cell.income * 0.25).min(20.0);
+                    // Survival odds against the local force balance, and a
+                    // wealth-at-risk discount so rich haulers don't wander
+                    // into meat grinders.
+                    let safety = if enemy == 0 {
+                        1.0
+                    } else {
+                        (my_s + own_str) / (my_s + own_str + enemy_s).max(1.0)
+                    };
+                    let risk = 1.0 - (1.0 - safety) * exposure * 0.8;
+                    let dist = (center - pos).length();
+                    let near = 1.0 / (1.0 + dist / 120.0);
+                    let score = value * pivot * cap_mult * safety * risk * near;
+                    if score > best_play.map(|(s, _, _)| s).unwrap_or(0.0) {
+                        best_play = Some((score, r, defend));
+                    }
                 }
+            }
+            if let Some((score, r, defend)) = best_play {
+                if score > best.0 {
+                    let side = REGION_CHUNKS as f32 * CHUNK_SIZE;
+                    let to = self.walkable_spot_near(region_center(r), side * 0.4);
+                    let goal = if defend {
+                        Goal::Defend { region: r, to }
+                    } else {
+                        Goal::Capture { region: r, to }
+                    };
+                    best = (score, goal);
+                }
+            }
+        }
+
+        // --- Patrol: armed agents with nothing better to do push toward a
+        // front, where the capture/fight opportunities actually are. ---
+        if has_weapon {
+            let fight_mult = traits.mult(Activity::Fight).max(traits.mult(Activity::Capture));
+            let to = self.patrol_front(idx);
+            let score = 4.0 * fight_mult;
+            if score > best.0 {
+                best = (score, Goal::Patrol { to });
             }
         }
 
@@ -5368,7 +5335,7 @@ impl World {
         fronts
     }
 
-    /// Patrol destination for a combat-role agent: a jittered spot at its
+    /// Patrol destination for a fight-leaning agent: a jittered spot at its
     /// assigned front. Hub-cohort agents (fixed `home_spot` inside the combat
     /// ring) always fight over the hub front so the war stays visible on the
     /// starter playfield. Everyone else hashes their identity — NOT home
@@ -5412,7 +5379,6 @@ impl World {
             Goal::Trade { .. } => self.agent_trade(idx),
             Goal::Craft { .. } => self.agent_craft_step(idx),
             Goal::Loot { container, .. } => self.agent_loot_pickup(idx, container),
-            Goal::Extract { .. } => self.agent_extract(idx),
             _ => {}
         }
     }
@@ -5443,51 +5409,10 @@ impl World {
             container.items = leftovers;
         }
         if !taken.is_empty() {
+            let value: u32 = taken.iter().map(|s| base_value(s.kind) * s.count).sum();
+            self.agents[idx].learn(Activity::Haul, value as f32);
             let picker = self.agents[idx].party();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
-        }
-    }
-
-    /// Complete an extraction channel: the agent's haul (everything but its
-    /// personal kit) ships off-map for full reference value in MILD. Items
-    /// burn from supply; the payout mints, taxed on hostile-held ground like
-    /// player extractions.
-    fn agent_extract(&mut self, idx: usize) {
-        self.agents[idx].goal = Goal::Idle;
-        let pos = self.agents[idx].position;
-        let taxed = self.region_hostile_to(pos, self.agents[idx].faction);
-        let cargo: Vec<ItemStack> = {
-            let inv = &mut self.agents[idx].inventory;
-            let cargo = inv.iter().filter(|s| !agents::is_kit(s.kind)).cloned().collect();
-            inv.retain(|s| agents::is_kit(s.kind));
-            cargo
-        };
-        if cargo.is_empty() {
-            return;
-        }
-        let party = self.agents[idx].party();
-        let mut payout: u32 = 0;
-        for stack in &cargo {
-            payout += base_value(stack.kind).saturating_mul(stack.count);
-            self.ledger.record_ex(
-                TxKind::Extract,
-                party.clone(),
-                TxParty::Burn,
-                TxAmount::Item { kind: stack.kind, count: stack.count },
-                0,
-                SupplyEffect::Burn,
-            );
-        }
-        let payout = apply_territory_tax(payout, taxed);
-        if payout > 0 {
-            self.agents[idx].wallet += payout;
-            self.ledger.record(
-                TxKind::Extract,
-                TxParty::Mint,
-                party,
-                TxAmount::Wild { amount: payout },
-                0,
-            );
         }
     }
 
@@ -5523,6 +5448,12 @@ impl World {
         );
         let gatherer = self.agent_actor_ref(idx);
         self.stats.add_resources(&gatherer, gained as u64);
+        // Learning: each pull is a completed unit of gathering work (travel
+        // included the first time); the clock restarts per pull so the rate
+        // reflects steady-state yield, not the whole trip averaged down.
+        let value = base_value(kind).saturating_mul(gained);
+        self.agents[idx].learn(Activity::Gather, value as f32);
+        self.agents[idx].goal_age = 0.0;
         if let Goal::Gather { pulls_left, .. } = &mut self.agents[idx].goal {
             *pulls_left = pulls_left.saturating_sub(1);
             if *pulls_left == 0 {
@@ -5883,7 +5814,12 @@ impl World {
             .max_by_key(|l| self.market_ref_price(l.kind).saturating_sub(l.price_each))
             .map(|l| (l.kind, l.price_each));
         let Some((kind, price_each)) = pick else { return };
+        let before = self.agents[idx].count_item(kind);
         if self.agent_market_buy(idx, kind, u32::MAX, price_each) {
+            // Learning: the arbitrage spread captured on this flip.
+            let got = self.agents[idx].count_item(kind).saturating_sub(before);
+            let spread = self.market_ref_price(kind).saturating_sub(price_each);
+            self.agents[idx].learn(Activity::Trade, (spread * got) as f32);
             // Immediately flip the goods back onto the book at a margin.
             self.agent_market_list(idx);
         }
@@ -5936,6 +5872,10 @@ impl World {
         );
         let crafter = self.agent_actor_ref(idx);
         self.stats.add_crafted(&crafter, count as u64);
+        // Learning: the craft's value-added margin over the whole errand.
+        let in_value: u32 = recipe.inputs.iter().map(|&(k, c)| base_value(k) * c).sum();
+        let out_value = base_value(kind).saturating_mul(count);
+        self.agents[idx].learn(Activity::Craft, out_value.saturating_sub(in_value) as f32);
         self.agents[idx].goal = Goal::Idle;
     }
 
@@ -6008,7 +5948,7 @@ impl World {
     /// inside the spawn hub's combat ring (Rebels south-east, Forum
     /// north-west) so the faction war plays out on the starter playfield
     /// players actually see. The rest split by faction geography (Rebels
-    /// southern districts, Forum northern), spread across roles.
+    /// southern districts, Forum northern), with randomized trait priors.
     /// Deterministic from the world seed.
     fn seed_agents(&mut self, total: usize) {
         use rand::Rng;
@@ -6048,15 +5988,9 @@ impl World {
             } else {
                 home_pool[seed_rng.random_range(0..home_pool.len())]
             };
-            // Role split: 40% Scavenger, 15% Trader, 15% Crafter,
-            // 20% Enforcer, 10% Raider.
-            let role = match seed_rng.random_range(0..100u32) {
-                0..40 => Role::Scavenger,
-                40..55 => Role::Trader,
-                55..70 => Role::Crafter,
-                70..90 => Role::Enforcer,
-                _ => Role::Raider,
-            };
+            // No fixed roles: mild random trait priors start the population
+            // diverse, then realized payoffs drive specialization.
+            let traits = Traits::seeded(&mut seed_rng);
             let (agent_id, name) = mint_agent_name(faction);
             // Hub cohort stages just outside the protected 3x3, factions on
             // opposite corners of the ring; district agents stage at their
@@ -6095,7 +6029,7 @@ impl World {
                     name,
                     faction,
                     guild: guild_for(faction, home),
-                    role,
+                    traits,
                     home,
                     home_spot,
                     wallet: 0,
@@ -6800,13 +6734,11 @@ impl World {
         }
     }
 
-    /// Every persistent service building, for the map/legend UI. Extraction
-    /// points are excluded: they seed lazily and replicate like entities.
+    /// Every persistent service building, for the map/legend UI.
     fn poi_list(&self) -> Vec<PoiInfo> {
         let mut pois: Vec<PoiInfo> = self
             .statics
             .values()
-            .filter(|s| s.kind != EntityKind::ExtractionPoint)
             .map(|s| PoiInfo {
                 id: s.entity,
                 kind: s.kind,
@@ -6844,8 +6776,8 @@ impl World {
                 self.npcs.insert(entity, npc);
             }
         }
-        // Static entities: extraction points (service buildings are seeded
-        // eagerly by `seed_district` at world start).
+        // Per-chunk world content: resource nodes and ammo caches (service
+        // buildings are seeded eagerly by `seed_district` at world start).
         if !self.static_seeded_chunks.contains(&coord) {
             self.static_seeded_chunks.insert(coord);
             // Resource nodes: roughly every other hostile chunk gets one,
@@ -6854,8 +6786,7 @@ impl World {
             if !is_safe_chunk(coord) && nh % 2 == 0 {
                 let chunk = self.chunks.get(coord);
                 let variant = wilder_economy::zone_resource_index(zone_of_chunk(coord), nh >> 8) as u32;
-                // Deterministic walkable spot (offset scan so nodes don't stack
-                // on the extraction beacon which scans from (2,2)).
+                // Deterministic walkable spot.
                 'node: for tz in (3..TILES_PER_CHUNK).step_by(2) {
                     for tx in (4..TILES_PER_CHUNK).step_by(2) {
                         if chunk.tile(tx, tz).walkable() {
@@ -6876,32 +6807,6 @@ impl World {
                                 },
                             );
                             break 'node;
-                        }
-                    }
-                }
-            }
-            let h = (coord.x.wrapping_mul(2654435761u32 as i32)
-                ^ coord.z.wrapping_mul(40503)) as u32;
-            if !is_safe_chunk(coord) && h % 5 == 0 {
-                // Find a walkable spot for the extraction beacon.
-                let chunk = self.chunks.get(coord);
-                'find: for tz in (2..TILES_PER_CHUNK).step_by(3) {
-                    for tx in (2..TILES_PER_CHUNK).step_by(3) {
-                        if chunk.tile(tx, tz).walkable() {
-                            let entity = self.alloc_entity();
-                            self.register_static(StaticEntity {
-                                entity,
-                                kind: EntityKind::ExtractionPoint,
-                                position: Vec3::new(
-                                    coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
-                                    0.0,
-                                    coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
-                                ),
-                                name: "Extraction Point".into(),
-                                variant: 0,
-                                agent_id: static_agent_id(self.seed, entity),
-                            });
-                            break 'find;
                         }
                     }
                 }
@@ -7660,7 +7565,7 @@ mod tests {
     fn spawn_test_agent(
         world: &mut World,
         faction: FactionId,
-        role: Role,
+        traits: Traits,
         position: Vec3,
     ) -> usize {
         let (agent_id, name) = mint_agent_name(faction);
@@ -7672,7 +7577,7 @@ mod tests {
                 name,
                 faction,
                 guild: guild_for(faction, 0),
-                role,
+                traits,
                 home: 0,
                 home_spot: None,
                 wallet: 100,
@@ -7761,28 +7666,28 @@ mod tests {
         let (mut world, _dir) = test_world();
         // Sanctuary ground blocks everything.
         let sanctuary = district_anchor("TRANQUILITY GARDENS");
-        let a1 = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, sanctuary);
-        let a2 = spawn_test_agent(&mut world, FACTION_FORUM, Role::Raider, sanctuary);
+        let a1 = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), sanctuary);
+        let a2 = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), sanctuary);
         let (e1, e2) = (world.agents[a1].entity, world.agents[a2].entity);
         assert!(!world.deal_damage(e1, e2, 10.0, None));
         assert_eq!(world.agents[a2].health, 100.0);
 
         // Contested ground: hostile factions trade damage freely.
         let contested = district_anchor("NEXUS");
-        let b1 = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, contested);
-        let b2 = spawn_test_agent(&mut world, FACTION_FORUM, Role::Raider, contested);
+        let b1 = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let b2 = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
         let (f1, f2) = (world.agents[b1].entity, world.agents[b2].entity);
         assert!(world.deal_damage(f1, f2, 10.0, None));
         assert_eq!(world.agents[b2].health, 90.0);
         // Same faction never fights, anywhere.
-        let b3 = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, contested);
+        let b3 = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
         let f3 = world.agents[b3].entity;
         assert!(!world.deal_damage(f1, f3, 10.0, None));
 
         // Guarded ground: only the home faction may aggress...
         let rebel_home = district_anchor("LITTLE MEOW");
-        let g1 = spawn_test_agent(&mut world, FACTION_REBELS, Role::Enforcer, rebel_home);
-        let g2 = spawn_test_agent(&mut world, FACTION_FORUM, Role::Raider, rebel_home);
+        let g1 = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), rebel_home);
+        let g2 = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), rebel_home);
         let (h1, h2) = (world.agents[g1].entity, world.agents[g2].entity);
         // Forum attacking a rebel on rebel home turf: blocked.
         assert!(!world.deal_damage(h2, h1, 10.0, None));
@@ -7796,11 +7701,11 @@ mod tests {
     fn overlapping_hot_agents_get_pushed_apart() {
         let (mut world, _dir) = test_world();
         let spot = world.nearest_walkable(district_anchor("NEXUS"));
-        let a = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, spot);
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), spot);
         let b = spawn_test_agent(
             &mut world,
             FACTION_FORUM,
-            Role::Raider,
+            Traits::fighter(),
             spot + Vec3::new(0.1, 0.0, 0.0),
         );
         world.agents[a].tier = Tier::Hot;
@@ -7818,7 +7723,7 @@ mod tests {
     fn separation_pushes_agents_out_of_players_but_never_moves_players() {
         let (mut world, _dir) = test_world();
         let spot = world.nearest_walkable(district_anchor("NEXUS"));
-        let a = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, spot);
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), spot);
         world.agents[a].tier = Tier::Hot;
         world.hot_agents.push(a as u32);
 
@@ -7866,7 +7771,6 @@ mod tests {
                 stim_heal_left: 0.0,
                 stim_speed_time: 0.0,
                 overcharge_time: 0.0,
-                extracting: None,
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
                 wallet: 0,
@@ -7893,7 +7797,7 @@ mod tests {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
         let contested = district_anchor("NEXUS");
-        let idx = spawn_test_agent(&mut world, FACTION_FORUM, Role::Scavenger, contested);
+        let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::gatherer(), contested);
         let old_id = world.agents[idx].agent_id;
         let old_entity = world.agents[idx].entity;
         world.kill_agent(idx, true);
@@ -7959,7 +7863,7 @@ mod tests {
             name,
             faction: FACTION_FORUM,
             guild: guild_for(FACTION_FORUM, 7),
-            role: Role::Enforcer,
+            traits: Traits::fighter(),
             home: 7, // NORTH STAR
             home_spot: None,
             wallet: 50,
@@ -8046,7 +7950,7 @@ mod tests {
         fronts.dedup_by(|a, b| (*a - *b).length() < 1.0);
         let mut per_front: Vec<[u32; 2]> = vec![[0, 0]; fronts.len()];
         for idx in 0..world.agents.len() {
-            if !world.agents[idx].role.is_combatant() {
+            if world.agents[idx].traits.mult(Activity::Fight) < 1.0 {
                 continue;
             }
             let dest = world.patrol_front(idx);
@@ -8196,7 +8100,6 @@ mod tests {
                 stim_heal_left: 0.0,
                 stim_speed_time: 0.0,
                 overcharge_time: 0.0,
-                extracting: None,
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
                 wallet: 0,
@@ -8264,7 +8167,7 @@ mod tests {
             variant: 0,
             agent_id: static_agent_id(world.seed, entity),
         });
-        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::hauler(), pos);
         // A valuable pack — but it's all personal kit, which the Bodega
         // (raw resources in, consumables out) pays nothing for. Under
         // carried-value scoring this agent walked to the counter, sold
@@ -8298,8 +8201,8 @@ mod tests {
         let front = world.nearest_walkable(HUB_FRONT_SPOT);
         assert_eq!(districts::danger_at(front), DangerLevel::Contested);
         for _ in 0..4 {
-            spawn_test_agent(&mut world, FACTION_REBELS, Role::Enforcer, front);
-            spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, front);
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), front);
+            spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), front);
         }
         let no_hot: HashSet<ChunkCoord> = HashSet::new();
         for _ in 0..300 {
@@ -8314,7 +8217,7 @@ mod tests {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
         let contested = district_anchor("NEXUS");
-        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, contested);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), contested);
         world.agents[idx].add_item(ItemKind::Iron, 20);
         let (store, _) = world.nearest_service(contested, EntityKind::Bodega).unwrap();
         let before = world.agents[idx].wallet;
@@ -8339,7 +8242,7 @@ mod tests {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
         let pos = district_anchor("NEXUS");
-        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), pos);
         // A juicy drop right next to the agent (well above the gather score).
         let drop_pos = pos + Vec3::new(3.0, 0.0, 0.0);
         world.spawn_loot(
@@ -8371,51 +8274,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_extraction_ships_haul_and_keeps_kit() {
-        let (mut world, _dir) = test_world();
-        world.seed_neighborhood_stores();
-        let pos = district_anchor("NEXUS");
-        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
-        // Heavy haul plus personal kit (the spawn Pipe stays too).
-        world.agents[idx].add_item(ItemKind::SteelPlate, 6); // 6 * 13 = 78
-        world.agents[idx].add_item(ItemKind::Medkit, 1);
-        assert!(world.agents[idx].haul_value() >= agents::EXTRACT_MIN_HAUL);
-        // Plant a beacon next door so extraction outscores hauling to a store.
-        let entity = world.alloc_entity();
-        world.register_static(StaticEntity {
-            entity,
-            kind: EntityKind::ExtractionPoint,
-            position: pos + Vec3::new(4.0, 0.0, 0.0),
-            name: "Extraction Point".into(),
-            variant: 0,
-            agent_id: static_agent_id(world.seed, entity),
-        });
-        world.decide_agent(idx);
-        assert!(
-            matches!(world.agents[idx].goal, Goal::Extract { .. }),
-            "heavy haul next to a beacon should extract, got {:?}",
-            world.agents[idx].goal
-        );
-        let wallet = world.agents[idx].wallet;
-        world.agent_extract(idx);
-        // Cargo shipped for full reference value; kit stays in the pack.
-        assert_eq!(world.agents[idx].wallet, wallet + 78);
-        assert_eq!(world.agents[idx].count_item(ItemKind::SteelPlate), 0);
-        assert_eq!(world.agents[idx].count_item(ItemKind::Pipe), 1);
-        assert_eq!(world.agents[idx].count_item(ItemKind::Medkit), 1);
-        // Nothing left to ship: a second channel is a no-op.
-        let wallet = world.agents[idx].wallet;
-        world.agent_extract(idx);
-        assert_eq!(world.agents[idx].wallet, wallet);
-    }
-
-    #[test]
     fn agents_trade_through_the_real_market_book() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
         let contested = district_anchor("NEXUS");
-        let seller = spawn_test_agent(&mut world, FACTION_REBELS, Role::Trader, contested);
-        let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Role::Crafter, contested);
+        let seller = spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), contested);
+        let buyer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), contested);
         world.agents[seller].add_item(ItemKind::Iron, 30);
         world.agent_market_list(seller);
         assert!(!world.market.is_empty(), "trader should have listed its haul");
@@ -8549,14 +8413,14 @@ mod tests {
         let region = region_of(contested);
 
         // First there wins: a single Forum agent claims the empty cell.
-        let forum = spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, contested);
+        let forum = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
         world.tick_territory();
         assert_eq!(world.territory.get(&region), Some(&FACTION_FORUM));
 
         // Rebels move in alongside Forum: a contested standoff does NOT flip
         // the cell, no matter how many pile in.
         for _ in 0..4 {
-            spawn_test_agent(&mut world, FACTION_REBELS, Role::Enforcer, contested);
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
         }
         world.tick_territory();
         assert_eq!(
@@ -8588,7 +8452,7 @@ mod tests {
     fn zone_clock_accrues_rolling_seconds() {
         let (mut world, _dir) = test_world();
         let contested = district_anchor("NEXUS");
-        spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, contested);
+        spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
         // Hold the cell across several territory ticks (each credits ~1 s).
         for _ in 0..5 {
             world.tick_territory();
@@ -8639,7 +8503,7 @@ mod tests {
         // Sanctuary never lights up, no matter who stands there.
         let sanctuary = district_anchor("TRANQUILITY GARDENS");
         for _ in 0..5 {
-            spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, sanctuary);
+            spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), sanctuary);
         }
         world.tick_territory();
         assert_eq!(world.territory.get(&region_of(sanctuary)), None);
@@ -8647,9 +8511,9 @@ mod tests {
         // Guarded home turf only ever lights up for its home faction, even
         // when hostiles outnumber the residents.
         let rebel_home = district_anchor("LITTLE MEOW");
-        spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, rebel_home);
+        spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), rebel_home);
         for _ in 0..6 {
-            spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, rebel_home);
+            spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), rebel_home);
         }
         world.tick_territory();
         assert_eq!(world.territory.get(&region_of(rebel_home)), Some(&FACTION_REBELS));
@@ -8660,8 +8524,8 @@ mod tests {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
         let contested = district_anchor("NEXUS");
-        let killer = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, contested);
-        let victim = spawn_test_agent(&mut world, FACTION_FORUM, Role::Scavenger, contested);
+        let killer = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let victim = spawn_test_agent(&mut world, FACTION_FORUM, Traits::gatherer(), contested);
         let (ke, ve) = (world.agents[killer].entity, world.agents[victim].entity);
         let killer_name = world.agents[killer].name.clone();
         let killer_guild = world.agents[killer].guild.clone();
@@ -8704,5 +8568,88 @@ mod tests {
         let cells: Vec<(i32, i32, FactionId)> =
             store.meta("territory").unwrap().unwrap_or_default();
         assert_eq!(cells, vec![(7, -3, FACTION_FORUM)]);
+    }
+
+    #[test]
+    fn pivotality_peaks_where_one_body_is_decisive() {
+        // Capture: the first body onto clean neutral ground flips it, so it
+        // is fully pivotal; friendlies piling on add less and less.
+        assert!(capture_pivotality(0, 0) > capture_pivotality(1, 0));
+        assert!(capture_pivotality(1, 0) > capture_pivotality(4, 0));
+        // Contested pushes stay worth joining, with diminishing returns.
+        assert!(capture_pivotality(0, 2) > capture_pivotality(3, 2));
+        // Defense: securely held ground (no enemies) needs nobody — Halo
+        // rules keep empty cells with their holder.
+        assert_eq!(defend_pivotality(0, 0), 0.0);
+        assert_eq!(defend_pivotality(3, 0), 0.0);
+        // A held cell with enemies on it and no defenders is about to flip:
+        // more urgent than a walk-in claim of fresh ground.
+        assert!(defend_pivotality(0, 2) > capture_pivotality(0, 0));
+        // Thin defenses beat stacked ones (marginal body matters more).
+        assert!(defend_pivotality(1, 2) > defend_pivotality(4, 2));
+    }
+
+    #[test]
+    fn territory_flips_credit_capture_learning() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::default(), contested);
+        let before = world.agents[idx].traits.payoff[Activity::Capture.index()];
+        // Sole presence on neutral contested ground claims the cell — and the
+        // flip must pay the body that did the claiming.
+        world.tick_territory();
+        assert_eq!(world.territory.get(&region_of(contested)), Some(&FACTION_REBELS));
+        let after = world.agents[idx].traits.payoff[Activity::Capture.index()];
+        assert!(after > before, "flip should credit Capture: {before} -> {after}");
+    }
+
+    #[test]
+    fn capture_leaning_agents_choose_territory_goals() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(
+            &mut world,
+            FACTION_REBELS,
+            Traits::leaning(Activity::Capture),
+            contested,
+        );
+        // Build field intel (also claims the agent's own cell); the scorer
+        // should then send a capture specialist at the neutral neighbors.
+        world.tick_territory();
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Capture { .. } | Goal::Defend { .. }),
+            "capture-leaning agent should play for territory, chose {:?}",
+            world.agents[idx].goal
+        );
+    }
+
+    #[test]
+    fn both_factions_take_ground_and_learning_stays_live() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.seed_agents(200);
+        let seeded: Vec<Traits> = world.agents.iter().map(|a| a.traits).collect();
+        // A minute of sim: the hub cohorts stage on opposite corners of the
+        // contested ring, so presence alone must plant both flags.
+        for _ in 0..1200 {
+            world.tick += 1;
+            world.ledger.set_tick(world.tick);
+            world.tick_agents();
+            world.tick_territory();
+        }
+        let holders: HashSet<FactionId> = world.territory.values().copied().collect();
+        assert!(holders.contains(&FACTION_REBELS), "rebels hold no ground");
+        assert!(holders.contains(&FACTION_FORUM), "forum holds no ground");
+        // Realized payoffs (gather pulls, flips, kills) must have moved
+        // somebody's estimates away from their seeded priors.
+        let moved = world
+            .agents
+            .iter()
+            .zip(&seeded)
+            .filter(|(a, s)| a.traits != **s)
+            .count();
+        assert!(moved > 0, "no agent learned anything in a minute of sim");
     }
 }

@@ -16,7 +16,7 @@ import {
   stepMoveSpeed,
   WALK_SPEED,
 } from "../game/collision";
-import { playSfx } from "../assets/audio";
+import { playSfx, playDryFire } from "../assets/audio";
 import { INTERACT_KINDS, openServicePanel } from "../game/interact";
 import { interiorRegistry } from "../game/interiors";
 import { GameConnection } from "../net/connection";
@@ -104,8 +104,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   const lastShotAt = useRef(0);
   /** Timestamp of the latest unconsumed click, for the shot buffer. */
   const pendingShotAt = useRef(-Infinity);
-  /** Throttle for the out-of-ammo click/warning. */
+  /** Throttle for the out-of-ammo chat warning. */
   const lastDryFireAt = useRef(0);
+  /** Throttle for the empty-chamber click SFX (paced at the fire rate). */
+  const lastDryClickAt = useRef(0);
   const raycaster = useRef(new THREE.Raycaster());
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
 
@@ -600,6 +602,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     // would look like hits silently not registering. Surface it loudly so
     // the player knows why nothing is firing.
     if (hasRangedWeapon() && ammoCount() === 0) {
+      // Hollow empty-chamber click on each trigger pull, paced at the weapon's
+      // fire rate so holding/spamming the trigger clicks like a real dry fire.
+      if (now - lastDryClickAt.current > equippedCooldown() * 1000) {
+        lastDryClickAt.current = now;
+        playDryFire(0.5);
+      }
       if (now - lastDryFireAt.current > 1000) {
         lastDryFireAt.current = now;
         useGame.getState().pushChat({

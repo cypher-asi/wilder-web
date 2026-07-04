@@ -151,7 +151,6 @@ export type EntityKind =
   | "Agent"
   | "LootContainer"
   | "CurrencyPickup"
-  | "ExtractionPoint"
   | "ResourceNode"
   | "Building"
   | "Refinery"
@@ -577,9 +576,6 @@ export type S2C =
       { ability: AbilityKind; cooldown: number; active: number }
     >
   | Tagged<"Died", { by: string | null; lost_items: boolean }>
-  | Tagged<"ExtractStart", { seconds: number }>
-  | TaggedUnit<"ExtractCancel">
-  | Tagged<"ExtractResult", { success: boolean; banked: ItemStack[] }>
   | Tagged<"GatherResult", { gained: ItemStack[]; denied: boolean }>
   | Tagged<
       "CraftResult",

@@ -162,9 +162,7 @@ class Client {
         this.events.push(msg);
         if (
           [
-            "ExtractStart",
-            "ExtractCancel",
-            "ExtractResult",
+            "StashUpdate",
             "Died",
             "Error",
             "Chat",
@@ -258,26 +256,23 @@ async function scenarioExtraction() {
   if (c.inventory.equipped_weapon !== "Pistol") throw new Error("pistol not equipped");
   log("PASS gear: pistol equipped, ammo", c.invCount("Ammo9mm"));
 
-  // 2. Find a hostile chunk with an extraction point by hopping chunk centers.
-  let extraction = null;
+  // 2. Find a hostile chunk with NPCs by hopping chunk centers.
+  let npcs = [];
   outer: for (let cx = 3; cx < 12; cx++) {
     for (let cz = 3; cz < 12; cz++) {
       c.tp(cx * 32 + 8, cz * 32 + 8);
       await sleep(700);
-      const points = c.findEntities("ExtractionPoint");
-      if (points.length) {
-        extraction = points[0];
-        log("found extraction point", extraction.id, "at", extraction.x.toFixed(1), extraction.z.toFixed(1));
+      npcs = c.findEntities("Npc");
+      if (npcs.length) {
+        log("found", npcs.length, "NPCs at chunk", cx, cz);
         break outer;
       }
     }
   }
-  if (!extraction) throw new Error("no extraction point found");
+  if (!npcs.length) throw new Error("no NPCs found in hostile chunks");
 
   // 3. Kill an NPC.
-  let npcs = c.findEntities("Npc");
   log("NPCs in view:", npcs.length);
-  if (!npcs.length) throw new Error("no NPCs near extraction chunk");
   const npc = npcs.reduce((a, b) =>
     Math.hypot(a.x - c.pos[0], a.z - c.pos[2]) < Math.hypot(b.x - c.pos[0], b.z - c.pos[2]) ? a : b,
   );
@@ -320,31 +315,40 @@ async function scenarioExtraction() {
   if (JSON.stringify(c.inventory.slots) === beforeSlots) throw new Error("inventory unchanged after loot");
   log("PASS loot: inventory changed after looting container");
 
-  // 5. Extract.
-  c.tp(extraction.x + 1, extraction.z);
-  await sleep(600);
-  c.interact(extraction.id);
-  await c.waitFor((m) => m.t === "ExtractStart", 4000, "ExtractStart");
-  log("extraction channeling for 5s (standing still)...");
-  const result = await c.waitFor(
-    (m) => m.t === "ExtractResult" || m.t === "ExtractCancel",
-    9000,
-    "ExtractResult",
-  );
-  if (result.t !== "ExtractResult" || !result.d.success) {
-    throw new Error("extraction did not complete: " + JSON.stringify(result));
+  // 5. Extract by putting loot into storage: find a stash terminal (Building),
+  // stand next to it, then deposit every carried slot.
+  let stash = null;
+  outer2: for (const [sx, sz] of [
+    [0, 0], [0, 1], [1, 0], [1, 1],
+    [-1, 0], [0, -1], [-1, -1], [1, -1], [-1, 1],
+  ]) {
+    c.tp(sx * 32 + 16, sz * 32 + 16);
+    await sleep(600);
+    const buildings = c.findEntities("Building");
+    if (buildings.length) {
+      stash = buildings[0];
+      log("found stash terminal", stash.id, "at", stash.x.toFixed(1), stash.z.toFixed(1));
+      break outer2;
+    }
   }
-  const banked = result.d.banked.reduce((n, s) => n + s.count, 0);
+  if (!stash) throw new Error("no stash terminal found");
+
+  c.tp(stash.x + 1, stash.z);
+  await sleep(500);
+  c.interact(stash.id);
+  await c.waitFor((m) => m.t === "StashUpdate", 4000, "StashUpdate");
+  const carriedBefore = c.inventory.slots.filter(Boolean).length;
+  for (let i = 0; i < c.inventory.slots.length; i++) {
+    if (c.inventory.slots[i]) {
+      c.send({ t: "InventoryAction", d: { t: "Deposit", d: { slot: i } } });
+      await sleep(150);
+    }
+  }
   await sleep(500);
   const carried = c.inventory.slots.filter(Boolean).length;
-  log(
-    `PASS extraction: banked ${banked} items, carried slots now ${carried}, position`,
-    c.pos.map((v) => v.toFixed(1)).join(","),
-  );
-  const [px, , pz] = c.pos;
-  if (Math.abs(px - 3) > 2 || Math.abs(pz - 3) > 2) throw new Error("not teleported to hub spawn");
-  if (!c.stash || !c.stash.some(Boolean)) throw new Error("stash empty after extraction");
-  log("PASS stash: stash has items after extraction");
+  if (!c.stash || !c.stash.some(Boolean)) throw new Error("stash empty after deposit");
+  if (carried >= carriedBefore) throw new Error("backpack not reduced after deposit");
+  log(`PASS storage: deposited loot to stash, carried slots ${carriedBefore} -> ${carried}`);
 
   // 6. Death drop: gear up again, get killed, verify items dropped.
   c.chat("/give iron 5");

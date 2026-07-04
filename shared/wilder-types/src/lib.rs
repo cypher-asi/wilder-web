@@ -356,7 +356,6 @@ pub enum EntityKind {
     /// Autonomous faction agent (replicated only while Hot / near players).
     Agent,
     LootContainer,
-    ExtractionPoint,
     ResourceNode,
     /// Loose currency dropped on death (coins/shards/energy). The `variant`
     /// field carries the currency type: 0 = MILD, 1 = Shards, 2 = Energy.

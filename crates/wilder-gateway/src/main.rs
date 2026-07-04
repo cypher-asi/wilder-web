@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use wilder_auth::AuthService;
 use wilder_persistence::RocksStore;
 use wilder_world::WorldHandle;
@@ -55,10 +55,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Static game assets (models, textures, audio, manifest).
     let assets_dir = std::env::var("WILDER_ASSETS").unwrap_or_else(|_| "assets".into());
-    let app = app
-        .nest_service("/assets", ServeDir::new(assets_dir))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    let mut app = app.nest_service("/assets", ServeDir::new(assets_dir));
+
+    // In production, serve the built web client (SPA) from the same origin so
+    // the client's relative /ws, /api and /assets URLs resolve without CORS or
+    // a separate proxy. Unmatched routes fall back to index.html for the SPA.
+    // Skipped in local dev, where Vite serves the client and proxies to us.
+    let web_dist = std::env::var("WILDER_WEB_DIST").unwrap_or_else(|_| "apps/web/dist".into());
+    if std::path::Path::new(&web_dist).is_dir() {
+        let index = format!("{web_dist}/index.html");
+        app = app
+            .fallback_service(ServeDir::new(&web_dist).not_found_service(ServeFile::new(index)));
+        tracing::info!("serving web client from {web_dist}");
+    }
+
+    let app = app.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("gateway listening on http://localhost:{port}");

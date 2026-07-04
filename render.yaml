@@ -1,0 +1,33 @@
+# Render Blueprint for Wilder.
+#
+# One stateful web service: the gateway serves HTTP + WebSocket + game assets
+# AND the built web client, all on one origin (the client uses relative /ws,
+# /api and /assets URLs, so same-origin is required).
+#
+# The world sim lives in-process and persists to embedded RocksDB on the
+# attached disk, so this service scales VERTICALLY only. Do not raise
+# numInstances above 1 — a second replica would run its own separate world.
+services:
+  - type: web
+    name: wilder
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Real-time 20 Hz sim wants a dedicated core. `standard` (1 CPU) is the
+    # minimum; `pro` (2 CPU / 4 GB) is the recommended launch size. Bump to
+    # `pro plus` / `pro max` as concurrent players and agent counts grow.
+    plan: pro
+    numInstances: 1
+    healthCheckPath: /api/health
+    disk:
+      name: wilder-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      # RocksDB world/account data — must live on the persistent disk.
+      - key: WILDER_DATA
+        value: /data/world
+      # Never expose the dev quick-login endpoint in production.
+      - key: WILDER_DEV
+        value: "0"
+      - key: RUST_LOG
+        value: info,wilder=info

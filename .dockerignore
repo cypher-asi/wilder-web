@@ -1,0 +1,18 @@
+# Rust build artifacts
+target/
+
+# Node
+node_modules/
+apps/web/node_modules/
+apps/web/dist/
+
+# Local world data / runtime state
+data/
+
+# Tooling scratch + screenshots (never needed in the image; assets/*.png are)
+tools/
+
+# VCS / editor
+.git/
+.vscode/
+.idea/

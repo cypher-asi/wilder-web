@@ -702,22 +702,6 @@ body {
   text-align: right;
 }
 
-.hud-pos {
-  width: 100%;
-  text-align: center;
-  white-space: nowrap;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  background: var(--panel);
-  backdrop-filter: blur(6px);
-  border: none;
-  clip-path: var(--clip-notch-sm);
-  padding: 3px 6px;
-  overflow: hidden;
-}
-
 .style-picker {
   pointer-events: auto;
   width: 100%;

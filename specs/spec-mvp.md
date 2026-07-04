@@ -12,8 +12,8 @@ context so early architecture decisions do not paint us into a corner.
 
 ## 1. Vision and pillars
 
-1. **Extraction loop first.** Spawn -> fight -> loot -> extract -> stash -> repeat.
-   The loop must be fun before any economy exists.
+1. **Extraction loop first.** Spawn -> fight -> loot -> extract (deposit loot into
+   storage) -> repeat. The loop must be fun before any economy exists.
 2. **Everything is player-built.** No random legendary drops. Breaches yield resources;
    refineries and factories turn resources into every weapon and tool in the game.
 3. **Authoritative server, always.** Never trust clients. The client renders and
@@ -34,7 +34,7 @@ committed** (statuses last updated 2026-07-02).
 |---|---|---|---|
 | 0 | Technical Foundation | One player logs in, creates a character, and walks a persistent high-fidelity city forever; relog restores position and world state. | [x] Done (`43d18f2`) |
 | 0.5 | Economy Simulator | Standalone sim runs ~10k agents at 100x speed and emits balance reports (prices, inflation, sinks). | [x] Done (`ce00cc2`) |
-| 1 | Extraction Prototype | Spawn -> fight NPCs -> loot -> extract -> stash -> repeat is fully playable; dying loses carried items. | [x] Done (`53805c6`) |
+| 1 | Extraction Prototype | Spawn -> fight NPCs -> loot -> extract (deposit into storage) -> repeat is fully playable; dying loses carried items. | [x] Done (`53805c6`) |
 | 2 | Resource Economy | Loot is replaced by resources; players gather, refine, and craft the gear they take into the next breach. | [x] Done (`943ba4f`) |
 | 3 | Manufacturing | Buildings, production queues, blueprints, power, professions, and a working market. | [x] Done (`f9ce414`, professions deferred) |
 | — | Visual fidelity pass | Rainy neon night city reads as a modern game: AO/SMAA post stack, env reflections, parallax window interiors, animated neon/steam. | [x] Done (`65873b8`) |
@@ -49,7 +49,7 @@ committed** (statuses last updated 2026-07-02).
 - [x] Click-to-move (server A* pathfinding) + WASD, isometric orbit camera
 - [x] Inventory + equipment, persistent stash, real CC0 art (KayKit/Kenney/Quaternius/ambientCG) + audio
 - [x] Combat (melee/ranged/ammo), NPC AI (patrol/aggro/attack), death drops, loot containers
-- [x] Extraction points with channel timer banking loot to stash
+- [x] Extraction by depositing carried loot into persistent storage (stash)
 - [x] Resource nodes (gather/deplete/respawn) + refinery/factory crafting chain
 - [x] Production queues with power budget, laboratory blueprint research (fragment costs)
 - [x] Market: listings, buy/cancel, MILD wallet with fee burn
@@ -183,7 +183,8 @@ Server -> Client:
 | `EntitySpawn` / `EntitySnapshot` (delta) / `EntityDespawn` | Replication |
 | `InventoryUpdate` | Authoritative inventory state |
 | `ChatMessage` | Chat |
-| Phase 1: `CombatEvent`, `DeathEvent`, `ExtractResult` | Combat/extraction |
+| Phase 1: `CombatEvent`, `Died` | Combat/death |
+| `StashUpdate` + `InventoryAction::Deposit`/`Withdraw` | Extraction: move loot between backpack and storage |
 
 Cadence: sim 20 Hz; snapshots 10-20 Hz, interest-managed (only entities in chunks near
 the player). The client predicts the local player per input (tagged with `seq`),
@@ -291,7 +292,7 @@ curves that we use to tune Phase 2/3 recipes, sinks, and generation rates.
 
 **Goal:** prove the extraction loop is fun. No crafting, no MMO, no economy.
 
-Loop: spawn -> fight NPCs -> loot -> extract -> store loot -> repeat.
+Loop: spawn -> fight NPCs -> loot -> extract (deposit loot into storage) -> repeat.
 
 Features:
 
@@ -300,8 +301,10 @@ Features:
 - **NPC AI:** spawning in breach zones; patrol / aggro / attack / flee behaviors;
   pathfinding shared with click-to-move.
 - **Loot:** lootable corpses and containers.
-- **Extraction:** extraction points with channel timers; extracting banks carried
-  loot into persistent home **storage** (stash); **death drops carried items**.
+- **Extraction:** there are no dedicated extraction points or channel timers — you
+  extract by depositing carried loot into persistent home **storage** (stash) at a
+  stash terminal. Anything still in your backpack is at risk: **death drops carried
+  items**.
 - **Equipment:** weapon/armor slots affect combat.
 
 **MVP gate:** the full loop is playable end-to-end and dying loses carried items.

@@ -49,13 +49,11 @@ export function Hud({ connection }: { connection: GameConnection }) {
             <Minimap />
             <ZoneReadout />
             <TerritoryTally />
-            <PositionReadout />
+            <ProximityTracker />
           </div>
           <div className="comms-panel">
             <ChatWindow connection={connection} />
           </div>
-          <ExtractionBar />
-          <ExtractHint />
           <PickupFeed />
           <WalletToasts />
           <LevelUpBanner />
@@ -1171,108 +1169,6 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
   );
 }
 
-function ExtractionBar() {
-  const extracting = useGame((s) => s.extracting);
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    if (!extracting) return;
-    const timer = setInterval(() => {
-      const elapsed = (performance.now() - extracting.startedAt) / 1000;
-      setProgress(Math.min(elapsed / extracting.seconds, 1));
-    }, 50);
-    return () => clearInterval(timer);
-  }, [extracting]);
-
-  if (!extracting) return null;
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: "38%",
-        left: "50%",
-        transform: "translateX(-50%)",
-        width: 320,
-        textAlign: "center",
-      }}
-    >
-      <div
-        style={{
-          fontSize: 13,
-          letterSpacing: "0.25em",
-          color: "var(--accent)",
-          marginBottom: 8,
-          textShadow: "0 0 12px rgba(79,195,255,0.6)",
-        }}
-      >
-        EXTRACTING…
-      </div>
-      <div className="hp-bar" style={{ height: 10 }}>
-        <div
-          className="hp-fill"
-          style={{
-            width: `${progress * 100}%`,
-            background: "linear-gradient(90deg, #1f7fc4, var(--accent))",
-            transition: "none",
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-/** Compass hint to the nearest extraction point while in the hostile zone. */
-function ExtractHint() {
-  const [hint, setHint] = useState<{ dist: number; dir: string } | null>(null);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const px = game.predicted.x;
-      const pz = game.predicted.z;
-      const cx = Math.floor(px / 32);
-      const cz = Math.floor(pz / 32);
-      const safe = Math.abs(cx) <= 1 && Math.abs(cz) <= 1;
-      if (safe) {
-        setHint(null);
-        return;
-      }
-      let best: { dist: number; dir: string } | null = null;
-      for (const e of game.entities.values()) {
-        if (e.kind !== "ExtractionPoint") continue;
-        const dx = e.x - px;
-        const dz = e.z - pz;
-        const dist = Math.hypot(dx, dz);
-        if (!best || dist < best.dist) {
-          const ns = dz < -3 ? "N" : dz > 3 ? "S" : "";
-          const ew = dx > 3 ? "E" : dx < -3 ? "W" : "";
-          best = { dist, dir: ns + ew || "HERE" };
-        }
-      }
-      setHint(best);
-    }, 500);
-    return () => clearInterval(timer);
-  }, []);
-  if (!hint) return null;
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: 96,
-        left: "50%",
-        transform: "translateX(-50%)",
-        fontSize: 12,
-        letterSpacing: "0.2em",
-        color: "var(--accent)",
-        textShadow: "0 0 10px rgba(79,195,255,0.5)",
-        pointerEvents: "none",
-      }}
-    >
-      {hint.dist < 4
-        ? "◆ EXTRACTION POINT — CLICK IT, THEN STAND STILL"
-        : `◆ EXTRACT ${Math.round(hint.dist)}m ${hint.dir}`}
-    </div>
-  );
-}
-
 /** Left-side pickup feed: stacked "+N Item" lines with the item glyph, plus
  * red "Backpack full" denials. Entries slide in and self-expire. */
 function PickupFeed() {
@@ -1710,11 +1606,15 @@ function TerritoryTally() {
 
 const STATION_KINDS = ["Refinery", "Factory", "Laboratory"] as const;
 
-function PositionReadout() {
-  const [pos, setPos] = useState({ x: 0, z: 0 });
+/**
+ * Invisible proximity tracker mounted under the minimap. It polls the player's
+ * distance to stashes/markets/stations/vendors and flips the matching `near*`
+ * game-state flags that drive the context panels. (It formerly also rendered a
+ * position/chunk/SAFE-ZONE readout, which duplicated the ZoneReadout above.)
+ */
+function ProximityTracker() {
   useEffect(() => {
     const timer = setInterval(() => {
-      setPos({ x: game.predicted.x, z: game.predicted.z });
       // Track stash/station/market proximity for context UIs. The 5 m range
       // matches the server's interact range for service storefronts; standing
       // inside a service's walk-in room counts as distance 0 (the entity
@@ -1775,17 +1675,7 @@ function PositionReadout() {
     }, 300);
     return () => clearInterval(timer);
   }, []);
-  const cx = Math.floor(pos.x / 32);
-  const cz = Math.floor(pos.z / 32);
-  const safe = Math.abs(cx) <= 1 && Math.abs(cz) <= 1;
-  return (
-    <div className="hud-pos">
-      {pos.x.toFixed(1)}, {pos.z.toFixed(1)} · chunk {cx}, {cz} ·{" "}
-      <span style={{ color: safe ? "var(--accent)" : "var(--alert)" }}>
-        {safe ? "SAFE ZONE" : "HOSTILE"}
-      </span>
-    </div>
-  );
+  return null;
 }
 
 function shortName(kind: string): string {

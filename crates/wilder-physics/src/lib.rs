@@ -110,14 +110,24 @@ pub fn step_move_speed<W: CollisionWorld>(
 /// Displace a character disc by an explicit (dx, dz) offset with the same
 /// axis-separated collision rules as [`step_move`]. Used for crowd-separation
 /// pushes, where the displacement is a resolved overlap rather than a
-/// velocity: blocked axes are simply dropped (the body slides or stays put).
+/// velocity. Each axis tries the full offset, then half, then a quarter, so
+/// bodies wedged in tight interiors (counters, doorways) still creep apart
+/// instead of having every push rejected outright.
 pub fn nudge<W: CollisionWorld>(world: &W, pos: Vec3, dx: f32, dz: f32) -> Vec3 {
     let mut out = pos;
-    if dx != 0.0 && position_clear(world, out.x + dx, out.z) {
-        out.x += dx;
+    for scale in [1.0, 0.5, 0.25] {
+        let nx = out.x + dx * scale;
+        if dx != 0.0 && position_clear(world, nx, out.z) {
+            out.x = nx;
+            break;
+        }
     }
-    if dz != 0.0 && position_clear(world, out.x, out.z + dz) {
-        out.z += dz;
+    for scale in [1.0, 0.5, 0.25] {
+        let nz = out.z + dz * scale;
+        if dz != 0.0 && position_clear(world, out.x, nz) {
+            out.z = nz;
+            break;
+        }
     }
     out
 }

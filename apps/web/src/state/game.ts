@@ -448,8 +448,6 @@ interface UiState {
   lastError: string | null;
   /** bumped when chunk set changes (drives chunk re-render) */
   chunkVersion: number;
-  /** Active extraction channel (seconds total + start time). */
-  extracting: { seconds: number; startedAt: number } | null;
   /** Near a stash terminal (enables deposit/withdraw UI). */
   nearStash: boolean;
   /** Nearest crafting station in interact range, if any. */
@@ -576,7 +574,6 @@ export const useGame: import("zustand").UseBoundStore<
   chatOpen: false,
   lastError: null,
   chunkVersion: 0,
-  extracting: null,
   nearStash: false,
   nearStation: null,
   craftOpen: false,

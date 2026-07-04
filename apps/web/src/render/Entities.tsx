@@ -1261,27 +1261,6 @@ function CurrencyPickupView({ entity }: { entity: GameEntity }) {
   );
 }
 
-function ExtractionBeacon({ entity }: { entity: GameEntity }) {
-  return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
-      {/* Ground pad only — the tall vertical light beam was removed. The pad
-          plus ground glow marks the extraction point without a sky-high cone. */}
-      <mesh position={[0, 0.15, 0]}>
-        <cylinderGeometry args={[1.1, 1.3, 0.3, 24]} />
-        <meshStandardMaterial color="#0f2a24" emissive="#1affc4" emissiveIntensity={0.7} />
-      </mesh>
-      <GroundGlow color="#1affc4" radius={2.4} opacity={0.4} />
-    </group>
-  );
-}
-
 // Resource-node pieces shared across every node: one shard material per
 // resource color (5 total), one geometry per shard slot, one base. Inline
 // <meshStandardMaterial>/<octahedronGeometry> here created 6 materials and
@@ -1741,9 +1720,6 @@ function EntityView({ entity }: { entity: GameEntity }) {
       break;
     case "CurrencyPickup":
       body = <CurrencyPickupView entity={entity} />;
-      break;
-    case "ExtractionPoint":
-      body = <ExtractionBeacon entity={entity} />;
       break;
     case "ResourceNode":
       body = <ResourceNodeView entity={entity} />;

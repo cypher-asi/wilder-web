@@ -3327,6 +3327,7 @@ impl World {
                 }
                 let buyer_account = buyer.character.account_id;
                 let buyer_pos = buyer.character.position;
+                let buyer_name = buyer.character.name.clone();
                 let buyer_party = player_party(buyer);
                 let leftover = inv::add_items(&mut buyer.inventory.slots, kind, count);
                 buyer.dirty = true;
@@ -3346,7 +3347,6 @@ impl World {
                 // offline player, or faction agent.
                 let fee = cost * MARKET_FEE_PCT / 100;
                 let proceeds = cost - fee;
-                let _ = seller_name; // display name lives on the listing
                 // Ledger: escrowed items leave the market agent for the
                 // buyer; the buyer's MILD splits into seller proceeds and
                 // the market fee (routed to territory holders or burned).
@@ -3382,7 +3382,7 @@ impl World {
                     );
                 }
                 self.ledger.trades += 1;
-                self.market_stats.record_fill(kind, price_each, count);
+                self.market_stats.record_fill(kind, price_each, count, buyer_name, seller_name);
 
                 let l = &mut self.market[idx];
                 l.count -= count;
@@ -6075,9 +6075,9 @@ impl World {
         else {
             return false;
         };
-        let (listing_seller, price_each, available) = {
+        let (listing_seller, seller_name, price_each, available) = {
             let l = &self.market[pos];
-            (l.seller, l.price_each, l.count)
+            (l.seller, l.seller_name.clone(), l.price_each, l.count)
         };
         // Never buy from yourself (relisting loops).
         if listing_seller == self.agents[idx].agent_id {
@@ -6131,7 +6131,8 @@ impl World {
             self.ledger.record(TxKind::Fee, market_agent, TxParty::Burn, TxAmount::Wild { amount: fee }, 0);
         }
         self.ledger.trades += 1;
-        self.market_stats.record_fill(kind, price_each, affordable);
+        let buyer_name = self.agents[idx].name.clone();
+        self.market_stats.record_fill(kind, price_each, affordable, buyer_name, seller_name);
         let l = &mut self.market[pos];
         l.count -= affordable;
         if l.count == 0 {
@@ -6915,16 +6916,18 @@ impl World {
     /// totals from `market_stats`, live book stats, ledger supply, and the
     /// fixed vendor reference prices.
     fn item_market_state(&self, kind: ItemKind) -> ItemMarketState {
-        let (series, last_price, total_fills, total_units, total_wild) =
+        let (series, recent_fills, last_price, total_fills, total_units, total_wild) =
             match self.market_stats.history(kind) {
                 Some(h) => (
                     h.buckets.iter().copied().collect(),
+                    // Tape goes out newest-first: that's the render order.
+                    h.recent.iter().rev().cloned().collect(),
                     h.last_price,
                     h.total_fills,
                     h.total_units,
                     h.total_wild,
                 ),
-                None => (Vec::new(), 0, 0, 0, 0),
+                None => (Vec::new(), Vec::new(), 0, 0, 0, 0),
             };
         let mut best_ask = 0u32;
         let mut listed_units = 0u32;
@@ -6947,6 +6950,7 @@ impl World {
             supply: self.ledger.item_supply(kind),
             vendor_buy,
             vendor_sell,
+            recent_fills,
         }
     }
 
@@ -8780,6 +8784,13 @@ mod tests {
         assert_eq!(state.best_ask, listing_price);
         assert_eq!(state.vendor_sell, 2); // Bodega floor
         assert_eq!(state.series.len(), 1);
+        // The trade tape carries the fill with both counterparties named.
+        assert_eq!(state.recent_fills.len(), 1);
+        let tape = &state.recent_fills[0];
+        assert_eq!(tape.price_each, listing_price);
+        assert_eq!(tape.count, 10);
+        assert_eq!(tape.buyer, world.agents[buyer].name);
+        assert_eq!(tape.seller, world.agents[seller].name);
     }
 
     #[test]
@@ -8809,11 +8820,11 @@ mod tests {
 
         // Demand cleared the book: next ask marks up over the last fill,
         // clamped to the [base/2, base*3] band.
-        world.market_stats.record_fill(ItemKind::Iron, 5, 10);
+        world.market_stats.record_fill(ItemKind::Iron, 5, 10, "B".into(), "S".into());
         assert_eq!(world.market_ref_price(ItemKind::Iron), 5);
         assert_eq!(world.agent_ask_price(ItemKind::Iron), (5u32 * 11).div_ceil(10).min(base * 3));
         // A pathological fill price is clamped before it steers pricing.
-        world.market_stats.record_fill(ItemKind::Iron, 10_000, 1);
+        world.market_stats.record_fill(ItemKind::Iron, 10_000, 1, "B".into(), "S".into());
         assert_eq!(world.market_ref_price(ItemKind::Iron), base * 3);
         assert_eq!(world.agent_ask_price(ItemKind::Iron), base * 3);
     }

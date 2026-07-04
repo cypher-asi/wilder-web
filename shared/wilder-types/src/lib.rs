@@ -654,6 +654,19 @@ pub struct PriceBucket {
     pub fills: u32,
 }
 
+/// One executed market fill for the per-item trade tape (time, price, size
+/// and both counterparties' display names).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFill {
+    /// Unix milliseconds when the fill executed.
+    pub t: u64,
+    /// MILD per unit.
+    pub price_each: u32,
+    pub count: u32,
+    pub buyer: String,
+    pub seller: String,
+}
+
 /// Aggregate economy snapshot pushed to dashboard subscribers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EconomyStats {

@@ -296,6 +296,9 @@ pub struct ItemMarketState {
     /// NPC vendor reference prices (0 = vendors don't trade it that way).
     pub vendor_buy: u32,
     pub vendor_sell: u32,
+    /// Individual recent fills, newest first (the trade tape).
+    #[serde(default)]
+    pub recent_fills: Vec<MarketFill>,
 }
 
 /// A vendor's price line for one item kind. `buy` is what the player pays per

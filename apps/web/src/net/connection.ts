@@ -5,6 +5,7 @@ import {
   playAmmo,
   playCoin,
   playDeny,
+  playGlitch,
   playGrunt,
   playLevelUp,
   playPickup,
@@ -33,6 +34,18 @@ import { C2S, decode, encode, S2C } from "./protocol";
  */
 const recentLocalHits = new Map<number, number>();
 const KILL_CREDIT_MS = 2500;
+
+/** Random uppercase hex string of `n` digits, for the fake STOP code. */
+function randHex(n: number): string {
+  let out = "";
+  for (let i = 0; i < n; i++) out += Math.floor(Math.random() * 16).toString(16);
+  return out.toUpperCase();
+}
+
+/** A Windows-BSOD-flavored STOP line, seized-by-THE-GIBSON edition. */
+function bsodErrorCode(): string {
+  return `STOP: 0x0000DEAD (0x${randHex(4)}, 0x${randHex(4)}, THE_GIBSON, 0x${randHex(8)})`;
+}
 
 /** World position of an entity's gun muzzle, if a mount is registered. */
 function muzzlePosition(entityId: number): THREE.Vector3 | null {
@@ -251,8 +264,8 @@ export class GameConnection {
           if (target) {
             target.lastHitAt = now;
             target.hitReactAt = now;
-            // Shot NPCs vocalize their pain on top of the impact tick.
-            if (target.kind === "Npc") void playGrunt(0.45);
+            // Shot NPCs/agents vocalize their pain on top of the impact tick.
+            if (target.kind === "Npc" || target.kind === "Agent") void playGrunt(0.45);
           }
           if (ev.d.attacker === game.localEntityId) {
             recentLocalHits.set(ev.d.target, now);
@@ -278,7 +291,10 @@ export class GameConnection {
             dirX: dx / len,
             dirZ: dz / len,
             kind:
-              target && (target.kind === "Npc" || target.kind === "Player")
+              target &&
+              (target.kind === "Npc" ||
+                target.kind === "Player" ||
+                target.kind === "Agent")
                 ? "flesh"
                 : "dust",
             at: now,
@@ -447,7 +463,24 @@ export class GameConnection {
         break;
       }
       case "Died": {
-        ui.set({ extracting: null });
+        // The server has already respawned us at spawn and dropped the
+        // backpack; the clearing InventoryUpdate lands right after this, so the
+        // inventory still in state here is the pre-death loadout. Snapshot the
+        // dropped backpack stacks (equipped gear survives, so it isn't listed).
+        const lostItems = (useGame.getState().inventory?.slots ?? [])
+          .filter((s): s is import("./protocol").ItemStack => s !== null)
+          .map((s) => ({ kind: s.kind, count: s.count }));
+        ui.set({
+          extracting: null,
+          death: {
+            by: msg.d.by,
+            lostItems,
+            errorCode: bsodErrorCode(),
+            at: performance.now(),
+          },
+        });
+        void playSfx("sfx_death", 0.5);
+        playGlitch(0.5);
         ui.pushChat({
           from: "system",
           text: `You died${msg.d.by ? ` to ${msg.d.by}` : ""}.${msg.d.lost_items ? " Your carried items were dropped." : ""}`,

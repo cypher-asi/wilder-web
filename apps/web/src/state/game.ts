@@ -47,6 +47,8 @@ export interface GameEntity {
   /** Loot containers: primary contained item (drives the floating icon). */
   item: import("../net/protocol").ItemKind | null;
   tint: number;
+  /** Faction allegiance (0 = neutral); tints agents and their nameplates. */
+  faction: number;
   healthPct: number;
   /** ms timestamp of the last combat hit taken (drives health bar reveal). */
   lastHitAt: number;
@@ -237,6 +239,7 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
     variant: data.variant,
     item: data.item ?? null,
     tint: data.appearance?.tint ?? 0xffffff,
+    faction: data.faction ?? 0,
     healthPct: data.health_pct,
     lastHitAt: 0,
     hitReactAt: 0,
@@ -311,6 +314,22 @@ export interface WalletToast {
 }
 
 let nextWalletToastId = 1;
+
+/**
+ * Active death state, driving the Windows-BSOD-style death screen. Captured on
+ * the `Died` message (the server has already respawned us at spawn); cleared
+ * when the player presses any key to dismiss the overlay.
+ */
+export interface DeathInfo {
+  /** Killer's display name, if the server attributed the kill. */
+  by: string | null;
+  /** Backpack stacks dropped on death (equipped gear survives, so excluded). */
+  lostItems: ItemStack[];
+  /** Pre-generated BSOD-style STOP code line. */
+  errorCode: string;
+  /** performance.now() when it fired; keys the typewriter/glitch animation. */
+  at: number;
+}
 
 /** Per-ability hotbar state (ms timestamps from performance.now()). */
 export interface AbilityUiState {
@@ -452,6 +471,8 @@ interface UiState {
   levelUp: LevelUpEvent | null;
   /** Bouncy currency toasts ("+N WILD"); self-expire in the HUD. */
   walletToasts: WalletToast[];
+  /** Active death overlay (BSOD death screen); cleared on any-key respawn. */
+  death: DeathInfo | null;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
@@ -542,6 +563,7 @@ export const useGame: import("zustand").UseBoundStore<
   wallet: null,
   levelUp: null,
   walletToasts: [],
+  death: null,
 
   set: (partial) => set(partial),
   pushChat: (line) =>
@@ -574,6 +596,7 @@ export const useGame: import("zustand").UseBoundStore<
       craftOpen: false,
       marketOpen: false,
       vendorOpen: false,
+      death: null,
     }),
   setVisualStyle: (style) => {
     if (typeof localStorage !== "undefined") {

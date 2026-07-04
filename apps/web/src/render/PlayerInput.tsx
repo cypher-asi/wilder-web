@@ -17,12 +17,15 @@ import {
   WALK_SPEED,
 } from "../game/collision";
 import { playSfx } from "../assets/audio";
+import { INTERACT_KINDS, openServicePanel } from "../game/interact";
+import { interiorRegistry } from "../game/interiors";
 import { GameConnection } from "../net/connection";
 import { AbilityKind } from "../net/protocol";
 import { perf } from "../perf/perf";
 import { activeWeaponKind, game, GameEntity, useGame } from "../state/game";
 import { cameraKick, cameraState, OTS_START_DISTANCE } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
+import { pressOpenDoor } from "./Interior";
 
 const TICK_DT = 1 / 20;
 
@@ -62,6 +65,10 @@ const HOLSTER_AFTER = 5.0;
 const SHOT_BUFFER_MS = 350;
 
 const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
+
+/** Interact (E) range in metres — matches the server's storefront range and
+ * the proximity radius the HUD uses to surface the "PRESS E" prompts. */
+const INTERACT_RANGE = 5.0;
 
 function equippedCooldown(): number {
   const weapon = activeWeaponKind(useGame.getState().inventory);
@@ -108,6 +115,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const down = (event: KeyboardEvent) => {
       // Ignore game keys while typing in chat/UI inputs.
       if ((event.target as HTMLElement)?.tagName === "INPUT") return;
+      // Dead: the death overlay owns the keyboard (any key respawns); no game
+      // action should fire underneath it.
+      if (useGame.getState().death) return;
       // While the fullscreen map is open only map keys work (HoloMap handles
       // Escape/T itself); everything else must not reach the paused game.
       if (useGame.getState().mapOpen && event.code !== "KeyM") return;
@@ -184,9 +194,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         event.preventDefault();
         toggleCrouch();
       }
-      if (event.code === "KeyQ" && !event.repeat) useAbility("Shockwave");
-      if (event.code === "KeyE" && !event.repeat) useAbility("Stim");
+      if (event.code === "KeyQ" && !event.repeat) useAbility("Stim");
+      if (event.code === "KeyG" && !event.repeat) useAbility("Shockwave");
       if (event.code === "KeyR" && !event.repeat) useAbility("Overcharge");
+      if (event.code === "KeyE" && !event.repeat) interact();
       const digit = /^(?:Digit|Numpad)([0-9])$/.exec(event.code);
       if (digit && !event.repeat) {
         const n = Number(digit[1]);
@@ -220,6 +231,8 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      // Don't fire while the death overlay is up (it dismisses on click).
+      if (useGame.getState().death) return;
       // The unlocked canvas click only (re)acquires pointer lock (CameraRig);
       // it must not double as a trigger pull. When pointer lock is denied
       // outright (embedded browsers, test harnesses) the twin-stick fallback
@@ -318,7 +331,37 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     setCrouch(!game.crouching);
   }
 
-  /** Q/E/R: fire an ability if it's off cooldown (server re-validates). */
+  /**
+   * E: interact with the nearest service building/station/vendor/market within
+   * range. Key-driven so clicking a building never accidentally opens a menu.
+   * Pressing E again closes an already-open panel (toggle). Standing inside a
+   * walk-in store room counts as in range of its service regardless of the
+   * distance to the entity anchor out on the sidewalk.
+   */
+  function interact() {
+    if (game.localEntityId === 0) return;
+    const px = game.predicted.x;
+    const pz = game.predicted.z;
+    const room = interiorRegistry.roomAt(px, pz);
+    // Outside a room, E first serves the door: force the nearest one open
+    // and walk in — the service panel opens at the counter, not the curb.
+    if (!room && pressOpenDoor(px, pz)) return;
+    let best: GameEntity | null = null;
+    let bestDist = INTERACT_RANGE;
+    for (const e of game.entities.values()) {
+      if (!INTERACT_KINDS.has(e.kind)) continue;
+      const inRoom = room !== null && room.doors.some((dr) => dr.entity === e.id);
+      const d = inRoom ? 0 : Math.hypot(e.x - px, e.z - pz);
+      if (d < bestDist) {
+        bestDist = d;
+        best = e;
+      }
+    }
+    if (!best) return;
+    openServicePanel(best.kind, best.id);
+  }
+
+  /** Q/G/R: fire an ability if it's off cooldown (server re-validates). */
   function useAbility(ability: AbilityKind) {
     if (game.localEntityId === 0) return;
     const state = useGame.getState().abilities[ability];
@@ -431,7 +474,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     let best: GameEntity | null = null;
     let bestAlong = Infinity;
     for (const e of game.entities.values()) {
-      if (e.kind !== "Npc" || e.healthPct <= 0 || e.anim === "Death") continue;
+      if (
+        (e.kind !== "Npc" && e.kind !== "Agent") ||
+        e.healthPct <= 0 ||
+        e.anim === "Death"
+      )
+        continue;
       const rx = e.x - px;
       const rz = e.z - pz;
       const along = rx * dirX + rz * dirZ;

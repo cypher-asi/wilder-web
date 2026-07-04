@@ -272,6 +272,69 @@ export function playDeny(volume = 0.18) {
   };
 }
 
+/**
+ * Corrupted-signal glitch burst for the death screen: a cluster of randomly
+ * timed band-passed noise stabs ("static tearing") layered with a couple of
+ * detuned square/saw blips whose pitch jumps in hard steps (no ramps) for a
+ * bit-crushed, malfunctioning feel. Fully synthesized — no asset needed.
+ */
+export function playGlitch(volume = 0.4) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+
+  // 5 noise stabs at random offsets: each a short band/high-pass burst whose
+  // centre frequency leaps around, reading as digital signal tearing.
+  const stabs = 5;
+  for (let i = 0; i < stabs; i++) {
+    const start = t0 + Math.random() * 0.42;
+    const dur = 0.02 + Math.random() * 0.06;
+    const src = ctx.createBufferSource();
+    src.buffer = getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = Math.random() < 0.5 ? "bandpass" : "highpass";
+    filter.frequency.value = 600 + Math.random() * 5000;
+    filter.Q.value = 0.6 + Math.random() * 4;
+    const gain = ctx.createGain();
+    // Hard on/off gate (no smooth attack) for a torn, clipped edge.
+    gain.gain.setValueAtTime(volume * (0.5 + Math.random() * 0.5), start);
+    gain.gain.setValueAtTime(0.0001, start + dur);
+    src.connect(filter).connect(gain).connect(ctx.destination);
+    src.start(start);
+    src.stop(start + dur + 0.01);
+    src.onended = () => {
+      src.disconnect();
+      filter.disconnect();
+      gain.disconnect();
+    };
+  }
+
+  // 3 detuned tonal blips with stepped random pitch jumps — corrupted beeps.
+  const blips = 3;
+  for (let i = 0; i < blips; i++) {
+    const start = t0 + Math.random() * 0.4;
+    const osc = ctx.createOscillator();
+    osc.type = Math.random() < 0.5 ? "square" : "sawtooth";
+    // Two or three stepped frequencies within the blip's life.
+    const steps = 2 + Math.floor(Math.random() * 2);
+    const stepDur = 0.03 + Math.random() * 0.03;
+    for (let s = 0; s < steps; s++) {
+      osc.frequency.setValueAtTime(80 + Math.random() * 1120, start + s * stepDur);
+    }
+    const life = steps * stepDur;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(volume * 0.35, start);
+    gain.gain.setValueAtTime(0.0001, start + life);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + life + 0.02);
+    osc.onended = () => {
+      osc.disconnect();
+      gain.disconnect();
+    };
+  }
+}
+
 // --- Main music -----------------------------------------------------------
 
 let music: Howl | null = null;

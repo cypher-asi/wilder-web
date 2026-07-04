@@ -884,10 +884,12 @@ body {
 
 .inv-count {
   position: absolute;
-  bottom: 2px;
-  right: 4px;
-  font-size: 9px;
-  color: var(--accent);
+  bottom: 1px;
+  right: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 1px 3px #000, 0 0 3px #000;
   font-variant-numeric: tabular-nums;
 }
 
@@ -984,14 +986,14 @@ body {
 
 .action-key {
   position: absolute;
-  top: -7px;
+  top: -8px;
   right: -6px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
-  color: var(--text-dim);
+  color: #ffffff;
   background: #090f18;
   border: 1px solid var(--steel-border);
-  padding: 1px 5px;
+  padding: 1px 6px;
   line-height: normal;
 }
 
@@ -1020,9 +1022,10 @@ body {
   position: absolute;
   bottom: 3px;
   right: 5px;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
-  color: var(--accent);
+  color: #ffffff;
+  text-shadow: 0 1px 3px #000;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1147,7 +1150,7 @@ body {
   font-size: 18px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: var(--text-dim);
+  color: #ffffff;
   margin-left: 7px;
 }
 
@@ -1189,9 +1192,11 @@ body {
   position: absolute;
   top: 1px;
   left: 3px;
-  font-size: 8px;
+  font-size: 11px;
+  font-weight: 700;
   line-height: 1;
-  opacity: 0.7;
+  color: #ffffff;
+  text-shadow: 0 1px 2px #000;
 }
 
 .weapon-dock-xp {
@@ -1211,8 +1216,9 @@ body {
 }
 
 .weapon-dock-xp-num {
-  font-size: 12px;
-  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffffff;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1235,8 +1241,8 @@ body {
 
 .backpack-grid {
   display: grid;
-  grid-template-columns: repeat(6, 34px);
-  grid-auto-rows: 34px;
+  grid-template-columns: repeat(6, 40px);
+  grid-auto-rows: 40px;
   gap: 5px;
   cursor: pointer;
 }
@@ -1244,15 +1250,19 @@ body {
 .backpack-slot {
   position: relative;
   background: rgba(9, 15, 24, 0.45);
-  border: 1px solid var(--steel-border);
+  border: none;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .backpack-slot.filled {
-  border-color: var(--accent-dim);
   background: var(--accent-faint);
+}
+
+.backpack-slot .item-icon {
+  /* Recolor the neutral steel silhouettes to HUD accent-blue. */
+  filter: sepia(1) saturate(6) hue-rotate(170deg) brightness(1.05);
 }
 
 .backpack-abbrev {
@@ -1289,7 +1299,7 @@ body {
 
 .backpack-btn-count {
   font-size: 12px;
-  color: var(--text-dim);
+  color: #ffffff;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1871,7 +1881,7 @@ body {
 /* Context prompt near a service building ("ARMORY — CLICK TO TRADE"). */
 .station-prompt {
   position: absolute;
-  bottom: 192px;
+  top: 120px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 12px;
@@ -2859,6 +2869,179 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* ---------------------------------------------------------------------------
+ * Death screen (DeathScreen in Hud.tsx): a Windows-BSOD homage. Deep royal
+ * blue tuned toward the game's cyan accent, typewriter monospace, a glitching
+ * "WILDER GIBSON" title chip, and a blinking terminal cursor.
+ * ------------------------------------------------------------------------- */
+
+.bsod {
+  --bsod-blue: #0a2a6b;
+  position: absolute;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: default;
+  color: #eef4ff;
+  font-family: "Lucida Console", "Consolas", "Courier New", monospace;
+  background:
+    radial-gradient(ellipse at 50% 28%, rgba(79, 195, 255, 0.22), transparent 60%),
+    var(--bsod-blue);
+  animation: bsod-shudder 4.2s steps(1) infinite;
+}
+
+/* Faint CRT scanlines over the whole panel. */
+.bsod::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.16) 0px,
+    rgba(0, 0, 0, 0.16) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.55;
+}
+
+.bsod-inner {
+  position: relative;
+  z-index: 1;
+  width: min(760px, 84vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
+}
+
+/* Inverted title chip, like the reference's "Windows" box, but glitching. */
+.bsod-title {
+  position: relative;
+  padding: 4px 16px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--bsod-blue);
+  background: #c9d8ea;
+  animation: bsod-glitch 2.1s steps(1) infinite;
+}
+
+/* Two offset cyan/red copies for chromatic-aberration split. */
+.bsod-title::before,
+.bsod-title::after {
+  content: attr(data-text);
+  position: absolute;
+  top: 0;
+  left: 16px;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.bsod-title::before {
+  color: #ff5a6e;
+  animation: bsod-split-a 1.3s steps(2) infinite;
+}
+
+.bsod-title::after {
+  color: #4fc3ff;
+  animation: bsod-split-b 1.7s steps(2) infinite;
+}
+
+.bsod-body {
+  margin: 0;
+  width: 100%;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.7;
+  text-shadow: 0 0 8px rgba(120, 190, 255, 0.35);
+}
+
+.bsod-cursor {
+  animation: bsod-blink 1s steps(2) infinite;
+}
+
+@keyframes bsod-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Title chip: slice it with clip-path + jitter it in short bursts. */
+@keyframes bsod-glitch {
+  0%,
+  82%,
+  100% {
+    transform: translate(0, 0);
+    clip-path: none;
+  }
+  84% {
+    transform: translate(-2px, 1px);
+    clip-path: inset(20% 0 55% 0);
+  }
+  88% {
+    transform: translate(3px, -1px);
+    clip-path: inset(60% 0 12% 0);
+  }
+  92% {
+    transform: translate(-1px, 0);
+    clip-path: inset(8% 0 78% 0);
+  }
+  96% {
+    transform: translate(2px, 1px);
+    clip-path: inset(42% 0 34% 0);
+  }
+}
+
+@keyframes bsod-split-a {
+  0%,
+  100% {
+    transform: translate(-2px, 0);
+    clip-path: inset(0 0 62% 0);
+  }
+  50% {
+    transform: translate(-3px, 1px);
+    clip-path: inset(58% 0 8% 0);
+  }
+}
+
+@keyframes bsod-split-b {
+  0%,
+  100% {
+    transform: translate(2px, 0);
+    clip-path: inset(64% 0 4% 0);
+  }
+  50% {
+    transform: translate(3px, -1px);
+    clip-path: inset(6% 0 66% 0);
+  }
+}
+
+/* Rare whole-panel shudder so the screen itself feels unstable. */
+@keyframes bsod-shudder {
+  0%,
+  96%,
+  100% {
+    transform: translate(0, 0);
+    filter: none;
+  }
+  97% {
+    transform: translate(-2px, 0);
+    filter: hue-rotate(12deg);
+  }
+  98.5% {
+    transform: translate(2px, -1px);
+    filter: hue-rotate(-10deg);
+  }
+}
+
 /* Mario-style reward juice: level-up banner, wallet toasts, coin/xp   */
 /* pops. Appended block; .xp-bar override gives the XP flash a frame.   */
 /* ------------------------------------------------------------------ */

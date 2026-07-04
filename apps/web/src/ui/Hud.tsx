@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { playGlitch } from "../assets/audio";
 import { ROLL_COOLDOWN } from "../game/collision";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
@@ -13,7 +14,7 @@ import { EconomyDashboard } from "./EconomyDashboard";
 import { GameMenu } from "./GameMenu";
 import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
 import { InventoryScreen } from "./InventoryScreen";
-import { ItemIcon, usedVolume } from "./ItemIcon";
+import { ItemIcon, itemLabel, usedVolume } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 
@@ -69,6 +70,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <HoloMap />
           <EconomyDashboard connection={connection} />
           <PerfPanel />
+          <DeathScreen />
         </>
       )}
       {/* Outside the joined gate so exit/logout stay reachable mid-reconnect. */}
@@ -297,7 +299,7 @@ function CurrencyPanel() {
             strokeLinejoin="round"
           />
         </svg>
-        <span className="currency-value">{wallet?.wild ?? 0}</span>
+        <span className="currency-value">{(wallet?.wild ?? 0).toLocaleString("en-US")}</span>
         <span className="currency-name">WILD</span>
       </div>
       <div className="currency-chip shards" title="Shards — salvage from destroyed items">
@@ -305,14 +307,14 @@ function CurrencyPanel() {
           <path d="M10 1.5 L14.5 8 L10 18.5 L5.5 8 Z" fill="currentColor" opacity="0.85" />
           <path d="M10 1.5 L14.5 8 L10 10.5 L5.5 8 Z" fill="currentColor" />
         </svg>
-        <span className="currency-value">{wallet?.shards ?? 0}</span>
+        <span className="currency-value">{(wallet?.shards ?? 0).toLocaleString("en-US")}</span>
         <span className="currency-name">SHARDS</span>
       </div>
       <div className="currency-chip energy" title="Energy — charge from extractions and ammo caches">
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
           <path d="M11.5 1.5 L4.5 11.5 h4 L8 18.5 L15.5 8.5 h-4 Z" fill="currentColor" />
         </svg>
-        <span className="currency-value">{wallet?.energy ?? 0}</span>
+        <span className="currency-value">{(wallet?.energy ?? 0).toLocaleString("en-US")}</span>
         <span className="currency-name">ENERGY</span>
       </div>
     </div>
@@ -320,8 +322,8 @@ function CurrencyPanel() {
 }
 
 const ABILITY_DEF: Record<AbilityKind, { glyph: string; label: string; keybind: string }> = {
-  Shockwave: { glyph: "◎", label: "Shockwave — AoE pulse", keybind: "Q" },
-  Stim: { glyph: "✚", label: "Stim — heal + speed", keybind: "E" },
+  Shockwave: { glyph: "◎", label: "Shockwave — AoE pulse", keybind: "G" },
+  Stim: { glyph: "✚", label: "Stim — heal + speed", keybind: "Q" },
   Overcharge: { glyph: "↯", label: "Overcharge — weapon damage", keybind: "R" },
 };
 
@@ -557,10 +559,14 @@ function BackpackBar() {
     <div className="backpack">
       <div className="backpack-grid" onClick={toggleInventory} title="Open backpack (B)">
         {slots.slice(0, 12).map((slot, i) => (
-          <div key={i} className={`backpack-slot${slot ? " filled" : ""}`}>
+          <div
+            key={i}
+            className={`backpack-slot${slot ? " filled" : ""}`}
+            title={slot ? itemLabel(slot.kind) : undefined}
+          >
             {slot && (
               <>
-                <span className="backpack-abbrev">{slot.kind.slice(0, 2).toUpperCase()}</span>
+                <ItemIcon kind={slot.kind} size={32} />
                 {slot.count > 1 && <span className="inv-count">{slot.count}</span>}
               </>
             )}
@@ -616,7 +622,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
       <div
         style={{
           position: "absolute",
-          bottom: 128,
+          top: 120,
           left: "50%",
           transform: "translateX(-50%)",
           fontSize: 12,
@@ -635,7 +641,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           connection.send({ t: "Interact", d: { entity_id: nearStation.id } });
         }}
       >
-        {nearStation.kind.toUpperCase()} — {isLab ? "CLICK TO RESEARCH" : "CLICK TO PRODUCE"}
+        {nearStation.kind.toUpperCase()} — {isLab ? "[E] RESEARCH" : "[E] PRODUCE"}
       </div>
     );
   }
@@ -853,7 +859,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
       <div
         style={{
           position: "absolute",
-          bottom: 160,
+          top: 120,
           left: "50%",
           transform: "translateX(-50%)",
           fontSize: 12,
@@ -871,7 +877,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
           connection.send({ t: "Market", d: { t: "Refresh" } });
         }}
       >
-        MARKET — CLICK TO TRADE
+        MARKET — [E] TRADE
       </div>
     );
   }
@@ -1048,7 +1054,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
           connection.send({ t: "Interact", d: { entity_id: nearVendor.id } });
         }}
       >
-        {label} — {isBank ? "CLICK TO CONVERT CASH" : "CLICK TO TRADE"}
+        {label} — {isBank ? "[E] CONVERT CASH" : "[E] TRADE"}
       </div>
     );
   }
@@ -1385,6 +1391,152 @@ function LevelUpBanner() {
   );
 }
 
+const TITLE_TEXT = "WILDER GIBSON";
+const SCRAMBLE_CHARS = "!<>-_\\/[]{}#%$&*+=?";
+
+/**
+ * Windows-BSOD-inspired death screen: a full-screen blue overlay in a
+ * typewriter font that inventories the assets THE GIBSON just seized, shows a
+ * fake STOP code, and dismisses on any key (the server already respawned us).
+ * The "WILDER GIBSON" title glitches (CSS RGB-split + a JS character scramble
+ * on entry) and the screen keeps stuttering the synthesized glitch cue.
+ */
+function DeathScreen() {
+  const death = useGame((s) => s.death);
+  const [title, setTitle] = useState(TITLE_TEXT);
+  const [shown, setShown] = useState(0);
+
+  // Assemble the BSOD body as one string; the typewriter reveals a prefix.
+  const body = death ? buildDeathBody(death) : "";
+
+  // Character scramble on the title for the first ~0.6s, then settle.
+  useEffect(() => {
+    if (!death) return;
+    setTitle(scramble(TITLE_TEXT, 0));
+    let frame = 0;
+    const frames = 15;
+    const timer = setInterval(() => {
+      frame++;
+      if (frame >= frames) {
+        setTitle(TITLE_TEXT);
+        clearInterval(timer);
+        return;
+      }
+      setTitle(scramble(TITLE_TEXT, frame / frames));
+    }, 40);
+    return () => clearInterval(timer);
+  }, [death?.at]);
+
+  // Typewriter reveal of the body text.
+  useEffect(() => {
+    if (!death) return;
+    setShown(0);
+    const timer = setInterval(() => {
+      setShown((n) => {
+        if (n >= body.length) {
+          clearInterval(timer);
+          return n;
+        }
+        return n + 1;
+      });
+    }, 12);
+    return () => clearInterval(timer);
+  }, [death?.at]);
+
+  // Keep the screen audibly unstable: re-stutter the glitch cue while it's up.
+  useEffect(() => {
+    if (!death) return;
+    let timeout: number;
+    const loop = () => {
+      playGlitch(0.28);
+      timeout = window.setTimeout(loop, 900 + Math.random() * 1600);
+    };
+    timeout = window.setTimeout(loop, 900 + Math.random() * 1600);
+    return () => window.clearTimeout(timeout);
+  }, [death?.at]);
+
+  // Any key / click respawns: first press finishes the typewriter, the next
+  // dismisses. Clicking always dismisses so the overlay can't get stuck.
+  useEffect(() => {
+    if (!death) return;
+    const dismiss = () => useGame.getState().set({ death: null });
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (shown < body.length) setShown(body.length);
+      else dismiss();
+    };
+    const onPointer = (e: PointerEvent) => {
+      e.preventDefault();
+      dismiss();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onPointer, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onPointer, true);
+    };
+  }, [death, shown, body.length]);
+
+  if (!death) return null;
+
+  const done = shown >= body.length;
+  return (
+    <div className="bsod" key={death.at}>
+      <div className="bsod-inner">
+        <div className="bsod-title" data-text={TITLE_TEXT}>
+          {title}
+        </div>
+        <pre className="bsod-body">
+          {body.slice(0, shown)}
+          {done && <span className="bsod-cursor">_</span>}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+/** Build the BSOD body text for a death, item inventory included. */
+function buildDeathBody(death: import("../state/game").DeathInfo): string {
+  const killer = death.by
+    ? `The process was terminated by ${death.by}.`
+    : "The process was terminated by an unknown hostile.";
+  const itemLines =
+    death.lostItems.length > 0
+      ? death.lostItems.map((s) => `   - ${s.count}x ${itemLabel(s.kind)}`)
+      : ["   - (no unsecured assets - equipped gear retained)"];
+  return [
+    "A fatal exception 0x0000DEAD has occurred in WILDER_GIBSON.",
+    killer,
+    "",
+    "The following assets have been flushed from your local cache",
+    "and permanently seized by THE GIBSON:",
+    "",
+    ...itemLines,
+    "",
+    death.errorCode,
+    "",
+    "* Press any key to respawn.",
+    "* If this screen reappears, the extraction network is down.",
+  ].join("\n");
+}
+
+/**
+ * Return `text` with a left-to-right settled prefix (proportional to
+ * `progress`) and the remaining characters randomized from the glitch set.
+ * Spaces are preserved so the word shape stays legible.
+ */
+function scramble(text: string, progress: number): string {
+  const settled = Math.floor(text.length * progress);
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === " ") out += " ";
+    else if (i < settled) out += text[i];
+    else out += SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
+  }
+  return out;
+}
+
 const STATION_KINDS = ["Refinery", "Factory", "Laboratory"] as const;
 
 function PositionReadout() {
@@ -1393,7 +1545,10 @@ function PositionReadout() {
     const timer = setInterval(() => {
       setPos({ x: game.predicted.x, z: game.predicted.z });
       // Track stash/station/market proximity for context UIs. The 5 m range
-      // matches the server's interact range for service storefronts.
+      // matches the server's interact range for service storefronts; standing
+      // inside a service's walk-in room counts as distance 0 (the entity
+      // anchor is out on the sidewalk, further than 5 m from the counter).
+      const room = interiorRegistry.roomAt(game.predicted.x, game.predicted.z);
       let near = false;
       let nearMarket = false;
       let station: { kind: (typeof STATION_KINDS)[number]; id: number } | null = null;
@@ -1401,7 +1556,10 @@ function PositionReadout() {
       let vendor: { kind: import("../net/protocol").EntityKind; id: number } | null = null;
       let vendorDist = 5.0;
       for (const entity of game.entities.values()) {
-        const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
+        const inRoom = room !== null && room.doors.some((dr) => dr.entity === entity.id);
+        const d = inRoom
+          ? 0
+          : Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
         if (entity.kind === "Building" && d < 5.0) {
           near = true;
         }

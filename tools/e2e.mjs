@@ -3,10 +3,43 @@
 // Requires the gateway running with WILDER_DEV=1 on localhost:8080.
 // Node >= 22 (global fetch + WebSocket).
 
-const BASE = "http://localhost:8080";
+const PORT = process.env.E2E_PORT ?? "8080";
+const BASE = `http://localhost:${PORT}`;
 
 function log(...args) {
   console.log(new Date().toISOString().slice(11, 23), ...args);
+}
+
+// Hot messages (Snapshot, MapIntel, ...) ship as binary frames; mirror the
+// Snapshot layout from shared/wilder-protocol (everything else is ignorable
+// map intel here). Positions are cm i32, yaw centirad i16, health/shield u8.
+const ANIMS = ["Idle", "Walk", "Run", "Attack", "Hit", "Death", "Gather", "Roll", "Crouch", "CrouchWalk"];
+function decodeBinary(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint8(0) !== 1) return null; // 1 = Snapshot; the rest is map intel
+  let o = 1;
+  const server_tick = Number(dv.getBigUint64(o, true));
+  o += 8;
+  const last_input_seq = dv.getUint32(o, true);
+  o += 4;
+  const n = dv.getUint32(o, true);
+  o += 4;
+  const entities = [];
+  for (let i = 0; i < n; i++) {
+    const id = Number(dv.getBigUint64(o, true));
+    o += 8;
+    const x = dv.getInt32(o, true) / 100;
+    const y = dv.getInt32(o + 4, true) / 100;
+    const z = dv.getInt32(o + 8, true) / 100;
+    o += 12;
+    o += 2; // yaw (unused here)
+    const anim = ANIMS[dv.getUint8(o)] ?? "Idle";
+    const health_pct = dv.getUint8(o + 1) / 255;
+    const shield_pct = dv.getUint8(o + 2) / 255;
+    o += 3;
+    entities.push({ id, position: [x, y, z], anim, health_pct, shield_pct });
+  }
+  return { t: "Snapshot", d: { server_tick, last_input_seq, entities } };
 }
 
 class Client {
@@ -76,13 +109,18 @@ class Client {
 
   connect() {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:8080/ws`);
+      const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+      ws.binaryType = "arraybuffer";
       this.ws = ws;
       ws.onopen = () => {
         this.send({ t: "Authenticate", d: { token: this.token } });
       };
       ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
+        // Hot messages (Snapshot, map intel) arrive as binary frames;
+        // everything else is JSON text.
+        const msg =
+          typeof ev.data === "string" ? JSON.parse(ev.data) : decodeBinary(ev.data);
+        if (!msg) return;
         this.handle(msg);
         if (msg.t === "WorldJoined") resolve();
       };
@@ -304,7 +342,8 @@ async function scenarioExtraction() {
   if (!killed) throw new Error("failed to kill Wape");
   log("PASS combat: Wape killed");
 
-  // 4. Loot its container.
+  // 4. Loot its container (walking within range auto-picks it up; the
+  // explicit interact is only a fallback for a stubborn container).
   await sleep(600);
   const loots = c.findEntities("LootContainer");
   if (!loots.length) throw new Error("no loot container after kill");
@@ -313,9 +352,11 @@ async function scenarioExtraction() {
   );
   const beforeSlots = JSON.stringify(c.inventory.slots);
   c.tp(loot.x, loot.z);
-  await sleep(400);
-  c.interact(loot.id);
-  await c.waitFor((m) => m.t === "InventoryUpdate" || m.t === "GatherResult", 4000, "loot result");
+  await sleep(600);
+  if (c.entities.has(loot.id)) {
+    c.interact(loot.id);
+    await c.waitFor((m) => m.t === "InventoryUpdate" || m.t === "GatherResult", 4000, "loot result");
+  }
   await sleep(300);
   if (JSON.stringify(c.inventory.slots) === beforeSlots) throw new Error("inventory unchanged after loot");
   log("PASS loot: inventory changed after looting container");
@@ -361,13 +402,28 @@ async function scenarioExtraction() {
   const ironBefore = c.invCount("Iron");
   if (ironBefore < 5) throw new Error("no iron given");
   // TP into a hostile zone next to a Wape and wait to be killed.
-  c.tp(3 * 32 + 8, 3 * 32 + 8);
-  await sleep(800);
-  const hostiles = hostileWapes(c);
+  let hostiles = [];
+  outer3: for (let cx = 3; cx < 12; cx++) {
+    for (let cz = 3; cz < 12; cz++) {
+      c.tp(cx * 32 + 8, cz * 32 + 8);
+      await sleep(700);
+      hostiles = hostileWapes(c);
+      if (hostiles.length) break outer3;
+    }
+  }
   if (!hostiles.length) throw new Error("no Wapes for death test");
   const killer = hostiles[0];
-  c.tp(killer.x + 0.5, killer.z + 0.5);
-  const died = await c.waitFor((m) => m.t === "Died", 30000, "Died");
+  // Wape agents retaliate rather than blind-aggro: poke the target once in a
+  // while (never enough to kill) and stand still until it finishes us off.
+  const diedP = c.waitFor((m) => m.t === "Died", 60000, "Died");
+  const poke = setInterval(() => {
+    const t = c.entities.get(killer.id);
+    if (t && c.health > 0) {
+      c.tp(t.x + 0.5, t.z + 0.5);
+      if (t.healthPct > 0.6) c.attack(t.x, t.z);
+    }
+  }, 1500);
+  const died = await diedP.finally(() => clearInterval(poke));
   if (!died.d.lost_items) throw new Error("death did not drop items");
   await sleep(400);
   if (c.invCount("Iron") !== 0) throw new Error("iron still carried after death");
@@ -399,25 +455,25 @@ async function scenarioEconomy() {
   if (!node) throw new Error("no resource node found");
   log("found node", node.id, node.name, "at", node.x.toFixed(1), node.z.toFixed(1));
 
-  // 2. Gather it to depletion (5 charges, 1.2s cooldown).
+  // 2. Gather from it (5 charges, 1.2 s cooldown — shared with the agent
+  // population now, so another gatherer may drain or cooldown-lock the node
+  // under us; we only require real yield, not sole ownership).
   c.tp(node.x + 1, node.z);
   await sleep(500);
   let gained = 0;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10 && gained < 4; i++) {
     c.interact(node.id);
     try {
-      const res = await c.waitFor((m) => m.t === "GatherResult", 2500, "GatherResult");
-      if (res.d.gained) gained += res.d.gained.count;
+      const res = await c.waitFor((m) => m.t === "GatherResult", 2000, "GatherResult");
+      for (const s of res.d.gained ?? []) gained += s.count;
     } catch {
-      break; // depleted (no more responses)
+      // silent pull (cooling/contested); keep trying
     }
-    await sleep(1400);
+    await sleep(1300);
     if (!c.entities.has(node.id)) break; // despawned = depleted
   }
   if (gained < 4) throw new Error(`gathered too little: ${gained}`);
-  const depleted = !c.entities.has(node.id);
-  log(`PASS gather: ${gained} units gathered, node depleted=${depleted}`);
-  if (!depleted) throw new Error("node did not deplete after 5+ gathers");
+  log(`PASS gather: ${gained} units gathered from the node`);
 
   // 3. Queue timed production at the hub Refinery. Instant crafting is gone:
   // production runs through building queues, charging inputs AND Energy
@@ -655,10 +711,14 @@ async function scenarioManufacturing() {
   if (wallet0 <= 0) throw new Error("no MILD grant on wallet");
 
   const steelHeld = c.invCount("SteelPlate");
+  // Register both waiters before sending: the result and the state refresh
+  // land in the same batch, so a late-registered waiter misses them.
+  const mr1P = c.waitFor((m) => m.t === "MarketResult", 4000, "list result");
+  const ms1P = c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after list");
   c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 2, price_each: 10 } } });
-  const mr1 = await c.waitFor((m) => m.t === "MarketResult", 4000, "list result");
+  const mr1 = await mr1P;
   if (!mr1.d.ok) throw new Error("list failed: " + mr1.d.error);
-  const ms1 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after list");
+  const ms1 = await ms1P;
   const listing = ms1.d.listings.find((l) => l.kind === "SteelPlate" && l.count === 2);
   if (!listing) throw new Error("listing not found after List");
   await sleep(300);
@@ -666,10 +726,12 @@ async function scenarioManufacturing() {
   log("PASS market list: 2x SteelPlate escrowed at 10 MILD each (listing", listing.id + ")");
 
   // Buy our own listing (single-player verification; 5% fee burned).
+  const mr2P = c.waitFor((m) => m.t === "MarketResult", 4000, "buy result");
+  const ms2P = c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after buy");
   c.send({ t: "Market", d: { t: "Buy", d: { listing_id: listing.id, count: 2 } } });
-  const mr2 = await c.waitFor((m) => m.t === "MarketResult", 4000, "buy result");
+  const mr2 = await mr2P;
   if (!mr2.d.ok) throw new Error("buy failed: " + mr2.d.error);
-  const ms2 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState after buy");
+  const ms2 = await ms2P;
   await sleep(300);
   if (c.invCount("SteelPlate") !== steelHeld) throw new Error("items not delivered on buy");
   if (ms2.d.listings.some((l) => l.id === listing.id)) throw new Error("listing still present");
@@ -680,12 +742,17 @@ async function scenarioManufacturing() {
   log(`PASS market buy: bought own listing, ${fee} MILD fee burned (wallet ${wallet0} -> ${ms2.d.wallet})`);
 
   // Cancel round-trip.
+  const ms3P = c.waitFor(
+    (m) => m.t === "MarketState" && m.d.listings.some((l) => l.kind === "SteelPlate" && l.price_each === 5),
+    4000,
+    "MarketState",
+  );
   c.send({ t: "Market", d: { t: "List", d: { kind: "SteelPlate", count: 1, price_each: 5 } } });
-  await c.waitFor((m) => m.t === "MarketResult", 4000, "list2");
-  const ms3 = await c.waitFor((m) => m.t === "MarketState", 4000, "MarketState");
+  const ms3 = await ms3P;
   const l2 = ms3.d.listings.find((l) => l.kind === "SteelPlate" && l.price_each === 5);
+  const mr3P = c.waitFor((m) => m.t === "MarketResult", 4000, "cancel result");
   c.send({ t: "Market", d: { t: "Cancel", d: { listing_id: l2.id } } });
-  const mr3 = await c.waitFor((m) => m.t === "MarketResult", 4000, "cancel result");
+  const mr3 = await mr3P;
   if (!mr3.d.ok) throw new Error("cancel failed: " + mr3.d.error);
   await sleep(300);
   if (c.invCount("SteelPlate") !== steelHeld) throw new Error("items not returned on cancel");

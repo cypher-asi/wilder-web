@@ -671,6 +671,20 @@ const PX_PER_TILE = 0.5; // 4 m per pixel
   };
   writeFileSync(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2));
   console.log(`minimap.png: ${pw} x ${ph}px, manifest with ${districts.length} districts`);
+
+  // Districts are a server-side concept too (wilder-terrain::districts()):
+  // emit the same anchors into the terrain crate's assets.
+  const districtsJson =
+    "[\n" +
+    districts
+      .map((d) => `  { "name": ${JSON.stringify(d.name)}, "x": ${d.x}, "z": ${d.z} }`)
+      .join(",\n") +
+    "\n]\n";
+  writeFileSync(
+    path.join(REPO, "crates", "wilder-terrain", "assets", "districts.json"),
+    districtsJson,
+  );
+  console.log(`districts.json: ${districts.length} districts -> crates/wilder-terrain/assets`);
 }
 
 // Stats

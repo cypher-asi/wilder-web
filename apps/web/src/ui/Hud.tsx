@@ -5,6 +5,7 @@ import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { nearestDoor } from "../render/Interior";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
+import { regionOf, territoryControl } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
@@ -46,6 +47,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <CurrencyPanel />
           <div className="minimap-panel">
             <Minimap />
+            <ZoneReadout />
             <PositionReadout />
           </div>
           <div className="comms-panel">
@@ -1534,6 +1536,58 @@ function DoorPrompt() {
       }}
     >
       [E] ENTER {label}
+    </div>
+  );
+}
+
+/** Hub combat-ring radius (m); mirror of `HUB_COMBAT_RING_M` in districts.rs. */
+const HUB_RING_M = 900;
+
+/**
+ * Zone strip under the minimap: the neighborhood the player is standing in
+ * plus which faction currently controls the local territory region.
+ */
+function ZoneReadout() {
+  const districts = useGame((s) => s.districts);
+  const factions = useGame((s) => s.factions);
+  const [state, setState] = useState({ zone: "—", control: 0 });
+  useEffect(() => {
+    const read = () => {
+      const px = game.predicted.x;
+      const pz = game.predicted.z;
+      // Zone name: the spawn hub's playfield overrides Voronoi — its nearest
+      // district anchor is ~1.5 km away and reads wrong on the ground.
+      let zone = "SPAWN HUB";
+      if (Math.hypot(px, pz) >= HUB_RING_M) {
+        let bestD = Infinity;
+        for (const d of districts) {
+          const dd = (d.x - px) ** 2 + (d.z - pz) ** 2;
+          if (dd < bestD) {
+            bestD = dd;
+            zone = d.name;
+          }
+        }
+      }
+      const [rx, rz] = regionOf(px, pz);
+      const control = territoryControl(rx, rz);
+      setState((prev) =>
+        prev.zone === zone && prev.control === control ? prev : { zone, control },
+      );
+    };
+    read();
+    const timer = setInterval(read, 500);
+    return () => clearInterval(timer);
+  }, [districts]);
+  const faction = factions.find((f) => f.id === state.control);
+  const color = faction
+    ? `#${faction.color.toString(16).padStart(6, "0")}`
+    : "var(--text-dim)";
+  return (
+    <div className="hud-zone">
+      <span className="hud-zone-name">{state.zone}</span>
+      <span className="hud-zone-owner" style={{ color }}>
+        {faction ? faction.name.toUpperCase() : "UNCLAIMED"}
+      </span>
     </div>
   );
 }

@@ -1577,6 +1577,8 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "rand_pcg",
+ "serde",
+ "serde_json",
  "wilder-types",
 ]
 
@@ -1597,6 +1599,8 @@ dependencies = [
  "glam",
  "rand",
  "serde",
+ "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "tracing",

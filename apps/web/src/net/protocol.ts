@@ -148,6 +148,7 @@ export interface Inventory {
 export type EntityKind =
   | "Player"
   | "Npc"
+  | "Agent"
   | "LootContainer"
   | "CurrencyPickup"
   | "ExtractionPoint"
@@ -346,7 +347,7 @@ export interface ZoneInfo {
 export interface AgentBlip {
   id: number;
   faction: FactionId;
-  /** 0 = player, 1 = agent, 2 = feral. */
+  /** 0 = player, 1 = agent, 2 = wild Wape. */
   kind: number;
   x: number;
   z: number;

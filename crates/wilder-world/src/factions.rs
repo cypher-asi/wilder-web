@@ -1,21 +1,27 @@
 //! Faction registry and hostility matrix.
 //!
 //! Factions are data, not enums: everything a faction *is* (name, color,
-//! who it fights) lives in [`faction_registry`], so adding a third faction is
+//! who it fights) lives in [`faction_registry`], so adding a faction is
 //! a new registry entry, not a refactor. `FACTION_NEUTRAL` (id 0) is implicit:
 //! it never appears in the registry and is hostile to no one — services,
 //! loot and unaffiliated actors all carry it by `serde(default)`.
+//!
+//! Three registered factions: the organized Rebels and Forum wage the
+//! territory war, while the wild `Wapes` are hostile to everyone — an
+//! environmental threat both sides must fend off.
 
-use wilder_types::{FactionId, FactionInfo, FACTION_FORUM, FACTION_REBELS};
+use wilder_types::{FactionId, FactionInfo, FACTION_FORUM, FACTION_REBELS, FACTION_WAPES};
 
 /// All registered (non-neutral) factions, serialized to clients on join.
 pub fn faction_registry() -> Vec<FactionInfo> {
     vec![
         FactionInfo {
             id: FACTION_REBELS,
+            // The player character's own neon blue (players are always
+            // Rebels, so allies read as the same color family as you).
             name: "Rebels".into(),
             tagline: "Free the grid.".into(),
-            color: 0x2d_e0_a6,
+            color: 0x40_e8_ff,
             hostile_to: vec![FACTION_FORUM],
         },
         FactionInfo {
@@ -25,7 +31,24 @@ pub fn faction_registry() -> Vec<FactionInfo> {
             color: 0xff_38_60,
             hostile_to: vec![FACTION_REBELS],
         },
+        FactionInfo {
+            id: FACTION_WAPES,
+            name: "Wapes".into(),
+            tagline: "The wild that bites both hands.".into(),
+            color: 0xff_a6_40,
+            hostile_to: vec![FACTION_REBELS, FACTION_FORUM],
+        },
     ]
+}
+
+/// Registry color for a faction (white for neutral/unknown), used to tint
+/// replicated agents.
+pub fn faction_color(id: FactionId) -> u32 {
+    faction_registry()
+        .iter()
+        .find(|f| f.id == id)
+        .map(|f| f.color)
+        .unwrap_or(0xff_ff_ff)
 }
 
 /// Whether two factions attack each other on sight.

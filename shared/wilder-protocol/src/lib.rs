@@ -254,7 +254,7 @@ pub struct ZoneInfo {
 pub struct AgentBlip {
     pub id: u64,
     pub faction: FactionId,
-    /// 0 = player, 1 = agent, 2 = feral.
+    /// 0 = player, 1 = agent, 2 = wild Wape.
     pub kind: u8,
     pub x: i16,
     pub z: i16,
@@ -307,13 +307,15 @@ pub struct GuildStanding {
     pub wealth: i64,
 }
 
-/// One controlled region on the territory grid. `control`: 1 = player-held,
-/// 2 = enemy-held (neutral regions are never sent).
+/// One controlled region on the territory grid. `control` is the holding
+/// `FactionId` (neutral regions are never sent). Ids 1 (Rebels) and 2 (The
+/// Forum) match the legacy player/enemy encoding, so old clients still read
+/// the overlay correctly.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TerritoryCell {
     pub rx: i32,
     pub rz: i32,
-    pub control: u8,
+    pub control: FactionId,
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> String {

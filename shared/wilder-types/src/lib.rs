@@ -25,8 +25,11 @@ pub type FactionId = u8;
 pub const FACTION_NEUTRAL: FactionId = 0;
 /// Player faction (all players default to Rebels for now).
 pub const FACTION_REBELS: FactionId = 1;
-/// The hostile faction; existing hostile NPCs fold into it as low-tier ferals.
+/// The rival organized faction opposing the Rebels.
 pub const FACTION_FORUM: FactionId = 2;
+/// Wild, unaligned NPCs ("Wapes"): hostile to both organized factions, an
+/// environmental threat rather than a competitor for the Rebels/Forum war.
+pub const FACTION_WAPES: FactionId = 3;
 
 /// One faction's registry entry, serialized to clients on join (in `PoiList`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +353,8 @@ impl Default for Inventory {
 pub enum EntityKind {
     Player,
     Npc,
+    /// Autonomous faction agent (replicated only while Hot / near players).
+    Agent,
     LootContainer,
     ExtractionPoint,
     ResourceNode,

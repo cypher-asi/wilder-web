@@ -59,6 +59,24 @@ pub fn prop_collision_radius(archetype: u16) -> f32 {
 pub const MAX_PROP_RADIUS: f32 = 1.1;
 
 const CITYMAP_BIN: &[u8] = include_bytes!("../assets/citymap.bin");
+const DISTRICTS_JSON: &str = include_str!("../assets/districts.json");
+
+/// A named city district: label + world-meter anchor (street centroid), baked
+/// by `tools/citymap/bake.mjs` alongside `citymap.bin`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct District {
+    pub name: String,
+    pub x: f32,
+    pub z: f32,
+}
+
+/// The baked city's named districts, parsed once on first use.
+pub fn districts() -> &'static [District] {
+    static DISTRICTS: OnceLock<Vec<District>> = OnceLock::new();
+    DISTRICTS.get_or_init(|| {
+        serde_json::from_str(DISTRICTS_JSON).expect("bad districts.json")
+    })
+}
 
 /// The baked city: global tile grid + per-chunk building instances.
 pub struct CityMap {
@@ -445,6 +463,51 @@ mod tests {
                     map.tile_at((map.spawn.x / TILE_SIZE) as i32 + dx, (map.spawn.z / TILE_SIZE) as i32 + dz);
                 assert!(kind.walkable(), "unwalkable tile at spawn offset ({dx},{dz})");
             }
+        }
+    }
+
+    #[test]
+    fn districts_parse_and_sit_inside_the_map() {
+        let map = CityMap::get();
+        let (min_x, min_z, max_x, max_z) = map.tile_bounds();
+        let list = districts();
+        assert_eq!(list.len(), 8);
+        assert!(list.iter().any(|d| d.name == "TRANQUILITY GARDENS"));
+        for d in list {
+            let tx = (d.x / TILE_SIZE) as i32;
+            let tz = (d.z / TILE_SIZE) as i32;
+            assert!(tx >= min_x && tx < max_x && tz >= min_z && tz < max_z, "{} anchor off-map", d.name);
+        }
+    }
+
+    #[test]
+    fn district_anchors_have_walkable_ground_nearby() {
+        // wilder-world snaps district staging spots to walkable tiles near
+        // the baked anchors; that only works if land actually exists there.
+        let map = CityMap::get();
+        for d in districts() {
+            let mut nearest = f32::MAX;
+            'search: for r in 0..100 {
+                let rad = r as f32 * TILE_SIZE;
+                for a in 0..64 {
+                    let ang = a as f32 / 64.0 * std::f32::consts::TAU;
+                    let x = d.x + rad * ang.cos();
+                    let z = d.z + rad * ang.sin();
+                    let kind =
+                        map.tile_at((x / TILE_SIZE).floor() as i32, (z / TILE_SIZE).floor() as i32);
+                    if kind.walkable() {
+                        nearest = rad;
+                        break 'search;
+                    }
+                }
+            }
+            assert!(
+                nearest <= 100.0,
+                "{}: no walkable tile within 100m of anchor ({}, {})",
+                d.name,
+                d.x,
+                d.z
+            );
         }
     }
 

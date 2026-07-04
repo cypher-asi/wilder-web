@@ -569,6 +569,35 @@ body {
   transition: width 0.25s;
 }
 
+.hud-zone {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  background: var(--panel);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  padding: 3px 8px;
+  overflow: hidden;
+}
+
+.hud-zone-name {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-zone-owner {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .hud-pos {
   width: 100%;
   text-align: center;
@@ -1773,9 +1802,10 @@ body {
   gap: 18px;
   height: 46px;
   padding: 0 18px;
-  background: rgba(6, 12, 20, 0.92);
-  border-bottom: 1px solid var(--accent-dim);
-  backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, 0.55);
+  border-bottom: 1px solid rgba(79, 195, 255, 0.14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   pointer-events: auto;
 }
 
@@ -1788,11 +1818,16 @@ body {
   text-shadow: var(--rgb-split);
 }
 
+/* True-center the tabs in the bar, independent of the brand/close widths. */
 .menu-nav-tabs {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  height: 100%;
+  transform: translateX(-50%);
   display: flex;
-  align-items: stretch;
-  gap: 2px;
-  flex: 1;
+  align-items: center;
+  gap: 6px;
 }
 
 .menu-nav-item {
@@ -1801,29 +1836,28 @@ body {
   gap: 7px;
   padding: 7px 14px;
   background: transparent;
-  border: 1px solid transparent;
-  clip-path: var(--clip-notch-sm);
+  border: none;
   font: 700 11px/1 var(--font-display);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-dim);
   cursor: pointer;
   transition:
-    color 0.12s,
-    background 0.12s,
-    border-color 0.12s;
+    color 0.15s,
+    text-shadow 0.15s;
 }
 
 .menu-nav-item:hover {
   color: var(--text);
-  background: rgba(79, 195, 255, 0.06);
 }
 
+/* Selected: glowing blue, matching the additive holo-building look. */
 .menu-nav-item.active {
-  color: var(--accent-bright);
-  background: var(--accent-faint);
-  border-color: var(--accent-dim);
-  text-shadow: var(--hud-glow);
+  color: #cdeeff;
+  text-shadow:
+    0 0 6px rgba(79, 195, 255, 0.95),
+    0 0 16px rgba(46, 166, 242, 0.7),
+    0 0 30px rgba(46, 166, 242, 0.45);
 }
 
 .menu-nav-key {
@@ -1836,14 +1870,16 @@ body {
 }
 
 .menu-nav-item.active .menu-nav-key {
-  color: var(--accent);
-  border-color: var(--accent-dim);
+  color: #bfe8ff;
+  border-color: rgba(79, 195, 255, 0.5);
+  text-shadow: 0 0 8px rgba(79, 195, 255, 0.8);
 }
 
 .menu-nav-close {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-left: auto;
   padding: 7px 12px;
   background: transparent;
   border: 1px solid var(--steel-border);
@@ -2868,10 +2904,28 @@ body {
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--accent-dim) transparent;
-  /* Manual scroll anchoring lives in TxFeed (JS). Disable the browser's own
-     scroll anchoring so the two don't stack and double-shift the viewport as
-     new rows prepend. */
-  overflow-anchor: none;
+}
+
+/* Shown when the feed is paused (scrolled away from the top) and new
+   transactions are buffered; click to jump back to the live head. */
+.econ-feed-new {
+  align-self: center;
+  margin: 4px 0 2px;
+  padding: 4px 14px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  color: var(--bg, #04060b);
+  background: var(--accent, #4fc3ff);
+  clip-path: var(--clip-notch);
+  cursor: pointer;
+  box-shadow: 0 0 12px rgba(79, 195, 255, 0.6);
+  user-select: none;
+}
+
+.econ-feed-new:hover {
+  background: var(--white, #fff);
 }
 
 .econ-feed-list::-webkit-scrollbar,

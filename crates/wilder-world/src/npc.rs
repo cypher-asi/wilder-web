@@ -108,15 +108,17 @@ impl Npc {
             id: self.entity,
             kind: EntityKind::Npc,
             name: self.archetype.name.to_string(),
-            appearance: Appearance { body: 1, tint: 0xff5544 },
+            // Tint by the Wapes faction color so wild NPCs read as their own
+            // (amber) side rather than generic enemy red.
+            appearance: Appearance { body: 1, tint: crate::factions::faction_color(FACTION_WAPES) },
             position: self.position,
             yaw: self.yaw,
             anim: self.anim,
             health_pct: (self.health / self.archetype.max_health).max(0.0),
             variant: self.archetype.variant,
             item: None,
-            // Hostile NPCs are Forum-aligned ferals.
-            faction: FACTION_FORUM,
+            // Wild NPCs belong to the Wapes faction (hostile to everyone).
+            faction: FACTION_WAPES,
         }
     }
 
@@ -208,10 +210,12 @@ impl Npc {
         let target = match self.patrol_target {
             Some(t) => t,
             None => {
+                // Wide enough that idle Wapes read as roaming scavengers on
+                // the ground and the minimap instead of statues.
                 let t = Vec3::new(
-                    self.home.x + rng.random_range(-8.0..8.0),
+                    self.home.x + rng.random_range(-25.0..25.0),
                     0.0,
-                    self.home.z + rng.random_range(-8.0..8.0),
+                    self.home.z + rng.random_range(-25.0..25.0),
                 );
                 self.patrol_target = Some(t);
                 t
@@ -244,13 +248,25 @@ impl Npc {
     }
 }
 
-/// Deterministic NPC spawn set for a hostile chunk.
+/// Deterministic NPC spawn set for a hostile chunk. Inside the spawn hub's
+/// combat ring Wapes are thinned (roughly half the chunks, one Wape each) so
+/// the Rebels-vs-Forum war owns the starter playfield instead of everything
+/// reading amber.
 pub fn npc_spawns_for_chunk(coord: ChunkCoord, chunk: &ChunkData) -> Vec<(&'static NpcArchetype, Vec3)> {
     // Simple stable hash for count/placement.
     let h = (coord.x.wrapping_mul(374761393) ^ coord.z.wrapping_mul(668265263)) as u32;
-    let count = 1 + (h % 3) as usize; // 1-3 NPCs per hostile chunk
-    let mut out = Vec::new();
     let origin = Vec3::new(coord.x as f32 * CHUNK_SIZE, 0.0, coord.z as f32 * CHUNK_SIZE);
+    let center = origin + Vec3::new(CHUNK_SIZE * 0.5, 0.0, CHUNK_SIZE * 0.5);
+    let in_hub_ring = center.x.hypot(center.z) < crate::districts::HUB_COMBAT_RING_M;
+    let count = if in_hub_ring {
+        if h & 4 == 0 {
+            return Vec::new();
+        }
+        1
+    } else {
+        1 + (h % 3) as usize // 1-3 NPCs per hostile chunk
+    };
+    let mut out = Vec::new();
 
     // Place on walkable tiles, scanning from varied offsets.
     let mut found = 0;

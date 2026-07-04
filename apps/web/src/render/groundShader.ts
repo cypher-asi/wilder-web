@@ -87,20 +87,29 @@ uniform vec3 uGTint;
 // Player world XZ: fades the tron floor grid to black away from the character.
 uniform vec2 uPlayerPos;
 ${STYLE_TOON_DECLS}
-// Territory: enemy-held regions tint the tron grid red.
+// Territory: enemy-held regions tint the tron grid in the holder's faction
+// color (keep these in sync with faction_registry in wilder-world).
 const vec3 TRON_RED = vec3(${TRON_RED.r.toFixed(5)}, ${TRON_RED.g.toFixed(5)}, ${TRON_RED.b.toFixed(5)});
+const vec3 TERR_FORUM = vec3(1.0, 0.220, 0.376);  // The Forum #ff3860
+const vec3 TERR_WAPES = vec3(1.0, 0.651, 0.251);  // Wapes #ffa640
 uniform vec3 uTerrCells[${TERR_MAX}];
 uniform int uTerrCount;
 uniform float uRegionSize;
-// 1.0 when the world-xz position lies in an enemy-controlled region.
+// Holding enemy faction id at this world-xz (0.0 when not enemy-held).
 float gTerrEnemy(vec2 wxz) {
   vec2 rg = floor(wxz / uRegionSize);
   for (int i = 0; i < ${TERR_MAX}; i++) {
     if (i >= uTerrCount) break;
     vec3 c = uTerrCells[i];
-    if (abs(c.x - rg.x) < 0.5 && abs(c.y - rg.y) < 0.5) return 1.0;
+    if (abs(c.x - rg.x) < 0.5 && abs(c.y - rg.y) < 0.5) return max(c.z, 1.0);
   }
   return 0.0;
+}
+// Grid line color for the enemy faction holding this ground.
+vec3 gTerrColor(float f) {
+  if (abs(f - 2.0) < 0.5) return TERR_FORUM;
+  if (abs(f - 3.0) < 0.5) return TERR_WAPES;
+  return TRON_RED;
 }
 uniform sampler2D uAsphaltMap;
 uniform sampler2D uAsphaltNormal;
@@ -236,9 +245,11 @@ if (uTron > 0.5) {
   gAlb = TRON_BASE * (gKind == 0 ? 1.6 : 3.0);
   gRgh = gKind == 0 ? 0.3 : 0.45;
   if (gKind > 4 && gKind < 6) { gAlb = TRON_BASE * 1.2; gRgh = 0.08; }
-  // Enemy-held ground swaps the neon line color from blue to red.
-  float tEnemy = gTerrEnemy(wp.xz);
-  vec3 tGrid = mix(TRON_BLUE, TRON_RED, tEnemy);
+  // Enemy-held ground swaps the neon line color from blue to the holding
+  // faction's color (Forum red, Wapes amber).
+  float tFaction = gTerrEnemy(wp.xz);
+  float tEnemy = tFaction > 0.5 ? 1.0 : 0.0;
+  vec3 tGrid = mix(TRON_BLUE, gTerrColor(tFaction), tEnemy);
   // Grid lines on street surfaces only (sidewalks/plazas stay clean dark
   // slabs); fades with camera distance so far chunks don't shimmer.
   if (gKind == 0) {

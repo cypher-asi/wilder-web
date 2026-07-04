@@ -25,6 +25,8 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
 glam = { workspace = true }
+smallvec = "1"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = { workspace = true }

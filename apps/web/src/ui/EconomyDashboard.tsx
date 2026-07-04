@@ -6,7 +6,7 @@
 // with a full snapshot (EconomyState) and then pushes per-tick batches
 // (EconomyTxs) while the screen stays open.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
 import {
   Board,
@@ -333,39 +333,38 @@ function TxFeed() {
     [feed, filter],
   );
 
-  // New transactions are prepended (newest first) and the feed is capped, so
-  // rows get added at the top while old ones fall off the bottom — scrollHeight
-  // stays roughly constant and can't be used to detect the shift. Instead we
-  // anchor to a concrete row (the previous top row, keyed by seq): after each
-  // update we measure how far that row moved and add the difference back into
-  // scrollTop, keeping the rows the user is reading exactly in place. When the
-  // user is at the very top we leave scrollTop at 0 so newest rows keep flowing.
+  // The ledger can stream hundreds of transactions per second, and the feed is
+  // capped, so anything scrolled into view is quickly evicted — trying to
+  // compensate scrollTop as rows prepend is a losing battle. Instead we freeze
+  // the rendered list the moment the user scrolls away from the top: new rows
+  // are held back (buffered in `shown`) so nothing under the cursor moves, and
+  // are revealed again once the user returns to the top. A pill surfaces how
+  // many transactions are waiting and jumps back to live on click.
   const listRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<{ seq: number; offsetTop: number } | null>(null);
-  useLayoutEffect(() => {
+  const [atTop, setAtTop] = useState(true);
+  const frozenRef = useRef<EconTx[]>(shown);
+  if (atTop) frozenRef.current = shown;
+  const display = atTop ? shown : frozenRef.current;
+  const frozenTopSeq = frozenRef.current[0]?.seq ?? -1;
+  const pending = atTop ? 0 : shown.reduce((n, tx) => (tx.seq > frozenTopSeq ? n + 1 : n), 0);
+
+  const onScroll = () => {
     const el = listRef.current;
-    if (!el) return;
-    const prev = anchorRef.current;
-    // Only compensate when the user is scrolled away from the top; at the top
-    // we let scrollTop stay 0 so the newest rows keep streaming into view.
-    if (prev && el.scrollTop > 0) {
-      const node = el.querySelector<HTMLElement>(`[data-seq="${prev.seq}"]`);
-      if (node) {
-        const shift = node.offsetTop - prev.offsetTop;
-        if (shift !== 0) el.scrollTop += shift;
-      }
-    }
-    const first = el.querySelector<HTMLElement>("[data-seq]");
-    anchorRef.current = first
-      ? { seq: Number(first.dataset.seq), offsetTop: first.offsetTop }
-      : null;
-  }, [shown]);
+    if (el) setAtTop(el.scrollTop <= 4);
+  };
+  const jumpToLive = () => {
+    const el = listRef.current;
+    if (el) el.scrollTop = 0;
+    setAtTop(true);
+  };
 
   return (
     <div className="econ-panel econ-feed">
       <div className="econ-panel-title">
         TRANSACTION FEED
-        <span className="econ-panel-sub">{feed.length > 0 ? "LIVE" : "AWAITING ACTIVITY"}</span>
+        <span className="econ-panel-sub">
+          {feed.length === 0 ? "AWAITING ACTIVITY" : atTop ? "LIVE" : "PAUSED"}
+        </span>
       </div>
       <div className="econ-tabs">
         {CATEGORY_ORDER.map((c) => (
@@ -397,14 +396,19 @@ function TxFeed() {
         <span>ITEM / AMOUNT</span>
         <span className="num">FEE</span>
       </div>
-      <div className="econ-feed-list" ref={listRef}>
+      {pending > 0 && (
+        <div className="econ-feed-new" onClick={jumpToLive}>
+          ▲ {pending.toLocaleString()} NEW {pending === 1 ? "TRANSACTION" : "TRANSACTIONS"}
+        </div>
+      )}
+      <div className="econ-feed-list" ref={listRef} onScroll={onScroll}>
         {feed.length === 0 && (
           <div className="econ-empty">No transactions yet — the ledger records every economic event.</div>
         )}
-        {feed.length > 0 && shown.length === 0 && (
+        {feed.length > 0 && display.length === 0 && (
           <div className="econ-empty">No transactions match this filter.</div>
         )}
-        {shown.map((tx) => (
+        {display.map((tx) => (
           <TxRow key={tx.seq} tx={tx} now={now} />
         ))}
       </div>

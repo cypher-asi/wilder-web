@@ -20,10 +20,10 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { POI_STYLES } from "../game/poi";
-import { enemyRegions, REGION_SIZE } from "../game/territory";
+import { allRegions, MY_FACTION, REGION_SIZE, syncTerritoryUniforms } from "../game/territory";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
-import { RED_HEX, redGlow } from "./colors";
+import { RED_HEX } from "./colors";
 
 /** Canvas size in CSS px (square panel with notched corners). */
 const SIZE = 230;
@@ -44,6 +44,16 @@ const TILE_FILL: Record<number, string> = {
   [CITY_BUILDING]: "rgba(6, 12, 22, 0.82)",
 };
 const WATER_FILL = "rgba(1, 4, 10, 0.62)";
+
+/**
+ * RGB triple for a faction's registry color (from the PoiList sent on join);
+ * falls back to hostile red for unknown ids.
+ */
+function factionRgb(id: number): [number, number, number] {
+  const info = useGame.getState().factions.find((f) => f.id === id);
+  if (!info) return [255, 56, 96];
+  return [(info.color >> 16) & 0xff, (info.color >> 8) & 0xff, info.color & 0xff];
+}
 
 export function Minimap() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -138,8 +148,15 @@ export function Minimap() {
       baseCz = cz;
     };
 
+    let lastTerrSync = 0;
     const draw = (now: number) => {
       raf = requestAnimationFrame(draw);
+      // The ground shader's red-tint budget follows the player: re-pick the
+      // nearest hostile regions once a second as they move across the map.
+      if (now - lastTerrSync > 1000) {
+        lastTerrSync = now;
+        syncTerritoryUniforms();
+      }
       const dpr = window.devicePixelRatio || 1;
       if (canvas.width !== SIZE * dpr) {
         canvas.width = SIZE * dpr;
@@ -181,14 +198,19 @@ export function Minimap() {
         ctx.setLineDash([]);
       }
 
-      // Enemy-controlled territory: translucent red region cells.
-      for (const { rx, rz } of enemyRegions()) {
+      // Controlled territory: translucent cells in the holding faction's
+      // registry color (Rebels blue, Forum red, Wapes amber). Allied ground
+      // renders too — fainter, so hostile cells still pop — which keeps the
+      // map honest against the leaderboard's territory counts.
+      for (const { rx, rz, faction } of allRegions()) {
         const [rx0, ry0] = toScreen(rx * REGION_SIZE, rz * REGION_SIZE);
         const [rx1, ry1] = toScreen((rx + 1) * REGION_SIZE, (rz + 1) * REGION_SIZE);
         if (rx1 < 0 || ry1 < 0 || rx0 > SIZE || ry0 > SIZE) continue;
-        ctx.fillStyle = redGlow(0.14);
+        const [r, g, b] = factionRgb(faction);
+        const mine = faction === MY_FACTION;
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${mine ? 0.1 : 0.14})`;
         ctx.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
-        ctx.strokeStyle = redGlow(0.6);
+        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${mine ? 0.4 : 0.6})`;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
       }
@@ -207,17 +229,24 @@ export function Minimap() {
           ctx.lineTo(sx - 5, sy);
           ctx.closePath();
           ctx.fill();
-        } else if (entity.kind === "Npc") {
+        } else if (entity.kind === "Npc" || entity.kind === "Agent") {
+          // Faction blip: agents and wild Wapes both use their faction tint
+          // (Rebels blue, Forum red, Wapes amber).
+          const color =
+            entity.tint > 0
+              ? `#${entity.tint.toString(16).padStart(6, "0")}`
+              : RED_HEX;
           ctx.save();
-          ctx.shadowColor = redGlow(0.9);
-          ctx.shadowBlur = 6;
-          ctx.fillStyle = RED_HEX;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = entity.kind === "Npc" ? 6 : 5;
+          ctx.fillStyle = color;
           ctx.beginPath();
           ctx.arc(sx, sy, 2.38, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         } else if (entity.kind === "Player") {
-          ctx.fillStyle = "#29d98c";
+          // Other players are Rebels: same neon blue as your character.
+          ctx.fillStyle = "#40e8ff";
           ctx.beginPath();
           ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
           ctx.fill();

@@ -286,7 +286,7 @@ function applyMannequinPalette(
       // Flat, light red silhouette: kill all shading/detail so the whole
       // body reads as one translucent shape (the border does the rest).
       m.color.set(0x000000);
-      m.emissive.set(RED_NUM);
+      m.emissive.set(tint || RED_NUM);
       // Solid, dim flat fill; the brighter rim (drawn after) frames it.
       m.emissiveIntensity = 0.55;
       m.roughness = 1;
@@ -304,13 +304,13 @@ function applyMannequinPalette(
     if (f.joints) {
       if (tron) {
         m.color.set(0x04080c);
-        m.emissive.set(hostile ? RED_NUM : 0x4fd0e0);
+        m.emissive.set(hostile ? tint || RED_NUM : 0x4fd0e0);
         m.emissiveIntensity = hostile ? 2.6 : 3.2;
         m.roughness = 0.3;
         m.metalness = 0.6;
       } else {
         m.color.set(0x101318);
-        m.emissive.set(hostile ? RED_NUM : tint || 0x40e8ff);
+        m.emissive.set(tint || (hostile ? RED_NUM : 0x40e8ff));
         m.emissiveIntensity = 1.6;
         m.roughness = 0.35;
         m.metalness = 0.5;
@@ -450,7 +450,6 @@ const CHARACTER_BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 1, 0), 3);
  * and blooms into a glow: warning red for hostiles, friendly blue for players.
  */
 const PLAYER_OUTLINE_HEX = "#e6f0ff";
-const ENEMY_OUTLINE_COLOR = new THREE.Color(RED_NUM).multiplyScalar(1.7);
 const PLAYER_OUTLINE_COLOR = new THREE.Color(PLAYER_OUTLINE_HEX).multiplyScalar(1.7);
 /** World-space border half-width, in metres. */
 const ENEMY_OUTLINE_THICKNESS = 0.015;
@@ -564,7 +563,11 @@ function attachPistol(rig: THREE.Group, pistol: THREE.Group): GunMount | null {
 }
 
 function CharacterModel({ entity }: { entity: GameEntity }) {
-  const isNpc = entity.kind === "Npc";
+  // Faction agents animate like NPCs (full-body attack/hit clips, no gun
+  // mount) but keep their faction tint instead of the hostile red.
+  const isAgent = entity.kind === "Agent";
+  const isNpc = entity.kind === "Npc" || isAgent;
+  const hostileStyle = entity.kind === "Npc";
   const model = useAssetModel(CHARACTER_MODEL);
   const pistolModel = useAssetModel(isNpc ? undefined : PISTOL_MODEL);
   const mixer = useRef<THREE.AnimationMixer | null>(null);
@@ -613,7 +616,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   // frame — no bind-pose (T-pose) flash.
   useLayoutEffect(() => {
     if (!model || model.animations.length === 0) return;
-    flashMats.current = restyleMannequin(model.scene, entity.tint, isNpc);
+    flashMats.current = restyleMannequin(model.scene, entity.tint, hostileStyle);
     const m = new THREE.AnimationMixer(model.scene);
     mixer.current = m;
     actions.current = {};
@@ -688,13 +691,13 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       m.removeEventListener("finished", onFinished);
       m.stopAllAction();
     };
-  }, [model, entity.tint, entity.id, isNpc]);
+  }, [model, entity.tint, entity.id, hostileStyle]);
 
   // Live restyle on visual style switches (the mixer effect above must not
   // re-run for a palette change — it would reset the animation state).
   const tronStyle = useGame((s) => isTronStyle(s.visualStyle));
   useEffect(() => {
-    applyMannequinPalette(flashMats.current, entity.tint, isNpc, tronStyle);
+    applyMannequinPalette(flashMats.current, entity.tint, hostileStyle, tronStyle);
     // Don't undo an in-flight reveal (the palette resets opacity to 1); the
     // per-frame fade ramp owns opacity until it hands material state back.
     if (!fadeDone.current) {
@@ -703,7 +706,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         f.mat.opacity = 0;
       }
     }
-  }, [tronStyle, entity.tint, isNpc, model]);
+  }, [tronStyle, entity.tint, hostileStyle, model]);
 
   useEffect(() => {
     if (!model || !pistolModel) return;
@@ -717,17 +720,22 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     };
   }, [model, pistolModel, entity.id]);
 
-  // Glowing silhouette border: red for enemies, blue for players.
+  // Glowing silhouette border: faction color for agents and wild Wapes
+  // (NPCs), blue for players. Enemy-red now comes from the Forum faction tint
+  // itself, so Wapes read amber rather than a generic hostile red.
   useEffect(() => {
     if (!model) return;
-    const color = isNpc ? ENEMY_OUTLINE_COLOR : PLAYER_OUTLINE_COLOR;
+    const color =
+      hostileStyle || isAgent
+        ? new THREE.Color(entity.tint || (hostileStyle ? RED_NUM : PLAYER_OUTLINE_HEX)).multiplyScalar(1.7)
+        : PLAYER_OUTLINE_COLOR;
     const { materials, cleanup } = attachOutline(model.scene, color);
     outlineMats.current = materials;
     return () => {
       outlineMats.current = [];
       cleanup();
     };
-  }, [model, isNpc]);
+  }, [model, hostileStyle, isAgent, entity.tint]);
 
   /** Fire a clip on the upper-body layer without touching locomotion. */
   function playUpper(name: string, timeScale: number) {
@@ -774,7 +782,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       fade = THREE.MathUtils.clamp((now - fadeStartAt.current) / FADE_IN_MS, 0, 1);
       if (fade >= 1) {
         fadeDone.current = true;
-        applyMannequinPalette(flashMats.current, entity.tint, isNpc, tronStyle);
+        applyMannequinPalette(flashMats.current, entity.tint, hostileStyle, tronStyle);
       } else {
         for (const f of flashMats.current) f.mat.opacity = fade;
       }
@@ -1342,31 +1350,6 @@ function HoloSign({ kind, y = 3.1 }: { kind: EntityKind; y?: number }) {
 // Service POI storefronts
 // ---------------------------------------------------------------------------
 
-/** Panel opened alongside the Interact message when a shop is clicked. */
-function openShopPanel(kind: EntityKind): void {
-  const { set } = useGame.getState();
-  switch (kind) {
-    case "Building":
-      set({ inventoryOpen: true });
-      break;
-    case "MarketTerminal":
-      set({ marketOpen: true });
-      break;
-    case "Refinery":
-    case "Factory":
-    case "Laboratory":
-      set({ craftOpen: true });
-      break;
-    case "Armory":
-    case "Bank":
-    case "Bodega":
-      set({ vendorOpen: true });
-      break;
-    default:
-      break; // Dealership: interact only (placeholder until vehicles ship)
-  }
-}
-
 /** Fascia sign per kind: a dark board with the location name glowing in its
  * accent color. One canvas texture + material per kind, shared by every
  * instance. */
@@ -1507,7 +1490,7 @@ function ShopFront({ entity }: { entity: GameEntity }) {
   }
 
   return (
-    // Interaction is key-driven (E) via PlayerInput ΓÇö clicking the building
+    // Interaction is key-driven (E) via PlayerInput — clicking the building
     // never opens a menu, so a stray shot at a storefront can't pop a panel.
     <group ref={group}>
       {/* Sign board flat on the storefront fascia band, on top of all the
@@ -1576,7 +1559,8 @@ function SafehouseView({ entity }: { entity: GameEntity }) {
 
 function EntityView({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
-  const isCharacter = entity.kind === "Player" || entity.kind === "Npc";
+  const isCharacter =
+    entity.kind === "Player" || entity.kind === "Npc" || entity.kind === "Agent";
   /** Previous render position, for velocity estimation. */
   const prevPos = useRef<{ x: number; z: number } | null>(null);
 
@@ -1727,6 +1711,22 @@ function EntityView({ entity }: { entity: GameEntity }) {
         </group>
       );
       break;
+    case "Agent":
+      body = (
+        <group
+          onPointerOver={() => {
+            game.hoverTargetId = entity.id;
+          }}
+          onPointerOut={() => {
+            if (game.hoverTargetId === entity.id) game.hoverTargetId = null;
+          }}
+        >
+          <CharacterModel entity={entity} />
+          <HealthBar entity={entity} />
+          <AgentNameplate entity={entity} />
+        </group>
+      );
+      break;
     default:
       body = <CharacterModel entity={entity} />;
   }
@@ -1815,6 +1815,72 @@ function HealthBar({ entity }: { entity: GameEntity }) {
         <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
           <div ref={container} className="enemy-hpbar">
             <div ref={fill} className="enemy-hpbar-fill" />
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
+/** Camera distance (m) beyond which agent nameplates hide entirely. */
+const NAMEPLATE_MAX_DIST = 40;
+
+/**
+ * Floating name tag for faction agents, tinted with their faction color.
+ * Sits above the health bar and fades out with camera distance.
+ */
+function AgentNameplate({ entity }: { entity: GameEntity }) {
+  const group = useRef<THREE.Group>(null);
+  const label = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const lastVisible = useRef(false);
+  const world = useRef(new THREE.Vector3());
+
+  useFrame(({ camera }) => {
+    const g = group.current;
+    if (!g) return;
+    const alive = entity.anim !== "Death" && entity.healthPct > 0;
+    let show = false;
+    let opacity = 1;
+    if (alive) {
+      g.getWorldPosition(world.current);
+      const dist = camera.position.distanceTo(world.current);
+      world.current.project(camera);
+      const v = world.current;
+      show =
+        dist < NAMEPLATE_MAX_DIST &&
+        v.z < 1 &&
+        v.x > -1.05 &&
+        v.x < 1.05 &&
+        v.y > -1.05 &&
+        v.y < 1.05;
+      opacity = THREE.MathUtils.clamp(1 - dist / NAMEPLATE_MAX_DIST + 0.25, 0.25, 1);
+    }
+    if (show !== lastVisible.current) {
+      lastVisible.current = show;
+      setVisible(show);
+    }
+    if (show && label.current) {
+      label.current.style.opacity = String(opacity);
+    }
+  });
+
+  const color = `#${(entity.tint || 0xffffff).toString(16).padStart(6, "0")}`;
+  return (
+    <group ref={group} position={[0, 2.35, 0]}>
+      {visible && (
+        <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
+          <div
+            ref={label}
+            style={{
+              color,
+              font: "600 11px/1.1 'Rajdhani', 'Segoe UI', sans-serif",
+              letterSpacing: "0.08em",
+              textShadow: "0 0 4px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.9)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {entity.name}
           </div>
         </Html>
       )}

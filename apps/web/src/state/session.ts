@@ -7,7 +7,15 @@ const TOKEN_KEY = "wilder_token";
 const USER_KEY = "wilder_user";
 const GUEST_KEY = "wilder_guest";
 
-/** Throwaway guest identity, persisted so the same runner returns on reload. */
+/**
+ * Throwaway guest identity. Stored in sessionStorage, which is scoped to a
+ * single browser tab: it survives reloads (same runner returns) but is unique
+ * per tab, so opening the site in a second tab spins up its own guest +
+ * character instead of both tabs fighting over one identity (the server only
+ * lets a character be "in world" once, so the second tab would otherwise error
+ * with "character already in world"). Real, explicitly logged-in accounts stay
+ * in localStorage and auto-resume across tabs.
+ */
 interface GuestCreds {
   username: string;
   password: string;
@@ -15,7 +23,7 @@ interface GuestCreds {
 
 function loadGuest(): GuestCreds | null {
   try {
-    const raw = localStorage.getItem(GUEST_KEY);
+    const raw = sessionStorage.getItem(GUEST_KEY);
     return raw ? (JSON.parse(raw) as GuestCreds) : null;
   } catch {
     return null;
@@ -53,8 +61,9 @@ interface SessionState {
 }
 
 export const useSession = create<SessionState>((set, get) => ({
-  token: localStorage.getItem(TOKEN_KEY),
-  username: localStorage.getItem(USER_KEY),
+  // Prefer this tab's own guest identity; fall back to a real logged-in account.
+  token: sessionStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(TOKEN_KEY),
+  username: sessionStorage.getItem(USER_KEY) ?? localStorage.getItem(USER_KEY),
   screen: "boot",
   characters: [],
   activeCharacter: null,
@@ -71,46 +80,63 @@ export const useSession = create<SessionState>((set, get) => ({
   exitAssetLab: () => set({ screen: "login" }),
   goToLogin: () => set({ activeCharacter: null, screen: "login" }),
   logout: () => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
-    localStorage.removeItem(GUEST_KEY);
+    for (const store of [localStorage, sessionStorage]) {
+      store.removeItem(TOKEN_KEY);
+      store.removeItem(USER_KEY);
+      store.removeItem(GUEST_KEY);
+    }
     set({ token: null, username: null, screen: "login", activeCharacter: null });
   },
 
   bootstrap: async () => {
     try {
-      // 1. Ensure a token: reuse a stored one, re-login a saved guest, or
-      //    register a fresh guest identity.
-      let token = get().token;
-      let username = get().username;
-      if (!token) {
-        const guest = loadGuest();
-        if (guest) {
-          const res = await api<AuthResponse>("/api/login", {
-            method: "POST",
-            body: { username: guest.username, password: guest.password },
-          }).catch(() => null);
-          if (res) {
-            token = res.token;
-            username = res.username;
+      // A real, explicitly logged-in account lives in localStorage (no guest
+      // creds) and auto-resumes. Everything else uses a PER-TAB guest identity
+      // in sessionStorage, so a second tab on the same machine gets its own
+      // runner + character rather than colliding on one shared identity.
+      const realToken = localStorage.getItem(TOKEN_KEY);
+      const isRealAccount = !!realToken && !localStorage.getItem(GUEST_KEY);
+
+      let token: string | null;
+      let username: string | null;
+
+      if (isRealAccount) {
+        token = realToken;
+        username = localStorage.getItem(USER_KEY);
+      } else {
+        // 1. Ensure a per-tab token: reuse this tab's, re-login its saved
+        //    guest, or register a fresh guest identity for this tab.
+        token = sessionStorage.getItem(TOKEN_KEY);
+        username = sessionStorage.getItem(USER_KEY);
+        if (!token) {
+          const guest = loadGuest();
+          if (guest) {
+            const res = await api<AuthResponse>("/api/login", {
+              method: "POST",
+              body: { username: guest.username, password: guest.password },
+            }).catch(() => null);
+            if (res) {
+              token = res.token;
+              username = res.username;
+            }
           }
         }
+        if (!token) {
+          const creds: GuestCreds = {
+            username: `runner_${randToken(8)}`,
+            password: randToken(16),
+          };
+          const res = await api<AuthResponse>("/api/register", {
+            method: "POST",
+            body: creds,
+          });
+          sessionStorage.setItem(GUEST_KEY, JSON.stringify(creds));
+          token = res.token;
+          username = res.username;
+        }
+        sessionStorage.setItem(TOKEN_KEY, token);
+        if (username) sessionStorage.setItem(USER_KEY, username);
       }
-      if (!token) {
-        const creds: GuestCreds = {
-          username: `runner_${randToken(8)}`,
-          password: randToken(16),
-        };
-        const res = await api<AuthResponse>("/api/register", {
-          method: "POST",
-          body: creds,
-        });
-        localStorage.setItem(GUEST_KEY, JSON.stringify(creds));
-        token = res.token;
-        username = res.username;
-      }
-      localStorage.setItem(TOKEN_KEY, token);
-      if (username) localStorage.setItem(USER_KEY, username);
       set({ token, username });
 
       // 2. Ensure a character, then drop straight in.

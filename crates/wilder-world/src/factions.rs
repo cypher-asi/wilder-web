@@ -35,7 +35,9 @@ pub fn faction_registry() -> Vec<FactionInfo> {
             id: FACTION_WAPES,
             name: "Wapes".into(),
             tagline: "The wild that bites both hands.".into(),
-            color: 0xff_a6_40,
+            // Neon violet: sits clear of the Rebels' cyan and the Forum's red
+            // instead of clashing against the grid's blue like the old amber.
+            color: 0xb4_5c_ff,
             hostile_to: vec![FACTION_REBELS, FACTION_FORUM],
         },
     ]

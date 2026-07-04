@@ -14,7 +14,7 @@ pub mod stats;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -28,8 +28,8 @@ use wilder_inventory as inv;
 use wilder_pathfinding::find_path;
 use wilder_persistence::{CharacterStore, RocksStore, Stash, WorldStore};
 use wilder_physics::{
-    position_clear, step_move, step_move_speed, CollisionWorld, CROUCH_SPEED, ROLL_COOLDOWN,
-    ROLL_DURATION, ROLL_SPEED, RUN_SPEED,
+    nudge, position_clear, step_move, step_move_speed, CollisionWorld, CROUCH_SPEED,
+    PLAYER_RADIUS, ROLL_COOLDOWN, ROLL_DURATION, ROLL_SPEED, RUN_SPEED,
 };
 use wilder_protocol::*;
 use wilder_replication::{diff_view, view_set};
@@ -133,6 +133,127 @@ const LEADERBOARD_TICK_INTERVAL: u64 = 100;
 /// Stream whole-map intel blips to map subscribers every N ticks (~5 Hz) so
 /// actor motion on the open map reads as smooth, live movement.
 const MAP_INTEL_TICK_INTERVAL: u64 = 4;
+/// Log the per-system tick-time breakdown every N ticks (~30 s).
+const TIMING_LOG_TICKS: u64 = 600;
+
+/// Phases of `World::step`, in execution order, for per-system wall-time
+/// accounting. Timing is always on: two `Instant::now()` reads per phase are
+/// noise next to the systems they wrap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TickPhase {
+    Movement,
+    Extraction,
+    Npcs,
+    Agents,
+    Separation,
+    Loot,
+    Nodes,
+    Production,
+    Territory,
+    Regen,
+    Interest,
+    Replicate,
+    Economy,
+    Broadcasts,
+    Save,
+}
+
+impl TickPhase {
+    const COUNT: usize = 15;
+
+    const ALL: [TickPhase; TickPhase::COUNT] = [
+        TickPhase::Movement,
+        TickPhase::Extraction,
+        TickPhase::Npcs,
+        TickPhase::Agents,
+        TickPhase::Separation,
+        TickPhase::Loot,
+        TickPhase::Nodes,
+        TickPhase::Production,
+        TickPhase::Territory,
+        TickPhase::Regen,
+        TickPhase::Interest,
+        TickPhase::Replicate,
+        TickPhase::Economy,
+        TickPhase::Broadcasts,
+        TickPhase::Save,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            TickPhase::Movement => "movement",
+            TickPhase::Extraction => "extraction",
+            TickPhase::Npcs => "npcs",
+            TickPhase::Agents => "agents",
+            TickPhase::Separation => "separation",
+            TickPhase::Loot => "loot",
+            TickPhase::Nodes => "nodes",
+            TickPhase::Production => "production",
+            TickPhase::Territory => "territory",
+            TickPhase::Regen => "regen",
+            TickPhase::Interest => "interest",
+            TickPhase::Replicate => "replicate",
+            TickPhase::Economy => "economy",
+            TickPhase::Broadcasts => "broadcasts",
+            TickPhase::Save => "save",
+        }
+    }
+}
+
+/// Accumulated wall time per `step()` phase since the last reset. The live
+/// loop logs+resets every `TIMING_LOG_TICKS`; the headless benchmark reads a
+/// summary at the end of its run.
+#[derive(Default)]
+struct TickTimings {
+    accum: [Duration; TickPhase::COUNT],
+    total: Duration,
+    max_total: Duration,
+    ticks: u64,
+}
+
+impl TickTimings {
+    fn add(&mut self, phase: TickPhase, elapsed: Duration) {
+        self.accum[phase as usize] += elapsed;
+    }
+
+    fn finish_tick(&mut self, total: Duration) {
+        self.total += total;
+        self.max_total = self.max_total.max(total);
+        self.ticks += 1;
+    }
+
+    fn avg_tick(&self) -> Duration {
+        if self.ticks == 0 {
+            return Duration::ZERO;
+        }
+        self.total / self.ticks as u32
+    }
+
+    /// Per-phase average micros per tick, formatted, slowest first.
+    /// Phases that averaged under a microsecond are omitted.
+    fn summary(&self) -> String {
+        if self.ticks == 0 {
+            return "no ticks".into();
+        }
+        let mut avg_us: Vec<(&'static str, u128)> = TickPhase::ALL
+            .iter()
+            .map(|&phase| {
+                (phase.name(), self.accum[phase as usize].as_micros() / self.ticks as u128)
+            })
+            .filter(|&(_, us)| us > 0)
+            .collect();
+        avg_us.sort_by(|a, b| b.1.cmp(&a.1));
+        avg_us
+            .iter()
+            .map(|(name, us)| format!("{name}={us}us"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn reset(&mut self) {
+        *self = TickTimings::default();
+    }
+}
 
 /// Territory region containing a world position. Region math mirrors the
 /// client (`apps/web/src/game/territory.ts`) so lines/tax agree.
@@ -781,10 +902,14 @@ pub struct World {
     /// One staging position per district (a walkable spot near the district's
     /// service cluster), filled by `seed_neighborhood_stores`.
     district_spots: Vec<Vec3>,
+    /// Per-system wall-time accounting for `step()`.
+    timings: TickTimings,
 }
 
-/// Create the world and spawn its tick loop. Returns a handle for connections.
-pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
+/// Build a fully seeded world (district services, interiors, agents) reading
+/// its command stream from `rx`. `spawn_world` wraps this in the live tick
+/// loop; the headless benchmark steps it directly.
+fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> World {
     // World seed persists so the city never changes between restarts.
     let seed: u64 = match store.meta::<u64>("world_seed") {
         Ok(Some(seed)) => seed,
@@ -812,7 +937,6 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
     // Leaderboard stats book (per-competitor records + lifetime rollups).
     let stats: StatsBook = store.meta("stats_book").ok().flatten().unwrap_or_default();
 
-    let (tx, rx) = mpsc::unbounded_channel();
     let mut world = World {
         store: store.clone(),
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
@@ -844,6 +968,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         agent_path_queue: std::collections::VecDeque::new(),
         recent_attacks: HashMap::new(),
         district_spots: Vec::new(),
+        timings: TickTimings::default(),
     };
     // Seed the spawn district up front so PoiList is complete on every join.
     world.seed_district();
@@ -854,6 +979,14 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
     world.register_interiors();
     // Faction agents: restore the persisted population or seed a fresh one.
     world.load_or_seed_agents();
+    world
+}
+
+/// Create the world and spawn its tick loop. Returns a handle for connections.
+pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let world = new_world(store, rx);
+    let seed = world.seed;
     tokio::spawn(world.run());
     WorldHandle { tx, seed }
 }
@@ -869,7 +1002,34 @@ impl World {
                 self.handle_cmd(cmd);
             }
             self.step();
+            if self.tick % TIMING_LOG_TICKS == 0 {
+                self.log_timings();
+            }
         }
+    }
+
+    /// Emit the per-system tick-time breakdown accumulated since the last
+    /// log, then reset. Escalates to warn when the average tick eats more
+    /// than half the 50 ms budget.
+    fn log_timings(&mut self) {
+        let avg = self.timings.avg_tick();
+        let max = self.timings.max_total;
+        let summary = self.timings.summary();
+        let over_budget = avg > Duration::from_millis(1000 / TICK_HZ as u64 / 2);
+        if over_budget {
+            tracing::warn!(?avg, ?max, agents = self.agents.len(), players = self.players.len(), "tick budget pressure: {summary}");
+        } else {
+            tracing::debug!(?avg, ?max, "tick timings: {summary}");
+        }
+        self.timings.reset();
+    }
+
+    /// Run one phase of `step()` under the wall-time accounting.
+    #[inline]
+    fn timed(&mut self, phase: TickPhase, f: impl FnOnce(&mut Self)) {
+        let start = Instant::now();
+        f(self);
+        self.timings.add(phase, start.elapsed());
     }
 
     fn alloc_entity(&mut self) -> EntityId {
@@ -3033,27 +3193,31 @@ impl World {
     fn step(&mut self) {
         self.tick += 1;
         self.ledger.set_tick(self.tick);
+        let step_start = Instant::now();
 
-        self.apply_movement();
-        self.tick_extraction();
-        self.tick_npcs();
-        self.tick_agents();
-        self.tick_loot();
-        self.tick_nodes();
-        self.tick_production();
-        self.tick_territory();
-        self.tick_regen();
-        self.update_interest();
-        self.replicate();
-        self.flush_economy();
-        // Leaderboards refresh for dashboard subscribers every ~5 s.
-        if self.tick % LEADERBOARD_TICK_INTERVAL == 0 {
-            self.broadcast_leaderboard();
-        }
-        // Whole-map intel for open maps, ~1 Hz.
-        if self.tick % MAP_INTEL_TICK_INTERVAL == 0 {
-            self.broadcast_map_intel();
-        }
+        self.timed(TickPhase::Movement, |w| w.apply_movement());
+        self.timed(TickPhase::Extraction, |w| w.tick_extraction());
+        self.timed(TickPhase::Npcs, |w| w.tick_npcs());
+        self.timed(TickPhase::Agents, |w| w.tick_agents());
+        self.timed(TickPhase::Separation, |w| w.separate_characters());
+        self.timed(TickPhase::Loot, |w| w.tick_loot());
+        self.timed(TickPhase::Nodes, |w| w.tick_nodes());
+        self.timed(TickPhase::Production, |w| w.tick_production());
+        self.timed(TickPhase::Territory, |w| w.tick_territory());
+        self.timed(TickPhase::Regen, |w| w.tick_regen());
+        self.timed(TickPhase::Interest, |w| w.update_interest());
+        self.timed(TickPhase::Replicate, |w| w.replicate());
+        self.timed(TickPhase::Economy, |w| w.flush_economy());
+        self.timed(TickPhase::Broadcasts, |w| {
+            // Leaderboards refresh for dashboard subscribers every ~5 s.
+            if w.tick % LEADERBOARD_TICK_INTERVAL == 0 {
+                w.broadcast_leaderboard();
+            }
+            // Whole-map intel for open maps, ~5 Hz.
+            if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
+                w.broadcast_map_intel();
+            }
+        });
 
         // Clear per-tick attack flags only after replicate so the Attack anim
         // state actually reaches other clients (attacks are processed on
@@ -3063,8 +3227,10 @@ impl World {
         }
 
         if self.tick % SAVE_INTERVAL_TICKS == 0 {
-            self.save_all();
+            self.timed(TickPhase::Save, |w| w.save_all());
         }
+
+        self.timings.finish_tick(step_start.elapsed());
     }
 
     fn apply_movement(&mut self) {
@@ -3146,6 +3312,129 @@ impl World {
             if (player.character.position - before).length_squared() > 1e-10 {
                 player.moved_this_tick = true;
                 player.dirty = true;
+            }
+        }
+    }
+
+    /// Post-movement crowd separation: embodied characters (hot agents and
+    /// NPCs) are soft discs that push out of each other and out of player
+    /// discs, so melee piles no longer interpenetrate. Players are never
+    /// moved — client prediction owns their position and a server-side shove
+    /// would fight reconciliation — and every push respects world collision.
+    fn separate_characters(&mut self) {
+        /// Two character discs touch at twice the shared body radius.
+        const MIN_SEP: f32 = PLAYER_RADIUS * 2.0;
+        /// Fraction of the remaining overlap resolved per tick. Softness
+        /// spreads the resolution over a few ticks so packed crowds relax
+        /// smoothly instead of jittering.
+        const RELAX: f32 = 0.5;
+        /// A body never gets shoved faster than it can run.
+        const MAX_PUSH: f32 = agents::AGENT_SPEED * TICK_DT;
+
+        enum Body {
+            Agent(usize),
+            Npc(EntityId),
+            Player,
+        }
+
+        let mut bodies: Vec<(Body, Vec3)> = Vec::new();
+        for (i, a) in self.agents.iter().enumerate() {
+            if a.tier == Tier::Hot && a.alive() {
+                bodies.push((Body::Agent(i), a.position));
+            }
+        }
+        for (id, npc) in self.npcs.iter() {
+            if npc.alive() {
+                bodies.push((Body::Npc(*id), npc.position));
+            }
+        }
+        for p in self.players.values() {
+            if p.character.health > 0.0 {
+                bodies.push((Body::Player, p.character.position));
+            }
+        }
+        if bodies.len() < 2 {
+            return;
+        }
+
+        // Fine spatial hash: cell = MIN_SEP, so any overlapping pair sits in
+        // the same or an adjacent cell.
+        let cell =
+            |p: &Vec3| ((p.x / MIN_SEP).floor() as i32, (p.z / MIN_SEP).floor() as i32);
+        let mut grid: HashMap<(i32, i32), SmallVec<[u32; 4]>> =
+            HashMap::with_capacity(bodies.len());
+        for (i, (_, pos)) in bodies.iter().enumerate() {
+            grid.entry(cell(pos)).or_default().push(i as u32);
+        }
+
+        let mut pushes = vec![(0.0f32, 0.0f32); bodies.len()];
+        for (i, (kind_i, pos_i)) in bodies.iter().enumerate() {
+            let movable_i = !matches!(kind_i, Body::Player);
+            let (cx, cz) = cell(pos_i);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else { continue };
+                    for &j in bucket {
+                        let j = j as usize;
+                        if j <= i {
+                            continue; // each pair once
+                        }
+                        let (kind_j, pos_j) = &bodies[j];
+                        let movable_j = !matches!(kind_j, Body::Player);
+                        if !movable_i && !movable_j {
+                            continue;
+                        }
+                        let dxw = pos_j.x - pos_i.x;
+                        let dzw = pos_j.z - pos_i.z;
+                        let d2 = dxw * dxw + dzw * dzw;
+                        if d2 >= MIN_SEP * MIN_SEP {
+                            continue;
+                        }
+                        let d = d2.sqrt();
+                        // Coincident centers: derive a stable push axis from
+                        // the pair indices so the two bodies part ways.
+                        let (nx, nz) = if d > 1e-4 {
+                            (dxw / d, dzw / d)
+                        } else {
+                            let a = (i * 31 + j * 17) as f32;
+                            (a.cos(), a.sin())
+                        };
+                        let overlap = (MIN_SEP - d) * RELAX;
+                        // Immovable neighbors (players) transfer their share.
+                        let (wi, wj) = match (movable_i, movable_j) {
+                            (true, true) => (0.5, 0.5),
+                            (true, false) => (1.0, 0.0),
+                            _ => (0.0, 1.0),
+                        };
+                        pushes[i].0 -= nx * overlap * wi;
+                        pushes[i].1 -= nz * overlap * wi;
+                        pushes[j].0 += nx * overlap * wj;
+                        pushes[j].1 += nz * overlap * wj;
+                    }
+                }
+            }
+        }
+
+        for (idx, (body, pos)) in bodies.iter().enumerate() {
+            let (mut px, mut pz) = pushes[idx];
+            let len2 = px * px + pz * pz;
+            if len2 < 1e-8 {
+                continue;
+            }
+            let len = len2.sqrt();
+            if len > MAX_PUSH {
+                px *= MAX_PUSH / len;
+                pz *= MAX_PUSH / len;
+            }
+            let next = nudge(&self.chunks, *pos, px, pz);
+            match body {
+                Body::Agent(i) => self.agents[*i].position = next,
+                Body::Npc(id) => {
+                    if let Some(npc) = self.npcs.get_mut(id) {
+                        npc.position = next;
+                    }
+                }
+                Body::Player => {}
             }
         }
     }
@@ -3625,6 +3914,13 @@ impl World {
             if !self.agents[idx].alive() {
                 continue;
             }
+            // Drop stale loot goals: someone else grabbed the container (or
+            // it expired) while the agent was still walking over.
+            if let Goal::Loot { container, .. } = self.agents[idx].goal {
+                if !self.loot.contains_key(&container) {
+                    self.agents[idx].goal = Goal::Idle;
+                }
+            }
             // Resolve the Hunt target snapshot before handing off the tick.
             let target = match self.agents[idx].goal {
                 Goal::Hunt { target } => {
@@ -3910,7 +4206,7 @@ impl World {
     /// Utility-AI: score candidate goals for one agent and commit to the best.
     fn decide_agent(&mut self, idx: usize) {
         use rand::Rng;
-        let (pos, role, faction, health_frac, wallet, carried, entity, retreat_cd) = {
+        let (pos, role, faction, health_frac, wallet, carried, haul, entity, retreat_cd) = {
             let a = &self.agents[idx];
             (
                 a.position,
@@ -3919,6 +4215,7 @@ impl World {
                 a.health / a.max_health,
                 a.wallet,
                 a.carried_value(),
+                a.haul_value(),
                 a.entity,
                 a.retreat_cooldown,
             )
@@ -3986,6 +4283,66 @@ impl World {
                         (store, store_pos)
                     };
                     best = (score, Goal::Sell { store, store_pos, list_on_market });
+                }
+            }
+        }
+
+        // --- Loot: grab dropped containers nearby (free value on the ground).
+        // Ammo caches (variant 1) are world spawns left for players; agents
+        // only chase death drops. ---
+        if stacks < agents::MAX_STACKS - 2 {
+            let loot_mult = match role {
+                Role::Scavenger => 1.5,
+                Role::Raider => 1.3,
+                _ => 0.9,
+            };
+            let mut best_loot: Option<(f32, EntityId, Vec3)> = None;
+            for c in self.loot.values() {
+                if c.variant != 0 {
+                    continue;
+                }
+                let dist = (c.position - pos).length();
+                if dist > agents::LOOT_SCAN_RANGE {
+                    continue;
+                }
+                let value: u32 = c.items.iter().map(|s| base_value(s.kind) * s.count).sum();
+                if value < 5 {
+                    continue;
+                }
+                // Nearer drops of equal value win (half weight at max range).
+                let score =
+                    value as f32 * loot_mult * (1.0 - 0.5 * dist / agents::LOOT_SCAN_RANGE);
+                if best_loot.map(|(s, _, _)| score > s).unwrap_or(true) {
+                    best_loot = Some((score, c.entity, c.position));
+                }
+            }
+            if let Some((score, container, cpos)) = best_loot {
+                if score > best.0 {
+                    best = (score, Goal::Loot { container, pos: cpos });
+                }
+            }
+        }
+
+        // --- Extract: ship a big haul off-map at an extraction beacon. Pays
+        // full reference value (better than vendor floor, taxed on hostile
+        // ground), so runners with heavy packs prefer a nearby beacon. ---
+        if haul >= agents::EXTRACT_MIN_HAUL {
+            if let Some((_, point_pos)) = self.nearest_service(pos, EntityKind::ExtractionPoint) {
+                let dist = (point_pos - pos).length();
+                if dist <= agents::EXTRACT_SEEK_RANGE {
+                    let extract_mult = match role {
+                        Role::Raider => 1.4,
+                        Role::Scavenger => 1.3,
+                        Role::Trader => 0.8,
+                        _ => 1.0,
+                    };
+                    // Weighted above Sell's 0.08/value: extraction pays full
+                    // reference value where vendors pay floor minus the cut.
+                    let score = haul as f32 * 0.15 * extract_mult
+                        * (1.0 - 0.5 * dist / agents::EXTRACT_SEEK_RANGE);
+                    if score > best.0 {
+                        best = (score, Goal::Extract { point_pos, timer: EXTRACT_SECONDS });
+                    }
                 }
             }
         }
@@ -4262,7 +4619,83 @@ impl World {
             }
             Goal::Trade { .. } => self.agent_trade(idx),
             Goal::Craft { .. } => self.agent_craft_step(idx),
+            Goal::Loot { container, .. } => self.agent_loot_pickup(idx, container),
+            Goal::Extract { .. } => self.agent_extract(idx),
             _ => {}
+        }
+    }
+
+    /// Drain a loot container into the agent's pack (it walked onto the
+    /// drop). Mirrors the player walk-over pickup, including the ledger
+    /// attribution; whatever doesn't fit stays on the ground.
+    fn agent_loot_pickup(&mut self, idx: usize, container_id: EntityId) {
+        self.agents[idx].goal = Goal::Idle;
+        let Some(container) = self.loot.get_mut(&container_id) else { return };
+        let items: Vec<ItemStack> = container.items.drain(..).collect();
+        let owner = container.owner.clone();
+        let in_supply = container.in_supply;
+        let mut taken: Vec<ItemStack> = Vec::new();
+        let mut leftovers: Vec<ItemStack> = Vec::new();
+        for stack in items {
+            let rem = self.agents[idx].add_item(stack.kind, stack.count);
+            if stack.count > rem {
+                taken.push(ItemStack { kind: stack.kind, count: stack.count - rem });
+            }
+            if rem > 0 {
+                leftovers.push(ItemStack { kind: stack.kind, count: rem });
+            }
+        }
+        if leftovers.is_empty() {
+            self.loot.remove(&container_id);
+        } else if let Some(container) = self.loot.get_mut(&container_id) {
+            container.items = leftovers;
+        }
+        if !taken.is_empty() {
+            let picker = self.agents[idx].party();
+            self.record_loot_pickup(picker, owner, in_supply, &taken);
+        }
+    }
+
+    /// Complete an extraction channel: the agent's haul (everything but its
+    /// personal kit) ships off-map for full reference value in WILD. Items
+    /// burn from supply; the payout mints, taxed on hostile-held ground like
+    /// player extractions.
+    fn agent_extract(&mut self, idx: usize) {
+        self.agents[idx].goal = Goal::Idle;
+        let pos = self.agents[idx].position;
+        let taxed = self.region_hostile_to(pos, self.agents[idx].faction);
+        let cargo: Vec<ItemStack> = {
+            let inv = &mut self.agents[idx].inventory;
+            let cargo = inv.iter().filter(|s| !agents::is_kit(s.kind)).cloned().collect();
+            inv.retain(|s| agents::is_kit(s.kind));
+            cargo
+        };
+        if cargo.is_empty() {
+            return;
+        }
+        let party = self.agents[idx].party();
+        let mut payout: u32 = 0;
+        for stack in &cargo {
+            payout += base_value(stack.kind).saturating_mul(stack.count);
+            self.ledger.record_ex(
+                TxKind::Extract,
+                party.clone(),
+                TxParty::Burn,
+                TxAmount::Item { kind: stack.kind, count: stack.count },
+                0,
+                SupplyEffect::Burn,
+            );
+        }
+        let payout = apply_territory_tax(payout, taxed);
+        if payout > 0 {
+            self.agents[idx].wallet += payout;
+            self.ledger.record(
+                TxKind::Extract,
+                TxParty::Mint,
+                party,
+                TxAmount::Wild { amount: payout },
+                0,
+            );
         }
     }
 
@@ -5775,6 +6208,140 @@ pub fn spawn_position() -> Vec3 {
     SPAWN
 }
 
+// ---------------------------------------------------------------------------
+// Headless benchmark
+// ---------------------------------------------------------------------------
+
+/// Headless load harness (`cargo run -p wilder-world --release --bin
+/// worldbench`): seeds a fresh world in a throwaway store, parks fake
+/// players on the hub combat ring so agents around them go hot, steps the
+/// world directly (no tokio runtime, no sleeping between ticks) and prints
+/// tick percentiles, the per-phase breakdown and player-0's wire bandwidth.
+pub mod bench {
+    use super::*;
+
+    pub struct BenchConfig {
+        pub agents: usize,
+        pub players: usize,
+        pub ticks: u64,
+    }
+
+    pub fn run(cfg: BenchConfig) {
+        std::env::set_var("WILDER_AGENTS", cfg.agents.to_string());
+        let dir =
+            std::env::temp_dir().join(format!("wilder-worldbench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        run_in(cfg, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn run_in(cfg: BenchConfig, dir: &std::path::Path) {
+        let store = Arc::new(RocksStore::open(dir).expect("open bench store"));
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let setup = Instant::now();
+        let mut world = new_world(store.clone(), cmd_rx);
+        println!(
+            "seeded {} agents, {} statics in {:.2?}",
+            world.agents.len(),
+            world.statics.len(),
+            setup.elapsed()
+        );
+
+        // Fake players parked around the hub combat ring: hot-tier agent
+        // simulation, NPC seeding and replication all engage around them.
+        let mut player_rx: Vec<(EntityId, mpsc::UnboundedReceiver<S2C>)> = Vec::new();
+        for i in 0..cfg.players {
+            let account = store
+                .create_account(&format!("bench-{i}"), "bench")
+                .expect("bench account");
+            let angle = i as f32 / cfg.players.max(1) as f32 * std::f32::consts::TAU;
+            let ring = Vec3::new(140.0 * angle.cos(), 0.0, 140.0 * angle.sin());
+            let character = Character {
+                id: uuid::Uuid::new_v4(),
+                account_id: account.id,
+                name: format!("BENCH-{i}"),
+                appearance: Appearance::default(),
+                position: world.nearest_walkable(ring),
+                yaw: 0.0,
+                level: 1,
+                xp: 0,
+                health: 100.0,
+                max_health: 100.0,
+                shield: 0.0,
+                max_shield: 0.0,
+                faction: FACTION_REBELS,
+            };
+            store.create_character(&character).expect("bench character");
+            let (ptx, prx) = mpsc::unbounded_channel();
+            let entity = world.join(account.id, character.id, ptx).expect("bench join");
+            player_rx.push((entity, prx));
+        }
+
+        // Warm up: stream in chunks/NPCs around the parked players and drain
+        // the join burst so steady-state stats aren't polluted by setup.
+        for _ in 0..(TICK_HZ as u64 * 2) {
+            world.step();
+        }
+        for (_, prx) in player_rx.iter_mut() {
+            while prx.try_recv().is_ok() {}
+        }
+        world.timings.reset();
+
+        let mut per_tick_us: Vec<u64> = Vec::with_capacity(cfg.ticks as usize);
+        let mut msgs: u64 = 0;
+        let mut p0_bytes: u64 = 0;
+        let run_start = Instant::now();
+        for _ in 0..cfg.ticks {
+            let start = Instant::now();
+            world.step();
+            per_tick_us.push(start.elapsed().as_micros() as u64);
+            for (pi, (_, prx)) in player_rx.iter_mut().enumerate() {
+                while let Ok(msg) = prx.try_recv() {
+                    msgs += 1;
+                    if pi == 0 {
+                        p0_bytes += encode(&msg).len() as u64;
+                    }
+                }
+            }
+        }
+        let elapsed = run_start.elapsed();
+
+        per_tick_us.sort_unstable();
+        let pct = |p: f64| per_tick_us[((per_tick_us.len() - 1) as f64 * p) as usize];
+        let budget_us = 1_000_000 / TICK_HZ as u64;
+        println!(
+            "agents={} players={} ticks={} wall={:.2?}",
+            cfg.agents, cfg.players, cfg.ticks, elapsed
+        );
+        println!(
+            "tick p50={}us p90={}us p99={}us max={}us (budget {}us)",
+            pct(0.50),
+            pct(0.90),
+            pct(0.99),
+            per_tick_us.last().copied().unwrap_or(0),
+            budget_us
+        );
+        println!("phases: {}", world.timings.summary());
+        if cfg.players > 0 {
+            let secs = cfg.ticks as f64 / TICK_HZ as f64;
+            println!(
+                "wire: {} msgs total, player0 {:.1} KB/s ({} bytes over {:.0} sim-seconds)",
+                msgs,
+                p0_bytes as f64 / 1024.0 / secs,
+                p0_bytes,
+                secs
+            );
+        }
+        let over = per_tick_us.iter().filter(|&&us| us > budget_us).count();
+        println!(
+            "ticks over budget: {} / {} ({:.2}%)",
+            over,
+            per_tick_us.len(),
+            over as f64 / per_tick_us.len().max(1) as f64 * 100.0
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5942,6 +6509,7 @@ mod tests {
             agent_path_queue: std::collections::VecDeque::new(),
             recent_attacks: HashMap::new(),
             district_spots: Vec::new(),
+            timings: TickTimings::default(),
         };
         (world, dir)
     }
@@ -6078,6 +6646,98 @@ mod tests {
         assert!(world.deal_damage(h1, h2, 10.0, None));
         // ...and now the intruder may retaliate against its attacker.
         assert!(world.deal_damage(h2, h1, 10.0, None));
+    }
+
+    #[test]
+    fn overlapping_hot_agents_get_pushed_apart() {
+        let (mut world, _dir) = test_world();
+        let spot = world.nearest_walkable(district_anchor("NEXUS"));
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, spot);
+        let b = spawn_test_agent(
+            &mut world,
+            FACTION_FORUM,
+            Role::Raider,
+            spot + Vec3::new(0.1, 0.0, 0.0),
+        );
+        world.agents[a].tier = Tier::Hot;
+        world.agents[b].tier = Tier::Hot;
+        for _ in 0..40 {
+            world.separate_characters();
+        }
+        let d = (world.agents[a].position - world.agents[b].position).length();
+        assert!(d >= PLAYER_RADIUS * 2.0 - 1e-3, "agents still interpenetrate: {d}");
+    }
+
+    #[test]
+    fn separation_pushes_agents_out_of_players_but_never_moves_players() {
+        let (mut world, _dir) = test_world();
+        let spot = world.nearest_walkable(district_anchor("NEXUS"));
+        let a = spawn_test_agent(&mut world, FACTION_REBELS, Role::Raider, spot);
+        world.agents[a].tier = Tier::Hot;
+
+        // A connected player standing exactly on the agent.
+        let entity = world.alloc_entity();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: uuid::Uuid::new_v4(),
+            name: "TESTER".into(),
+            appearance: Appearance::default(),
+            position: spot,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.players.insert(
+            entity,
+            Player {
+                entity,
+                character,
+                inventory: Inventory::new(),
+                stash: Stash::default(),
+                tx,
+                pending_inputs: Vec::new(),
+                last_input_seq: 0,
+                path: Vec::new(),
+                view: HashSet::new(),
+                known_entities: HashSet::new(),
+                moved_this_tick: false,
+                ran_this_tick: false,
+                attacked_this_tick: false,
+                attack_cooldown: 0.0,
+                crouching: false,
+                roll_time: 0.0,
+                roll_dir: (1.0, 0.0),
+                roll_cooldown: 0.0,
+                shield_delay: 0.0,
+                ability_cooldowns: [0.0; 3],
+                stim_heal_left: 0.0,
+                stim_speed_time: 0.0,
+                overcharge_time: 0.0,
+                extracting: None,
+                blueprints: HashSet::new(),
+                production: HashMap::new(),
+                wallet: 0,
+                shards: 0,
+                energy: 0,
+                wallet_sent: None,
+                map_intel: false,
+                dirty: true,
+            },
+        );
+
+        for _ in 0..40 {
+            world.separate_characters();
+        }
+        let player_pos = world.players[&entity].character.position;
+        assert_eq!(player_pos, spot, "players must never be shoved by separation");
+        let d = (world.agents[a].position - player_pos).length();
+        assert!(d >= PLAYER_RADIUS * 2.0 - 1e-3, "agent still inside the player: {d}");
     }
 
     #[test]
@@ -6290,6 +6950,84 @@ mod tests {
         world.agent_vendor_buy(idx, armory, ItemKind::Knife, 1);
         assert_eq!(world.agents[idx].wallet, wallet - 45);
         assert_eq!(world.agents[idx].count_item(ItemKind::Knife), 1);
+    }
+
+    #[test]
+    fn agents_scoop_dropped_loot() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let pos = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
+        // A juicy drop right next to the agent (well above the gather score).
+        let drop_pos = pos + Vec3::new(3.0, 0.0, 0.0);
+        world.spawn_loot(
+            drop_pos,
+            vec![ItemStack { kind: ItemKind::Pistol, count: 1 }],
+            None,
+            false,
+        );
+        let container = *world.loot.keys().next().unwrap();
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Loot { container: c, .. } if c == container),
+            "scavenger next to a weapon drop should go loot it, got {:?}",
+            world.agents[idx].goal
+        );
+        world.agents[idx].goal = Goal::Loot { container, pos: drop_pos };
+        world.agent_loot_pickup(idx, container);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Pistol), 1);
+        assert!(!world.loot.contains_key(&container), "emptied drop should despawn");
+
+        // Ammo caches are for players: agents never target them.
+        world.spawn_ammo_cache(drop_pos, 12);
+        world.decide_agent(idx);
+        assert!(
+            !matches!(world.agents[idx].goal, Goal::Loot { .. }),
+            "agents must leave ammo caches alone, got {:?}",
+            world.agents[idx].goal
+        );
+    }
+
+    #[test]
+    fn agent_extraction_ships_haul_and_keeps_kit() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let pos = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
+        // Heavy haul plus personal kit (the spawn Pipe stays too).
+        world.agents[idx].add_item(ItemKind::SteelPlate, 6); // 6 * 13 = 78
+        world.agents[idx].add_item(ItemKind::Medkit, 1);
+        assert!(world.agents[idx].haul_value() >= agents::EXTRACT_MIN_HAUL);
+        // Plant a beacon next door so extraction outscores hauling to a store.
+        let entity = world.alloc_entity();
+        world.statics.insert(
+            entity,
+            StaticEntity {
+                entity,
+                kind: EntityKind::ExtractionPoint,
+                position: pos + Vec3::new(4.0, 0.0, 0.0),
+                name: "Extraction Point".into(),
+                variant: 0,
+                agent_id: static_agent_id(world.seed, entity),
+            },
+        );
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Extract { .. }),
+            "heavy haul next to a beacon should extract, got {:?}",
+            world.agents[idx].goal
+        );
+        let wallet = world.agents[idx].wallet;
+        world.agent_extract(idx);
+        // Cargo shipped for full reference value; kit stays in the pack.
+        assert_eq!(world.agents[idx].wallet, wallet + 78);
+        assert_eq!(world.agents[idx].count_item(ItemKind::SteelPlate), 0);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Pipe), 1);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Medkit), 1);
+        // Nothing left to ship: a second channel is a no-op.
+        let wallet = world.agents[idx].wallet;
+        world.agent_extract(idx);
+        assert_eq!(world.agents[idx].wallet, wallet);
     }
 
     #[test]

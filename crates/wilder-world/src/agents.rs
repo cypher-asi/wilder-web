@@ -45,6 +45,20 @@ pub const RETALIATION_SECONDS: f32 = 10.0;
 pub const SANCTUARY_HEAL_RATE: f32 = 6.0;
 /// Seconds after a wealth-retreat before wealth triggers another one.
 pub const RETREAT_COOLDOWN: f32 = 240.0;
+/// Facing responsiveness, 1/s: the replicated yaw follows the desired
+/// heading through a low-pass so per-tick steering noise (crowd-separation
+/// shoves, jittering melee targets) can't whip the body back and forth,
+/// while real turns still complete in a fraction of a second.
+pub const FACE_RESPONSE: f32 = 8.0;
+/// Seconds the Run pose lingers after the last actual step, so stop-start
+/// crowd jostling doesn't flap Run/Idle on every tick.
+pub const RUN_HOLD: f32 = 0.25;
+/// Agents notice dropped loot within this range when re-scoring goals.
+pub const LOOT_SCAN_RANGE: f32 = 60.0;
+/// Minimum haul value (reference WILD) before an extraction run appeals.
+pub const EXTRACT_MIN_HAUL: u32 = 60;
+/// Agents only consider extraction beacons within this range.
+pub const EXTRACT_SEEK_RANGE: f32 = 250.0;
 
 /// Agent occupation, ported from the offline sim (`wilder-sim::agents`) and
 /// extended with the combat roles.
@@ -98,6 +112,10 @@ pub enum Goal {
     Hunt { target: EntityId },
     /// Fall back to a sanctuary and heal up.
     Retreat { to: Vec3 },
+    /// Walk to a dropped loot container and grab its contents.
+    Loot { container: EntityId, pos: Vec3 },
+    /// Channel at an extraction point to ship carried goods off-map.
+    Extract { point_pos: Vec3, timer: f32 },
 }
 
 impl Goal {
@@ -113,6 +131,8 @@ impl Goal {
             Goal::Craft { station_pos, .. } => Some(*station_pos),
             Goal::Patrol { to } => Some(*to),
             Goal::Retreat { to } => Some(*to),
+            Goal::Loot { pos, .. } => Some(*pos),
+            Goal::Extract { point_pos, .. } => Some(*point_pos),
         }
     }
 }
@@ -207,6 +227,20 @@ pub fn base_value(kind: ItemKind) -> u32 {
     }
 }
 
+/// Personal kit an agent hangs onto when extracting: weapons, ammo and meds
+/// keep it combat-effective; everything else is cargo.
+pub fn is_kit(kind: ItemKind) -> bool {
+    matches!(
+        kind,
+        ItemKind::Smg
+            | ItemKind::Pistol
+            | ItemKind::Pipe
+            | ItemKind::Knife
+            | ItemKind::Ammo9mm
+            | ItemKind::Medkit
+    )
+}
+
 pub struct FactionAgent {
     pub entity: EntityId,
     pub agent_id: AgentId,
@@ -245,6 +279,10 @@ pub struct FactionAgent {
     /// (50 ms) Attack blip would be dropped between replication snapshots,
     /// making fights read as idle glitching on clients.
     pub anim_hold: f32,
+    /// Seconds left holding the Run pose after the last actual step.
+    pub run_hold: f32,
+    /// Smoothed facing direction backing `yaw` (see `steer_yaw`).
+    face: (f32, f32),
 }
 
 impl FactionAgent {
@@ -325,6 +363,16 @@ impl FactionAgent {
     /// Total reference value of carried goods (drives the Sell utility).
     pub fn carried_value(&self) -> u32 {
         self.inventory.iter().map(|s| base_value(s.kind) * s.count).sum()
+    }
+
+    /// Reference value of the extractable haul: everything except the
+    /// personal kit (weapons/ammo/meds an agent keeps to stay effective).
+    pub fn haul_value(&self) -> u32 {
+        self.inventory
+            .iter()
+            .filter(|s| !is_kit(s.kind))
+            .map(|s| base_value(s.kind) * s.count)
+            .sum()
     }
 
     /// React to taking (non-lethal) damage: fighters turn on the attacker,
@@ -413,7 +461,32 @@ impl FactionAgent {
             retreat_cooldown: 0.0,
             anim: AnimState::Idle,
             anim_hold: 0.0,
+            run_hold: 0.0,
+            face: (1.0, 0.0),
         }
+    }
+
+    /// Turn the body toward (dx, dz) through a low-pass filter. Steering and
+    /// combat both re-aim every tick from instantaneous positions; in a
+    /// crowd, separation shoves make those positions (and sub-meter melee
+    /// targets) jitter, and an unfiltered `atan2` whips the replicated yaw
+    /// back and forth erratically. Filtering only the *displayed* facing
+    /// keeps movement exact while the body turns smoothly.
+    fn steer_yaw(&mut self, dx: f32, dz: f32, dt: f32) {
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-5 {
+            return;
+        }
+        let (dx, dz) = (dx / len, dz / len);
+        let k = (dt * FACE_RESPONSE).min(1.0);
+        self.face.0 += (dx - self.face.0) * k;
+        self.face.1 += (dz - self.face.1) * k;
+        if self.face.0 * self.face.0 + self.face.1 * self.face.1 < 1e-4 {
+            // A near-180° reversal collapsed the average through zero, where
+            // atan2 is unstable: snap straight to the new heading.
+            self.face = (dx, dz);
+        }
+        self.yaw = self.face.1.atan2(self.face.0);
     }
 
     /// Advance movement toward `dest`; returns the remaining distance. Hot
@@ -442,7 +515,7 @@ impl FactionAgent {
         if dist_to_dest < 0.1 {
             return 0.0;
         }
-        self.yaw = to.z.atan2(to.x);
+        self.steer_yaw(to.x, to.z, dt);
         if hot {
             let before = self.position;
             // Never step past the steering target: a fixed-length step that
@@ -462,6 +535,7 @@ impl FactionAgent {
                 }
             } else {
                 self.anim = AnimState::Run;
+                self.run_hold = RUN_HOLD;
             }
         } else {
             // Cold macro movement: advance along the segment. No prop or
@@ -518,8 +592,26 @@ impl FactionAgent {
         self.attack_cooldown = (self.attack_cooldown - dt).max(0.0);
         self.retreat_cooldown = (self.retreat_cooldown - dt).max(0.0);
         self.anim_hold = (self.anim_hold - dt).max(0.0);
+        self.run_hold = (self.run_hold - dt).max(0.0);
         self.decision_timer -= dt;
 
+        let event = self.tick_goal(world, dt, hot, target);
+        // Run-pose hysteresis: crowd jostling makes stepped/blocked ticks
+        // alternate, which would flap Run/Idle on nearly every replication
+        // snapshot. Let the Run pose linger briefly instead.
+        if self.anim == AnimState::Idle && self.run_hold > 0.0 {
+            self.anim = AnimState::Run;
+        }
+        event
+    }
+
+    fn tick_goal<W: CollisionWorld>(
+        &mut self,
+        world: &W,
+        dt: f32,
+        hot: bool,
+        target: Option<TargetInfo>,
+    ) -> AgentEvent {
         match self.goal {
             Goal::Idle => AgentEvent::NeedsGoal,
             Goal::Patrol { to } => {
@@ -593,7 +685,7 @@ impl FactionAgent {
                 let dist = (info.position - self.position).length();
                 if dist <= weapon.range + 0.4 {
                     let to = info.position - self.position;
-                    self.yaw = to.z.atan2(to.x);
+                    self.steer_yaw(to.x, to.z, dt);
                     if self.attack_cooldown <= 0.0 {
                         self.attack_cooldown = weapon.cooldown.max(0.6);
                         self.anim = AnimState::Attack;
@@ -612,6 +704,32 @@ impl FactionAgent {
                     self.move_toward(world, info.position, dt, true);
                 }
                 AgentEvent::None
+            }
+            Goal::Loot { pos, .. } => {
+                if self.move_toward(world, pos, dt, hot) > 2.0 {
+                    AgentEvent::None
+                } else {
+                    // Arrived on top of the drop: the world transfers the
+                    // contents (and validates the container still exists).
+                    AgentEvent::Act
+                }
+            }
+            Goal::Extract { point_pos, timer } => {
+                if self.move_toward(world, point_pos, dt, hot) > 2.5 {
+                    return AgentEvent::None;
+                }
+                // Channeling on the pad, same discipline as players: stand
+                // still and wait out the timer.
+                self.anim = AnimState::Gather;
+                let next = timer - dt;
+                if let Goal::Extract { timer, .. } = &mut self.goal {
+                    *timer = next;
+                }
+                if next <= 0.0 {
+                    AgentEvent::Act // world banks the haul and re-goals
+                } else {
+                    AgentEvent::None
+                }
             }
             Goal::Retreat { to } => {
                 if self.move_toward(world, to, dt, hot) > 8.0 {
@@ -702,6 +820,65 @@ mod tests {
     }
 
     #[test]
+    fn haul_value_excludes_personal_kit() {
+        let mut a = sample_agent(); // carries 5 Iron (value 2 each)
+        a.add_item(ItemKind::Pistol, 1);
+        a.add_item(ItemKind::Ammo9mm, 20);
+        a.add_item(ItemKind::Medkit, 1);
+        a.add_item(ItemKind::SteelPlate, 2);
+        assert_eq!(a.haul_value(), 5 * 2 + 2 * 13);
+        assert!(a.carried_value() > a.haul_value());
+    }
+
+    #[test]
+    fn loot_goal_acts_on_arrival() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.goal = Goal::Loot { container: 42, pos: Vec3::new(40.0, 0.0, 10.0) };
+        a.decision_timer = 100.0;
+        let mut acted = false;
+        for _ in 0..20 {
+            if a.tick(&Open, 1.0, false, None) == AgentEvent::Act {
+                acted = true;
+                break;
+            }
+        }
+        assert!(acted, "agent should reach the drop and ask to act");
+        assert!((a.position - Vec3::new(40.0, 0.0, 10.0)).length() <= 2.0);
+    }
+
+    #[test]
+    fn extract_goal_channels_then_acts() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.position = Vec3::new(10.0, 0.0, 10.0);
+        a.goal = Goal::Extract { point_pos: Vec3::new(11.0, 0.0, 10.0), timer: 3.0 };
+        a.decision_timer = 100.0;
+        // First slices walk + channel; the timer must run down before Act.
+        let mut ticks_to_act = 0;
+        loop {
+            ticks_to_act += 1;
+            match a.tick(&Open, 1.0, false, None) {
+                AgentEvent::Act => break,
+                _ if ticks_to_act > 20 => panic!("extract never completed"),
+                _ => {}
+            }
+        }
+        assert!(ticks_to_act >= 3, "channel should take at least the timer");
+        assert_eq!(a.anim, AnimState::Gather, "channeling shows a working pose");
+    }
+
+    #[test]
     fn cold_movement_ignores_props_but_advances() {
         // Everything walkable: cold macro movement is unimpeded.
         struct Open;
@@ -752,6 +929,39 @@ mod tests {
             dy = 2.0 * std::f32::consts::PI - dy;
         }
         assert!(dy < 0.01, "yaw flipped by {dy} rad while standing at the spot");
+    }
+
+    #[test]
+    fn scrum_jitter_does_not_whip_the_yaw_around() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        // A hunter standing in melee range of a target whose position
+        // jitters every tick (crowd-separation shoves in a scrum). The
+        // replicated yaw must wobble far less than the raw atan2 noise.
+        let mut a = sample_agent(); // unarmed: FIST range 1.5
+        a.position = Vec3::new(0.0, 0.0, 0.0);
+        a.goal = Goal::Hunt { target: 42 };
+        a.decision_timer = 1000.0;
+        let dt = 0.05;
+        let mut min_yaw = f32::MAX;
+        let mut max_yaw = f32::MIN;
+        for i in 0..100 {
+            // Target ~1.2 m away, shoved +/-0.25 m sideways on alternating
+            // ticks: raw desired heading swings ~+/-12 degrees per tick.
+            let jitter = if i % 2 == 0 { 0.25 } else { -0.25 };
+            let info = TargetInfo { position: Vec3::new(1.2, 0.0, jitter), alive: true };
+            a.tick(&Open, dt, true, Some(info));
+            if i >= 40 {
+                min_yaw = min_yaw.min(a.yaw);
+                max_yaw = max_yaw.max(a.yaw);
+            }
+        }
+        let wobble = (max_yaw - min_yaw).to_degrees();
+        assert!(wobble < 8.0, "yaw wobbled {wobble:.1} degrees in the scrum");
     }
 
     #[test]

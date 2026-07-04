@@ -497,6 +497,20 @@ export interface PriceBucket {
   fills: number;
 }
 
+/**
+ * One executed market fill for the per-item trade tape.
+ * Mirror of wilder-types MarketFill.
+ */
+export interface MarketFill {
+  /** Unix milliseconds when the fill executed. */
+  t: number;
+  /** MILD per unit. */
+  price_each: number;
+  count: number;
+  buyer: string;
+  seller: string;
+}
+
 /** Market detail for one item kind (economy dashboard drill-in). */
 export interface ItemMarketState {
   kind: ItemKind;
@@ -515,6 +529,8 @@ export interface ItemMarketState {
   /** NPC vendor reference prices (0 = untraded that way). */
   vendor_buy: number;
   vendor_sell: number;
+  /** Individual recent fills, newest first (the trade tape). */
+  recent_fills: MarketFill[];
 }
 
 /** Aggregate economy snapshot pushed to dashboard subscribers. */

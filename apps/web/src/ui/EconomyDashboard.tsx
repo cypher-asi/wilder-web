@@ -14,6 +14,7 @@ import {
   FactionId,
   FactionInfo,
   ItemKind,
+  MarketFill,
   PriceBucket,
   TxAmount,
   TxKind,
@@ -607,6 +608,44 @@ function PriceChart({ buckets, rangeMs }: { buckets: PriceBucket[]; rangeMs: num
   );
 }
 
+/**
+ * Live per-trade tape: each executed fill (time, price, size, seller and
+ * buyer), newest first, streamed with ItemMarketState while the page is open.
+ */
+function TradeTape({ fills }: { fills: MarketFill[] }) {
+  if (fills.length === 0) {
+    return <div className="econ-empty">No trades recorded yet.</div>;
+  }
+  return (
+    <div className="econ-tape">
+      <div className="econ-tape-row econ-tape-head">
+        <span>TIME</span>
+        <span>PRICE</span>
+        <span>QTY</span>
+        <span>SELLER</span>
+        <span>BUYER</span>
+      </div>
+      <div className="econ-tape-scroll">
+        {fills.map((f, i) => (
+          <div className="econ-tape-row" key={`${f.t}-${i}`}>
+            <span className="econ-tape-time">
+              {new Date(f.t).toLocaleTimeString(undefined, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </span>
+            <span className="num econ-tape-price">{f.price_each.toLocaleString()} MILD</span>
+            <span className="num">{f.count.toLocaleString()}</span>
+            <span className="econ-tape-name">{f.seller}</span>
+            <span className="econ-tape-name">{f.buyer}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ItemStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <div className="econ-item-stat">
@@ -706,6 +745,16 @@ function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }
             ))}
           </div>
           <PriceChart buckets={series} rangeMs={rangeMs} />
+        </div>
+
+        <div className="econ-panel econ-item-tape-panel">
+          <div className="econ-panel-title">
+            RECENT TRADES
+            <span className="econ-panel-sub">
+              {data === null ? "LOADING…" : `LAST ${n(data.recent_fills.length)} FILLS`}
+            </span>
+          </div>
+          <TradeTape fills={data?.recent_fills ?? []} />
         </div>
 
         <div className="econ-panel econ-item-stats">

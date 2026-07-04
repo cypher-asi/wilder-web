@@ -3426,6 +3426,7 @@ body {
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr 300px;
+  grid-template-rows: 1fr auto;
   gap: 10px;
 }
 
@@ -3450,12 +3451,74 @@ body {
 }
 
 .econ-item-stats {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--accent-dim) transparent;
+}
+
+/* --- Recent trades tape ----------------------------------------------------- */
+
+.econ-item-tape-panel {
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 190px;
+}
+
+.econ-tape {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  font-size: 11.5px;
+}
+
+.econ-tape-row {
+  display: grid;
+  grid-template-columns: 78px 110px 64px 1fr 1fr;
+  gap: 8px;
+  padding: 3px 4px;
+  align-items: baseline;
+}
+
+.econ-tape-row:nth-child(odd) {
+  background: rgba(159, 180, 200, 0.04);
+}
+
+.econ-tape-head {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(159, 180, 200, 0.18);
+  padding-bottom: 5px;
+}
+
+.econ-tape-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-dim) transparent;
+}
+
+.econ-tape-time {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-tape-price {
+  color: #8fd6ff;
+}
+
+.econ-tape-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
 }
 
 .econ-item-stat {

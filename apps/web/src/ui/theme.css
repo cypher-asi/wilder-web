@@ -3285,13 +3285,13 @@ body {
 
 /* ------------------------------------------------------------------ */
 /* ---------------------------------------------------------------------------
- * Death screen (DeathScreen in Hud.tsx): a Windows-BSOD homage. Deep royal
- * blue tuned toward the game's cyan accent, typewriter monospace, a glitching
- * "WILDER GIBSON" title chip, and a blinking terminal cursor.
+ * Death screen (DeathScreen in Hud.tsx): a Windows-BSOD homage. Mostly black
+ * with faint blue CCTV scanlines, typewriter monospace, a "WILDER GIBSON"
+ * title chip that glitches once on entry, and a blinking terminal cursor.
  * ------------------------------------------------------------------------- */
 
 .bsod {
-  --bsod-blue: #0a2a6b;
+  --bsod-blue: #4fc3ff;
   position: absolute;
   inset: 0;
   z-index: 55;
@@ -3300,15 +3300,17 @@ body {
   justify-content: center;
   pointer-events: auto;
   cursor: default;
-  color: #eef4ff;
+  color: #d7e6ff;
   font-family: "Lucida Console", "Consolas", "Courier New", monospace;
+  /* Mostly black, with a faint blue CCTV glow toward the center. */
   background:
-    radial-gradient(ellipse at 50% 28%, rgba(79, 195, 255, 0.22), transparent 60%),
-    var(--bsod-blue);
-  animation: bsod-shudder 4.2s steps(1) infinite;
+    radial-gradient(ellipse at 50% 34%, rgba(79, 195, 255, 0.08), transparent 62%),
+    #04070b;
+  /* One subtle shudder on entry, then settle. */
+  animation: bsod-shudder 0.55s steps(1) 1 both;
 }
 
-/* Faint CRT scanlines over the whole panel. */
+/* Blue CCTV-style horizontal scanlines over the whole panel. */
 .bsod::after {
   content: "";
   position: absolute;
@@ -3316,12 +3318,12 @@ body {
   pointer-events: none;
   background: repeating-linear-gradient(
     0deg,
-    rgba(0, 0, 0, 0.16) 0px,
-    rgba(0, 0, 0, 0.16) 1px,
+    rgba(79, 195, 255, 0.07) 0px,
+    rgba(79, 195, 255, 0.07) 1px,
     transparent 1px,
-    transparent 3px
+    transparent 4px
   );
-  opacity: 0.55;
+  opacity: 0.8;
 }
 
 .bsod-inner {
@@ -3334,16 +3336,18 @@ body {
   gap: 26px;
 }
 
-/* Inverted title chip, like the reference's "Windows" box, but glitching. */
+/* Title chip: dark CCTV panel with a blue readout, glitching once on entry. */
 .bsod-title {
   position: relative;
   padding: 4px 16px;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.14em;
-  color: var(--bsod-blue);
-  background: #c9d8ea;
-  animation: bsod-glitch 2.1s steps(1) infinite;
+  color: #eaf6ff;
+  background: rgba(79, 195, 255, 0.12);
+  border: 1px solid rgba(79, 195, 255, 0.4);
+  text-shadow: 0 0 10px rgba(79, 195, 255, 0.55);
+  animation: bsod-glitch 0.7s steps(1) 1 both;
 }
 
 /* Two offset cyan/red copies for chromatic-aberration split. */
@@ -3361,12 +3365,12 @@ body {
 
 .bsod-title::before {
   color: #ff5a6e;
-  animation: bsod-split-a 1.3s steps(2) infinite;
+  animation: bsod-split-a 0.7s steps(2) 1 both;
 }
 
 .bsod-title::after {
   color: #4fc3ff;
-  animation: bsod-split-b 1.7s steps(2) infinite;
+  animation: bsod-split-b 0.7s steps(2) 1 both;
 }
 
 .bsod-body {
@@ -3389,71 +3393,76 @@ body {
   }
 }
 
-/* Title chip: slice it with clip-path + jitter it in short bursts. */
+/* Title chip: a single burst of clip-path slicing on entry, then settle. */
 @keyframes bsod-glitch {
-  0%,
-  82%,
+  0% {
+    transform: translate(-2px, 1px);
+    clip-path: inset(20% 0 55% 0);
+  }
+  20% {
+    transform: translate(3px, -1px);
+    clip-path: inset(60% 0 12% 0);
+  }
+  40% {
+    transform: translate(-1px, 0);
+    clip-path: inset(8% 0 78% 0);
+  }
+  60% {
+    transform: translate(2px, 1px);
+    clip-path: inset(42% 0 34% 0);
+  }
+  80%,
   100% {
     transform: translate(0, 0);
     clip-path: none;
   }
-  84% {
-    transform: translate(-2px, 1px);
-    clip-path: inset(20% 0 55% 0);
-  }
-  88% {
-    transform: translate(3px, -1px);
-    clip-path: inset(60% 0 12% 0);
-  }
-  92% {
-    transform: translate(-1px, 0);
-    clip-path: inset(8% 0 78% 0);
-  }
-  96% {
-    transform: translate(2px, 1px);
-    clip-path: inset(42% 0 34% 0);
-  }
 }
 
+/* RGB-split copies flare on entry then fade out so nothing lingers. */
 @keyframes bsod-split-a {
-  0%,
-  100% {
-    transform: translate(-2px, 0);
-    clip-path: inset(0 0 62% 0);
-  }
-  50% {
+  0% {
     transform: translate(-3px, 1px);
-    clip-path: inset(58% 0 8% 0);
+    opacity: 0.85;
+  }
+  60% {
+    transform: translate(-2px, 0);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate(0, 0);
+    opacity: 0;
   }
 }
 
 @keyframes bsod-split-b {
-  0%,
-  100% {
-    transform: translate(2px, 0);
-    clip-path: inset(64% 0 4% 0);
-  }
-  50% {
+  0% {
     transform: translate(3px, -1px);
-    clip-path: inset(6% 0 66% 0);
+    opacity: 0.85;
+  }
+  60% {
+    transform: translate(2px, 0);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate(0, 0);
+    opacity: 0;
   }
 }
 
-/* Rare whole-panel shudder so the screen itself feels unstable. */
+/* One brief whole-panel shudder on entry, then hold steady. */
 @keyframes bsod-shudder {
-  0%,
-  96%,
-  100% {
-    transform: translate(0, 0);
-    filter: none;
-  }
-  97% {
+  0% {
     transform: translate(-2px, 0);
     filter: hue-rotate(12deg);
   }
-  98.5% {
+  40% {
     transform: translate(2px, -1px);
     filter: hue-rotate(-10deg);
+  }
+  70%,
+  100% {
+    transform: translate(0, 0);
+    filter: none;
   }
 }
 

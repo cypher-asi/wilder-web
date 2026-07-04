@@ -1359,11 +1359,12 @@ const TITLE_TEXT = "WILDER GIBSON";
 const SCRAMBLE_CHARS = "!<>-_\\/[]{}#%$&*+=?";
 
 /**
- * Windows-BSOD-inspired death screen: a full-screen blue overlay in a
- * typewriter font that inventories the assets THE GIBSON just seized, shows a
- * fake STOP code, and dismisses on any key (the server already respawned us).
- * The "WILDER GIBSON" title glitches (CSS RGB-split + a JS character scramble
- * on entry) and the screen keeps stuttering the synthesized glitch cue.
+ * Windows-BSOD-inspired death screen: a mostly-black overlay laced with blue
+ * CCTV scanlines, in a typewriter font that inventories the assets THE GIBSON
+ * just seized, shows a fake STOP code, and dismisses on any key (the server
+ * already respawned us). The "WILDER GIBSON" title glitches once on entry
+ * (CSS RGB-split + a JS character scramble) and the glitch cue plays a single
+ * time - subtle, not repetitive.
  */
 function DeathScreen() {
   const death = useGame((s) => s.death);
@@ -1408,16 +1409,10 @@ function DeathScreen() {
     return () => clearInterval(timer);
   }, [death?.at]);
 
-  // Keep the screen audibly unstable: re-stutter the glitch cue while it's up.
+  // Play the glitch cue exactly once on death - subtle, not repetitive.
   useEffect(() => {
     if (!death) return;
-    let timeout: number;
-    const loop = () => {
-      playGlitch(0.28);
-      timeout = window.setTimeout(loop, 900 + Math.random() * 1600);
-    };
-    timeout = window.setTimeout(loop, 900 + Math.random() * 1600);
-    return () => window.clearTimeout(timeout);
+    playGlitch(0.28);
   }, [death?.at]);
 
   // A keyboard key respawns: first press finishes the typewriter, the next

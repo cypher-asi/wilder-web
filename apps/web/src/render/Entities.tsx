@@ -23,6 +23,7 @@ import {
   RUN_SPEED,
   WALK_SPEED,
 } from "../game/collision";
+import { interiorRegistry } from "../game/interiors";
 import { POI_STYLES } from "../game/poi";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState, CHUNK_SIZE, EntityKind, TILE_SIZE } from "../net/protocol";
@@ -1464,6 +1465,7 @@ function hostBuildingFace(x: number, z: number): HostFace | null {
  */
 function ShopFront({ entity }: { entity: GameEntity }) {
   const accent = POI_STYLES[entity.kind]?.color ?? "#4fc3ff";
+  const group = useRef<THREE.Group>(null);
   // The hosting building's chunk may stream in after the entity spawns.
   const [host, setHost] = useState<HostFace | null>(() =>
     hostBuildingFace(entity.x, entity.z),
@@ -1472,6 +1474,14 @@ function ShopFront({ entity }: { entity: GameEntity }) {
     if (host === null) {
       const resolved = hostBuildingFace(entity.x, entity.z);
       if (resolved !== null) setHost(resolved);
+    }
+    // Sims-style cutaway: while the local player stands inside this store's
+    // room the host building's shell hides (Buildings.tsx), so the fascia
+    // sign must not float over the dollhouse view.
+    if (group.current) {
+      const room = interiorRegistry.roomAt(game.predicted.x, game.predicted.z, 0.5);
+      group.current.visible =
+        room === null || !room.doors.some((dr) => dr.entity === entity.id);
     }
   });
 
@@ -1497,15 +1507,9 @@ function ShopFront({ entity }: { entity: GameEntity }) {
   }
 
   return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-        openShopPanel(entity.kind);
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
+    // Interaction is key-driven (E) via PlayerInput ΓÇö clicking the building
+    // never opens a menu, so a stray shot at a storefront can't pop a panel.
+    <group ref={group}>
       {/* Sign board flat on the storefront fascia band, on top of all the
           building's own signage. Depth stack from the footprint wall: the
           ground-floor block sits 0.3 proud, its fascia another 0.34, and

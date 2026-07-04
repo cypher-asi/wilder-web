@@ -1,7 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { playGlitch } from "../assets/audio";
 import { ROLL_COOLDOWN } from "../game/collision";
+import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
+import { nearestDoor } from "../render/Interior";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
@@ -67,7 +69,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
           <VendorPanel connection={connection} />
-          <HoloMap />
+          <DoorPrompt />
+          <HoloMap connection={connection} />
           <EconomyDashboard connection={connection} />
           <PerfPanel />
           <DeathScreen />
@@ -1535,6 +1538,49 @@ function scramble(text: string, progress: number): string {
     else out += SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
   }
   return out;
+}
+
+/**
+ * "[E] ENTER <STORE>" chip while standing near a walk-in store doorway from
+ * the street. Hidden once inside (the service panels take over there).
+ */
+function DoorPrompt() {
+  const [label, setLabel] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const px = game.predicted.x;
+      const pz = game.predicted.z;
+      const inside = interiorRegistry.roomAt(px, pz) !== null;
+      const door = inside ? null : nearestDoor(px, pz);
+      const next = door
+        ? (POI_STYLES[door.spec.doors[door.doorIndex].kind]?.label ??
+          door.spec.doors[door.doorIndex].kind.toUpperCase())
+        : null;
+      setLabel((prev) => (prev === next ? prev : next));
+    }, 200);
+    return () => clearInterval(timer);
+  }, []);
+  if (!label) return null;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 160,
+        left: "50%",
+        transform: "translateX(-50%)",
+        fontSize: 12,
+        letterSpacing: "0.15em",
+        color: "var(--accent)",
+        textShadow: "0 0 10px rgba(79,195,255,0.5)",
+        background: "rgba(9,15,24,0.7)",
+        border: "1px solid var(--accent-dim)",
+        padding: "6px 14px",
+        pointerEvents: "none",
+      }}
+    >
+      [E] ENTER {label}
+    </div>
+  );
 }
 
 const STATION_KINDS = ["Refinery", "Factory", "Laboratory"] as const;

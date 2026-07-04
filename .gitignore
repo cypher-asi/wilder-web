@@ -1,5 +1,6 @@
 # Rust
 target/
+target-shot/
 
 # Node
 node_modules/

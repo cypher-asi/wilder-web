@@ -1100,7 +1100,10 @@ struct ProductionJobState {
 }
 
 impl ProductionJobState {
-    fn to_wire(&self) -> ProductionJob {
+    /// Wire form as seen by `viewer`: own jobs are flagged `mine` (full
+    /// detail, cancelable); other actors' jobs carry an opaque owner label.
+    fn to_wire(&self, viewer: OwnerId) -> ProductionJob {
+        let mine = self.owner == viewer;
         ProductionJob {
             id: self.id,
             recipe: self.recipe.id.to_string(),
@@ -1108,6 +1111,15 @@ impl ProductionJobState {
             done: self.done,
             remaining: self.remaining,
             powered: self.powered,
+            mine,
+            owner: if mine {
+                String::new()
+            } else {
+                match self.owner {
+                    OwnerId::Player(_) => "PLAYER".to_string(),
+                    OwnerId::Agent(_) => "AGENT".to_string(),
+                }
+            },
         }
     }
 
@@ -1903,6 +1915,9 @@ impl World {
             }
             C2S::CollectProduction { building } => {
                 self.collect_production(EconActor::Player(entity), building);
+            }
+            C2S::CancelProduction { building, job_id } => {
+                self.cancel_production(EconActor::Player(entity), building, job_id);
             }
             C2S::Market(action) => self.market_action(entity, action),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
@@ -3047,9 +3062,8 @@ impl World {
 
     /// Cancel one of the actor's queued jobs: the uncompleted units' inputs
     /// and Energy come back (re-minted — the queue-time legs burned them);
-    /// finished units stay in the output buffer. No client message maps
-    /// here yet (cancel UI is Phase 6); agents and tests drive it directly.
-    #[allow(dead_code)]
+    /// finished units stay in the output buffer. Players reach this via
+    /// `C2S::CancelProduction` (owner-validated); agents/tests drive it directly.
     fn cancel_production(&mut self, actor: EconActor, building: EntityId, job_id: u64) -> bool {
         let Some(owner) = self.actor_owner_id(actor) else { return false };
         let Some(queue) = self.production.get_mut(&building) else { return false };
@@ -3173,27 +3187,45 @@ impl World {
     /// buffer (opens/refreshes the production UI).
     fn send_production_state(&self, entity: EntityId, building: EntityId) {
         let Some(player) = self.players.get(&entity) else { return };
-        let jobs: Vec<ProductionJob> = self
-            .production
-            .get(&building)
-            .map(|q| q.iter().map(|j| j.to_wire()).collect())
+        let viewer = OwnerId::Player(player.character.id);
+        let queue = self.production.get(&building);
+        let jobs: Vec<ProductionJob> = queue
+            .map(|q| q.iter().map(|j| j.to_wire(viewer)).collect())
             .unwrap_or_default();
+        let energy_cap = self
+            .statics
+            .get(&building)
+            .and_then(|s| match s.kind {
+                EntityKind::Refinery => Some(wilder_crafting::Station::Refinery),
+                EntityKind::Factory => Some(wilder_crafting::Station::Factory),
+                EntityKind::Laboratory => Some(wilder_crafting::Station::Laboratory),
+                _ => None,
+            })
+            .map(station_energy_cap)
+            .unwrap_or(0);
+        let energy_used = queue
+            .map(|q| q.iter().filter(|j| j.powered).map(|j| j.recipe.energy).sum())
+            .unwrap_or(0);
         let buffered = self
             .production_outputs
-            .get(&(building, OwnerId::Player(player.character.id)))
+            .get(&(building, viewer))
             .cloned()
             .unwrap_or_default();
-        let _ = player.tx.send(S2C::ProductionState { building, jobs, buffered });
+        let _ = player
+            .tx
+            .send(S2C::ProductionState { building, jobs, buffered, energy_cap, energy_used });
     }
 
     /// Refresh the production UI of every online player invested in
-    /// `building` (has a job or a buffer there) after queue state changed.
+    /// `building` (has a job or a buffer there) — or standing at it, since
+    /// the panel shows the shared queue — after queue state changed.
     fn broadcast_production_state(&self, building: EntityId) {
         let queue = self.production.get(&building);
         for player in self.players.values() {
             let owner = OwnerId::Player(player.character.id);
             let invested = queue.is_some_and(|q| q.iter().any(|j| j.owner == owner))
-                || self.production_outputs.contains_key(&(building, owner));
+                || self.production_outputs.contains_key(&(building, owner))
+                || self.actor_in_range(EconActor::Player(player.entity), building, 5.0);
             if invested {
                 self.send_production_state(player.entity, building);
             }

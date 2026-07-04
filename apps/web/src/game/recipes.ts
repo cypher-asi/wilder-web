@@ -68,3 +68,86 @@ export const RESOURCE_COLORS: Record<string, string> = {
   Electronics: "#45c8ff",
   Biomass: "#7dff6e",
 };
+
+/** Per-station energy throughput cap (mirror of wilder-world station_energy_cap). */
+export const STATION_ENERGY_CAPS: Record<StationKind, number> = {
+  Refinery: 4,
+  Factory: 4,
+  Laboratory: 5,
+};
+
+/** Reference item values in MILD (mirror of wilder-world agents::base_value). */
+export const BASE_VALUES: Partial<Record<ItemKind, number>> = {
+  Iron: 2,
+  Copper: 2,
+  Chemicals: 3,
+  Electronics: 4,
+  Biomass: 1,
+  SteelPlate: 13,
+  CopperWire: 5,
+  Polymer: 17,
+  CircuitBoard: 29,
+  BioGel: 11,
+  Pipe: 26,
+  Knife: 38,
+  Pistol: 112,
+  Smg: 250,
+  JacketArmor: 72,
+  PlateArmor: 180,
+  Ammo9mm: 1,
+  Medkit: 20,
+  Flashlight: 6,
+  Cash: 1,
+  BlueprintFragment: 40,
+  PowerCell: 30,
+};
+
+/**
+ * Resource drop weights per named zone, in NODE_RESOURCES order (mirror of
+ * wilder_economy::zone_resource_weights keyed by ZoneKind::display_name).
+ */
+export const ZONE_RESOURCE_WEIGHTS: [zone: string, weights: number[]][] = [
+  ["Blast Zone", [1, 1, 5, 2, 1]],
+  ["Mining Pits", [5, 4, 1, 0, 0]],
+  ["Industrial Belt", [4, 2, 1, 3, 0]],
+  ["Tech Ruins", [0, 2, 1, 6, 1]],
+  ["Overgrowth", [1, 0, 1, 0, 6]],
+  ["Chem Works", [0, 1, 6, 1, 2]],
+  ["Scrapyard", [4, 4, 0, 2, 0]],
+];
+
+/** Zones where a resource meaningfully drops (weight >= 3), best first. */
+export function resourceSourceZones(kind: ItemKind): string[] {
+  const i = NODE_RESOURCES.indexOf(kind);
+  if (i < 0) return [];
+  return ZONE_RESOURCE_WEIGHTS.filter(([, w]) => w[i] >= 3)
+    .sort((a, b) => b[1][i] - a[1][i])
+    .map(([zone]) => zone);
+}
+
+/**
+ * NPC vendor price lines (mirror of wilder-economy ARMORY/BODEGA tables):
+ * buy = MILD the player pays, sell = MILD the vendor pays; 0 = n/a.
+ */
+export const VENDOR_PRICES: {
+  vendor: "Armory" | "Bodega";
+  kind: ItemKind;
+  buy: number;
+  sell: number;
+}[] = [
+  { vendor: "Armory", kind: "Pipe", buy: 30, sell: 10 },
+  { vendor: "Armory", kind: "Knife", buy: 45, sell: 15 },
+  { vendor: "Armory", kind: "Pistol", buy: 140, sell: 45 },
+  { vendor: "Armory", kind: "Smg", buy: 320, sell: 100 },
+  { vendor: "Armory", kind: "JacketArmor", buy: 90, sell: 30 },
+  { vendor: "Armory", kind: "PlateArmor", buy: 220, sell: 70 },
+  { vendor: "Armory", kind: "Ammo9mm", buy: 1, sell: 0 },
+  { vendor: "Bodega", kind: "Medkit", buy: 25, sell: 8 },
+  { vendor: "Bodega", kind: "Flashlight", buy: 10, sell: 3 },
+  { vendor: "Bodega", kind: "Ammo9mm", buy: 2, sell: 0 },
+  { vendor: "Bodega", kind: "Iron", buy: 0, sell: 2 },
+  { vendor: "Bodega", kind: "Copper", buy: 0, sell: 2 },
+  { vendor: "Bodega", kind: "Chemicals", buy: 0, sell: 3 },
+  { vendor: "Bodega", kind: "Electronics", buy: 0, sell: 4 },
+  { vendor: "Bodega", kind: "Biomass", buy: 0, sell: 1 },
+];

@@ -291,6 +291,7 @@ export type C2S =
   | Tagged<"Craft", { recipe: string; station: number | null }>
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
   | Tagged<"CollectProduction", { building: number }>
+  | Tagged<"CancelProduction", { building: number; job_id: number }>
   | Tagged<"Market", MarketActionMsg>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
@@ -312,6 +313,10 @@ export interface ProductionJob {
   /** Seconds remaining for the current unit. */
   remaining: number;
   powered: boolean;
+  /** True when this job belongs to the receiving player (cancelable). */
+  mine?: boolean;
+  /** Short owner label on other actors' jobs ("AGENT"/"PLAYER"). */
+  owner?: string;
 }
 
 export interface MarketListing {
@@ -692,7 +697,15 @@ export type S2C =
     >
   | Tagged<
       "ProductionState",
-      { building: number; jobs: ProductionJob[]; buffered?: ItemStack[] }
+      {
+        building: number;
+        jobs: ProductionJob[];
+        buffered?: ItemStack[];
+        /** Building energy throughput cap (max summed running job energy). */
+        energy_cap?: number;
+        /** Summed energy of currently powered jobs. */
+        energy_used?: number;
+      }
     >
   | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
   | Tagged<"MarketResult", { ok: boolean; error: string | null }>

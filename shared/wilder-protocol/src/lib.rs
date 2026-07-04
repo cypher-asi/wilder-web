@@ -50,6 +50,9 @@ pub enum C2S {
     /// Collect the sender's buffered production output at a building
     /// (within 5 m). The server also auto-collects on proximity/interact.
     CollectProduction { building: EntityId },
+    /// Cancel one of the sender's own queued jobs at a building. Uncompleted
+    /// units' inputs and Energy are refunded; the server validates ownership.
+    CancelProduction { building: EntityId, job_id: u64 },
     /// Market actions. Phase 3.
     Market(MarketAction),
     /// NPC vendor actions (Armory, Bodega, Bank...). Requires being in reach
@@ -198,6 +201,12 @@ pub enum S2C {
         jobs: Vec<ProductionJob>,
         #[serde(default)]
         buffered: Vec<ItemStack>,
+        /// Building's energy throughput cap (max summed job energy running).
+        #[serde(default)]
+        energy_cap: u32,
+        /// Summed `Recipe::energy` of the currently powered jobs.
+        #[serde(default)]
+        energy_used: u32,
     },
     MarketState { listings: Vec<MarketListing>, wallet: u32 },
     MarketResult { ok: bool, error: Option<String> },
@@ -307,6 +316,12 @@ pub struct ProductionJob {
     /// Seconds remaining for the current unit.
     pub remaining: f32,
     pub powered: bool,
+    /// True when the receiving player owns this job (cancelable, highlighted).
+    #[serde(default)]
+    pub mine: bool,
+    /// Short owner label for other actors' jobs ("AGENT"/"PLAYER"; empty on own).
+    #[serde(default)]
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

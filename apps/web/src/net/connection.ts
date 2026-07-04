@@ -575,8 +575,15 @@ export class GameConnection {
       }
       case "ProductionState": {
         const production = { ...useGame.getState().production };
-        if (msg.d.jobs.length > 0) {
-          production[msg.d.building] = { jobs: msg.d.jobs, at: performance.now() };
+        const buffered = msg.d.buffered ?? [];
+        if (msg.d.jobs.length > 0 || buffered.length > 0) {
+          production[msg.d.building] = {
+            jobs: msg.d.jobs,
+            buffered,
+            energyCap: msg.d.energy_cap ?? 0,
+            energyUsed: msg.d.energy_used ?? 0,
+            at: performance.now(),
+          };
         } else {
           delete production[msg.d.building];
         }

@@ -33,7 +33,7 @@ projects:
             disk:
               name: wilder-data
               mountPath: /data
-              sizeGB: 10
+              sizeGB: 50
             envVars:
               # RocksDB world/account data — must live on the persistent disk.
               - key: WILDER_DATA

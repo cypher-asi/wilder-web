@@ -24,6 +24,7 @@ import { cameraState } from "../render/CameraRig";
 import { allRegions, MY_FACTION } from "../game/territory";
 import { useGame } from "../state/game";
 import { ITEM_INFO, ItemCategory, ItemIcon, itemLabel } from "./ItemIcon";
+import { ProductionMap } from "./ProductionMap";
 
 // ---------------------------------------------------------------------------
 // Labels / colors
@@ -1118,16 +1119,29 @@ function LeaderboardView() {
 // Dashboard shell
 // ---------------------------------------------------------------------------
 
+/** Sub-views of the economy tab: the ledger dashboard or the production map. */
+type EconSubTab = "ledger" | "map";
+
 export function EconomyDashboard({ connection }: { connection: GameConnection }) {
   // The ledger and the leaderboards are now two top-level tabs of the central
   // menu; both share the same live EconomySub subscription (the server pushes
   // LeaderboardState alongside the economy snapshot while subscribed).
   const open = useGame((s) => s.menuOpen && (s.menuTab === "economy" || s.menuTab === "leaderboard"));
   const isLedger = useGame((s) => s.menuTab === "economy");
+  // Economy tab sub-view: transaction ledger (default) or the Economy Map.
+  const [subTab, setSubTab] = useState<EconSubTab>("ledger");
   // Item market drill-in: which kind's detail page is showing (ledger tab).
   const [selected, setSelected] = useState<ItemKind | null>(null);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // Economy Map chain selection (lifted so Escape clears it before closing).
+  const [mapNode, setMapNode] = useState<string | null>(null);
+  const subTabRef = useRef(subTab);
+  subTabRef.current = subTab;
+  const mapNodeRef = useRef(mapNode);
+  mapNodeRef.current = mapNode;
+  const isLedgerRef = useRef(isLedger);
+  isLedgerRef.current = isLedger;
 
   // Closing spends the Escape/click: suppress the pointer-lock bounce so it does
   // not read as an "open game menu" Escape (see CameraRig).
@@ -1141,10 +1155,16 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
     connection.send({ t: "EconomySub", d: { on: true } });
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-      // Escape backs out of an item detail page first, then closes the menu.
+      // Escape backs out of the current selection first (item detail page /
+      // map chain highlight), then closes the menu.
       if (e.code === "Escape") {
-        if (selectedRef.current) setSelected(null);
-        else close();
+        if (isLedgerRef.current && subTabRef.current === "map" && mapNodeRef.current) {
+          setMapNode(null);
+        } else if (isLedgerRef.current && subTabRef.current === "ledger" && selectedRef.current) {
+          setSelected(null);
+        } else {
+          close();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1169,16 +1189,34 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
 
   return (
     <div className="map-overlay econ-overlay">
-      <KpiStrip />
+      {!(isLedger && subTab === "map") && <KpiStrip />}
       {isLedger ? (
-        selected ? (
-          <ItemMarketView kind={selected} onBack={() => setSelected(null)} />
-        ) : (
-          <div className="econ-body">
-            <TxFeed />
-            <SupplyPanel onSelect={setSelected} />
+        <>
+          <div className="econ-tabs econ-subtabs">
+            <div
+              className={`econ-tab ${subTab === "ledger" ? "active" : ""}`}
+              onClick={() => setSubTab("ledger")}
+            >
+              LEDGER
+            </div>
+            <div
+              className={`econ-tab ${subTab === "map" ? "active" : ""}`}
+              onClick={() => setSubTab("map")}
+            >
+              ECONOMY MAP
+            </div>
           </div>
-        )
+          {subTab === "map" ? (
+            <ProductionMap selected={mapNode} onSelect={setMapNode} />
+          ) : selected ? (
+            <ItemMarketView kind={selected} onBack={() => setSelected(null)} />
+          ) : (
+            <div className="econ-body">
+              <TxFeed />
+              <SupplyPanel onSelect={setSelected} />
+            </div>
+          )}
+        </>
       ) : (
         <LeaderboardView />
       )}

@@ -153,6 +153,86 @@ export function playPurchase(volume = 0.18) {
   };
 }
 
+/**
+ * Triumphant rising major arpeggio for capturing a neighborhood (your faction
+ * takes a zone). Bright, ascending — the positive territory event.
+ */
+export function playZoneCapture(volume = 0.2) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  // C5 - E5 - G5 - C6, quick and bright.
+  const notes = [523.25, 659.25, 783.99, 1046.5];
+  notes.forEach((f, i) => {
+    const start = t0 + i * 0.06;
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(f, start);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(volume, start + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + 0.24);
+    osc.onended = () => {
+      osc.disconnect();
+      gain.disconnect();
+    };
+  });
+}
+
+/**
+ * Descending minor two-note "loss" sting for losing a neighborhood to an
+ * enemy faction. Darker, falling — the negative counterpart to capture.
+ */
+export function playZoneLost(volume = 0.2) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "sawtooth";
+  osc.frequency.setValueAtTime(392, t0); // G4
+  osc.frequency.exponentialRampToValueAtTime(196, t0 + 0.14); // G3
+  osc.frequency.exponentialRampToValueAtTime(147, t0 + 0.34); // ~D3
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.linearRampToValueAtTime(volume, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.42);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.44);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
+/**
+ * Subtle neutral "blip-sweep" for a nearby zone changing hands between other
+ * factions (not involving the player). Quiet so the map churn stays ambient.
+ */
+export function playZoneFlip(volume = 0.09) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(560, t0);
+  osc.frequency.exponentialRampToValueAtTime(840, t0 + 0.09);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.linearRampToValueAtTime(volume, t0 + 0.006);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.16);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.18);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
 let noiseBuffer: AudioBuffer | null = null;
 
 /** Shared short white-noise buffer for percussive/mechanical cues. */

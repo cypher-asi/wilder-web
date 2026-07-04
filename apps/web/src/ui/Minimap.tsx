@@ -20,7 +20,13 @@ import {
   onCityMapReady,
 } from "../game/citymap";
 import { POI_STYLES } from "../game/poi";
-import { allRegions, MY_FACTION, REGION_SIZE, syncTerritoryUniforms } from "../game/territory";
+import {
+  allRegions,
+  MY_FACTION,
+  REGION_SIZE,
+  syncTerritoryUniforms,
+  zoneFlipFreshness,
+} from "../game/territory";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { perf } from "../perf/perf";
 import { game, useGame } from "../state/game";
@@ -210,10 +216,14 @@ export function Minimap() {
         if (rx1 < 0 || ry1 < 0 || rx0 > SIZE || ry0 > SIZE) continue;
         const [r, g, b] = factionRgb(faction);
         const mine = faction === MY_FACTION;
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${mine ? 0.1 : 0.14})`;
+        // Freshly flipped cells flash brighter before settling to base alpha.
+        const fresh = zoneFlipFreshness(rx, rz);
+        const fill = (mine ? 0.1 : 0.14) + fresh * 0.4;
+        const stroke = (mine ? 0.4 : 0.6) + fresh * 0.4;
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${fill})`;
         ctx.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
-        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${mine ? 0.4 : 0.6})`;
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${stroke})`;
+        ctx.lineWidth = 1.5 + fresh * 1.5;
         ctx.strokeRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
       }
 

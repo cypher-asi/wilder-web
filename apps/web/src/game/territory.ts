@@ -20,6 +20,39 @@ export const MY_FACTION = 1;
 /** control value keyed by "rx,rz" (only non-neutral regions are stored). */
 const controlByRegion = new Map<string, number>();
 
+/**
+ * Recent ownership flips keyed by "rx,rz": the wall-clock second (from
+ * `performance.now()/1000`) the cell changed hands. Drives the ground shader's
+ * blue->faction crossfade. Pruned lazily once the transition has fully played.
+ */
+const transitions = new Map<string, number>();
+/** How long the ground crossfade runs after a flip (seconds). */
+const TRANSITION_SECS = 0.9;
+
+/** Current owner (FactionId) of each named neighborhood, by district index. */
+let districtOwners: number[] = [];
+
+/** A single cell that changed hands in the latest broadcast. */
+export interface ZoneChange {
+  rx: number;
+  rz: number;
+  from: number;
+  to: number;
+}
+
+/** A neighborhood that changed owner in the latest broadcast. */
+export interface DistrictChange {
+  index: number;
+  from: number;
+  to: number;
+}
+
+/** What changed between the previous territory snapshot and the new one. */
+export interface TerritoryUpdate {
+  cells: ZoneChange[];
+  districts: DistrictChange[];
+}
+
 // Debug handle for development tooling (mirrors window.__game in state/game).
 if (typeof window !== "undefined" && import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__territory = {
@@ -70,13 +103,91 @@ export function allRegions(): { rx: number; rz: number; faction: number }[] {
   return out;
 }
 
+/** Current owner (FactionId, 0 = neutral) of a neighborhood by district index. */
+export function districtOwner(index: number): number {
+  return districtOwners[index] ?? 0;
+}
+
+/**
+ * 0..1 freshness of a region's most recent flip (1 = just changed, 0 = settled
+ * or never). Lets map overlays pop newly captured cells before they settle.
+ */
+export function zoneFlipFreshness(rx: number, rz: number): number {
+  const at = transitions.get(regionKey(rx, rz));
+  if (at === undefined) return 0;
+  const age = performance.now() / 1000 - at;
+  return age < 0 ? 1 : Math.max(0, 1 - age / TRANSITION_SECS);
+}
+
+/**
+ * Apply a server TerritoryState broadcast: diff it against the cached state to
+ * find cells and neighborhoods that changed hands (for capture pulses, sounds
+ * and gain/loss notifications), record flip timestamps for the ground
+ * crossfade, then refresh the shader uniforms.
+ */
+export function applyTerritory(
+  cells: TerritoryCell[],
+  districts: number[],
+): TerritoryUpdate {
+  const now = performance.now() / 1000;
+  const next = new Map<string, number>();
+  for (const c of cells) {
+    if (c.control !== 0) next.set(regionKey(c.rx, c.rz), c.control);
+  }
+
+  const changed: ZoneChange[] = [];
+  // Cells that gained/changed a non-neutral holder.
+  for (const [key, to] of next) {
+    const from = controlByRegion.get(key) ?? 0;
+    if (from !== to) {
+      const comma = key.indexOf(",");
+      changed.push({
+        rx: Number(key.slice(0, comma)),
+        rz: Number(key.slice(comma + 1)),
+        from,
+        to,
+      });
+      transitions.set(key, now);
+    }
+  }
+  // Cells that went neutral (dropped from the map).
+  for (const [key, from] of controlByRegion) {
+    if (!next.has(key)) {
+      const comma = key.indexOf(",");
+      changed.push({
+        rx: Number(key.slice(0, comma)),
+        rz: Number(key.slice(comma + 1)),
+        from,
+        to: 0,
+      });
+      transitions.delete(key);
+    }
+  }
+
+  controlByRegion.clear();
+  for (const [key, control] of next) controlByRegion.set(key, control);
+
+  // Prune stale crossfade timestamps.
+  for (const [key, at] of transitions) {
+    if (now - at > TRANSITION_SECS + 0.5) transitions.delete(key);
+  }
+
+  // Diff neighborhood ownership.
+  const districtChanges: DistrictChange[] = [];
+  for (let i = 0; i < districts.length; i++) {
+    const from = districtOwners[i] ?? 0;
+    const to = districts[i] ?? 0;
+    if (from !== to) districtChanges.push({ index: i, from, to });
+  }
+  districtOwners = districts.slice();
+
+  syncTerritoryUniforms();
+  return { cells: changed, districts: districtChanges };
+}
+
 /** Replace the cached control map from a server TerritoryState broadcast. */
 export function setTerritory(cells: TerritoryCell[]): void {
-  controlByRegion.clear();
-  for (const c of cells) {
-    if (c.control !== 0) controlByRegion.set(regionKey(c.rx, c.rz), c.control);
-  }
-  syncTerritoryUniforms();
+  applyTerritory(cells, districtOwners);
 }
 
 /**
@@ -105,9 +216,12 @@ export function syncTerritoryUniforms(): void {
     hostile.sort((a, b) => a.d2 - b.d2);
     hostile.length = TERR_MAX;
   }
-  const cells = styleUniforms.uTerrCells.value as THREE.Vector3[];
+  const cells = styleUniforms.uTerrCells.value as THREE.Vector4[];
   for (let i = 0; i < hostile.length; i++) {
-    cells[i].set(hostile[i].rx, hostile[i].rz, hostile[i].control);
+    const h = hostile[i];
+    // .w = the flip timestamp (seconds) for the crossfade, 0 if settled.
+    const at = transitions.get(regionKey(h.rx, h.rz)) ?? 0;
+    cells[i].set(h.rx, h.rz, h.control, at);
   }
   styleUniforms.uTerrCount.value = hostile.length;
 }

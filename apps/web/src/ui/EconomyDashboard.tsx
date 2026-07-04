@@ -461,6 +461,10 @@ function FactionStandingsStrip() {
               <span className="num">{f.regions_held.toLocaleString()}</span>
               <span className="econ-lb-stat-label">DISTRICTS</span>
               <span className="num">{f.districts_held.toLocaleString()}</span>
+              <span className="econ-lb-stat-label">ZONE PTS</span>
+              <span className="num econ-live">
+                {(f.zone_points ?? 0).toLocaleString()}
+              </span>
             </div>
           </div>
         );
@@ -561,6 +565,70 @@ function GuildStandings() {
   );
 }
 
+/** Rolling zone-seconds formatted compactly (e.g. "45s", "12m", "1h04m"). */
+function formatZoneSeconds(s: number): string {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * Per-neighborhood territory standings: current owner plus a rolling
+ * seconds-held bar split by faction (the momentum window from the server).
+ */
+function ZoneStandings() {
+  const leaderboard = useGame((s) => s.leaderboard);
+  const factions = useGame((s) => s.factions);
+  if (!leaderboard) return null;
+  const zones = leaderboard.zones ?? [];
+  return (
+    <div className="econ-panel econ-lb-zones">
+      <div className="econ-panel-title">
+        TERRITORY
+        <span className="econ-panel-sub">ZONE SECONDS · LAST 60 MIN</span>
+      </div>
+      <div className="econ-lb-list">
+        {zones.length === 0 && (
+          <div className="econ-empty">No territory held yet.</div>
+        )}
+        {zones.map((z) => {
+          const total = z.seconds.reduce((a, s) => a + s.seconds, 0);
+          const color = factionColor(factions, z.control);
+          return (
+            <div key={z.district} className="econ-lb-zone">
+              <div className="econ-lb-zone-head">
+                <span className="econ-lb-zone-name">{z.district}</span>
+                <span className="econ-lb-zone-owner" style={{ color }}>
+                  {z.control === 0
+                    ? "UNCLAIMED"
+                    : factionName(factions, z.control).toUpperCase()}
+                </span>
+              </div>
+              <div className="econ-lb-zone-bar">
+                {z.seconds
+                  .filter((s) => s.seconds > 0)
+                  .map((s) => (
+                    <span
+                      key={s.faction}
+                      className="econ-lb-zone-seg"
+                      style={{
+                        width: total > 0 ? `${(s.seconds / total) * 100}%` : "0%",
+                        background: factionColor(factions, s.faction),
+                      }}
+                      title={`${factionName(factions, s.faction)}: ${formatZoneSeconds(s.seconds)}`}
+                    />
+                  ))}
+                {total === 0 && <span className="econ-lb-zone-empty" />}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function LeaderboardView() {
   const leaderboard = useGame((s) => s.leaderboard);
   const [category, setCategory] = useState("Wealth");
@@ -586,6 +654,7 @@ function LeaderboardView() {
       <div className="econ-lb-body">
         {board && <BoardPanel key={board.category} board={board} />}
         <GuildStandings />
+        <ZoneStandings />
       </div>
     </div>
   );

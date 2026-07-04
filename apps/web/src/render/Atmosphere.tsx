@@ -729,6 +729,9 @@ export function SceneSetup() {
     tickFacades(clock.elapsedTime);
     // Player XZ drives the tron floor-grid proximity fade (see groundShader).
     styleUniforms.uPlayerPos.value.set(game.rendered.x, game.rendered.z);
+    // Seconds clock for the territory capture crossfade (matches the flip
+    // timestamps recorded in game/territory.ts).
+    styleUniforms.uTerrTime.value = performance.now() / 1000;
     perf.end("facades");
   });
   return null;

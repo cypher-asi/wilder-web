@@ -12,9 +12,12 @@ import {
   playPowerUp,
   playPurchase,
   playSfx,
+  playZoneCapture,
+  playZoneFlip,
+  playZoneLost,
 } from "../assets/audio";
 import { interiorRegistry } from "../game/interiors";
-import { setTerritory } from "../game/territory";
+import { applyTerritory, MY_FACTION, REGION_SIZE } from "../game/territory";
 import {
   armorShield,
   bumpEntityRoster,
@@ -661,7 +664,48 @@ export class GameConnection {
         break;
       }
       case "TerritoryState": {
-        setTerritory(msg.d.cells);
+        const update = applyTerritory(msg.d.cells, msg.d.districts ?? []);
+        const factions = ui.factions;
+        const factionCss = (id: number): string => {
+          const f = factions.find((x) => x.id === id);
+          return `#${(f?.color ?? 0x40e8ff).toString(16).padStart(6, "0")}`;
+        };
+        // Capture pulses for the cells nearest the player that changed hands
+        // (capped so a whole-neighborhood flip doesn't spam the FX queue).
+        const px = game.predicted.x;
+        const pz = game.predicted.z;
+        const near = update.cells
+          .filter((c) => c.to !== 0)
+          .map((c) => {
+            const x = (c.rx + 0.5) * REGION_SIZE;
+            const z = (c.rz + 0.5) * REGION_SIZE;
+            return { c, x, z, d2: (x - px) ** 2 + (z - pz) ** 2 };
+          })
+          .sort((a, b) => a.d2 - b.d2)
+          .slice(0, 6);
+        const now = performance.now();
+        for (const n of near) {
+          game.fx.push({ type: "capture", x: n.x, z: n.z, color: factionCss(n.c.to), at: now });
+        }
+        // Neighborhood ownership changes: gain/loss notifications for the
+        // player's faction, a subtle cue for churn elsewhere nearby.
+        let gained = 0;
+        let lost = 0;
+        for (const d of update.districts) {
+          const name = (ui.districts[d.index]?.name ?? "ZONE").toUpperCase();
+          if (d.to === MY_FACTION && d.from !== MY_FACTION) {
+            gained++;
+            ui.pushPickup({ kind: null, text: `ZONE CAPTURED — ${name}` });
+          } else if (d.from === MY_FACTION && d.to !== MY_FACTION) {
+            lost++;
+            ui.pushPickup({ kind: null, text: `ZONE LOST — ${name}`, alert: true });
+          }
+        }
+        if (gained > 0) playZoneCapture();
+        if (lost > 0) playZoneLost();
+        // A quiet flip cue when a nearby cell changes and nothing louder fired.
+        const nearVisible = near.some((n) => n.d2 < 220 * 220);
+        if (gained === 0 && lost === 0 && nearVisible) playZoneFlip();
         break;
       }
       case "BlueprintsUpdate": {

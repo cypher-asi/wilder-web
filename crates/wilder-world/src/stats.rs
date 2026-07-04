@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wilder_protocol::{Board, BoardRow, FactionStanding, GuildStanding, LeaderboardData};
+use wilder_protocol::{
+    Board, BoardRow, FactionStanding, GuildStanding, LeaderboardData, ZoneStanding,
+};
 use wilder_types::{FactionId, FactionInfo};
 
 /// Rows per leaderboard category.
@@ -138,7 +140,16 @@ pub fn build_leaderboard(
     registry: &[FactionInfo],
     regions_by_faction: &HashMap<FactionId, u32>,
     districts_by_faction: &HashMap<FactionId, u32>,
+    zones: Vec<ZoneStanding>,
 ) -> LeaderboardData {
+    // Rolling "zone points" per faction: total cell-seconds held across every
+    // neighborhood in the recent window.
+    let mut zone_points_by_faction: HashMap<FactionId, u64> = HashMap::new();
+    for z in &zones {
+        for s in &z.seconds {
+            *zone_points_by_faction.entry(s.faction).or_default() += s.seconds;
+        }
+    }
     // Wealth: live wallets, richest first.
     let mut by_wealth: Vec<&LiveActor> = live.iter().collect();
     by_wealth.sort_by(|a, b| b.wealth.cmp(&a.wealth).then_with(|| a.name.cmp(&b.name)));
@@ -198,6 +209,7 @@ pub fn build_leaderboard(
                 treasury,
                 regions_held: regions_by_faction.get(&f.id).copied().unwrap_or(0),
                 districts_held: districts_by_faction.get(&f.id).copied().unwrap_or(0),
+                zone_points: zone_points_by_faction.get(&f.id).copied().unwrap_or(0),
             }
         })
         .collect();
@@ -232,7 +244,7 @@ pub fn build_leaderboard(
     let mut guilds: Vec<GuildStanding> = guild_rows.into_values().collect();
     guilds.sort_by(|a, b| b.kills.cmp(&a.kills).then_with(|| b.wealth.cmp(&a.wealth)));
 
-    LeaderboardData { boards, factions, guilds }
+    LeaderboardData { boards, factions, guilds, zones }
 }
 
 #[cfg(test)]
@@ -299,7 +311,7 @@ mod tests {
             });
         }
         let data =
-            build_leaderboard(&book, &live, &registry(), &HashMap::new(), &HashMap::new());
+            build_leaderboard(&book, &live, &registry(), &HashMap::new(), &HashMap::new(), vec![]);
         let wealth = data.boards.iter().find(|b| b.category == "Wealth").unwrap();
         assert_eq!(wealth.rows.len(), BOARD_ROWS);
         assert_eq!(wealth.rows[0].name, "A00");
@@ -332,7 +344,7 @@ mod tests {
         ];
         let regions = HashMap::from([(FACTION_REBELS, 4u32)]);
         let districts = HashMap::from([(FACTION_REBELS, 1u32)]);
-        let data = build_leaderboard(&book, &live, &registry(), &regions, &districts);
+        let data = build_leaderboard(&book, &live, &registry(), &regions, &districts, vec![]);
         let rebels =
             data.factions.iter().find(|f| f.faction == FACTION_REBELS).unwrap();
         assert_eq!(rebels.members, 2);
@@ -361,7 +373,7 @@ mod tests {
             },
         ];
         let data =
-            build_leaderboard(&book, &live, &registry(), &HashMap::new(), &HashMap::new());
+            build_leaderboard(&book, &live, &registry(), &HashMap::new(), &HashMap::new(), vec![]);
         let guild = data.guilds.iter().find(|g| g.name == "Dead Signal").unwrap();
         assert_eq!(guild.members, 2);
         assert_eq!(guild.wealth, 200);

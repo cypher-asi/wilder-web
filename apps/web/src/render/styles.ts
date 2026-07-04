@@ -395,12 +395,16 @@ export const styleUniforms = {
   uFGlowGain: { value: 1 },
   uFWarmth: { value: 0 },
   uFTint: { value: new THREE.Color(1, 1, 1) },
-  // Territory control: enemy-held regions the ground grid tints red.
+  // Territory control: enemy-held regions the ground grid tints red. Each
+  // cell is (rx, rz, factionId, captureStartSeconds); the .w start time drives
+  // the blue->faction crossfade when a cell newly flips (0 = already settled).
   uTerrCells: {
-    value: Array.from({ length: TERR_MAX }, () => new THREE.Vector3()),
+    value: Array.from({ length: TERR_MAX }, () => new THREE.Vector4()),
   },
   uTerrCount: { value: 0 },
   uRegionSize: { value: CHUNK_SIZE * REGION_CHUNKS },
+  /** Seconds clock (performance.now/1000) for the territory capture crossfade. */
+  uTerrTime: { value: 0 },
 };
 
 // ---------------------------------------------------------------------------

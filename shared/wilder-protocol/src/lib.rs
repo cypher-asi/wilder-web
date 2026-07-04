@@ -166,8 +166,15 @@ pub enum S2C {
         #[serde(default)]
         districts: Vec<DistrictInfo>,
     },
-    /// Territory control overlay: every region not under neutral control.
-    TerritoryState { cells: Vec<TerritoryCell> },
+    /// Territory control overlay: every region not under neutral control,
+    /// plus the current owner of each named neighborhood (aligned with
+    /// `PoiList.districts` order; `FACTION_NEUTRAL` = unclaimed). The client
+    /// diffs these to fire zone gain/loss notifications and transitions.
+    TerritoryState {
+        cells: Vec<TerritoryCell>,
+        #[serde(default)]
+        districts: Vec<FactionId>,
+    },
     BlueprintsUpdate { known: Vec<String> },
     /// Full economy snapshot on dashboard subscribe: aggregate stats plus the
     /// recent transaction feed (oldest first).
@@ -281,6 +288,28 @@ pub struct LeaderboardData {
     pub boards: Vec<Board>,
     pub factions: Vec<FactionStanding>,
     pub guilds: Vec<GuildStanding>,
+    /// Per-neighborhood territory standings (rolling zone-seconds by faction).
+    #[serde(default)]
+    pub zones: Vec<ZoneStanding>,
+}
+
+/// Rolling territory standing for one named neighborhood: who currently holds
+/// it (most cells) plus seconds-held per faction over the recent window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneStanding {
+    pub district: String,
+    /// Faction holding the most cells in the neighborhood right now.
+    pub control: FactionId,
+    /// Rolling seconds each faction has held cells here (window is momentum,
+    /// not lifetime).
+    pub seconds: Vec<ZoneSeconds>,
+}
+
+/// One faction's rolling seconds-held in a neighborhood.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneSeconds {
+    pub faction: FactionId,
+    pub seconds: u64,
 }
 
 /// One leaderboard category (e.g. "Wealth", "Kills") with its ranked rows.
@@ -309,6 +338,10 @@ pub struct FactionStanding {
     pub treasury: i64,
     pub regions_held: u32,
     pub districts_held: u32,
+    /// Rolling "zone points": total cell-seconds held across the map over the
+    /// recent window (momentum readout for the dashboard).
+    #[serde(default)]
+    pub zone_points: u64,
 }
 
 /// Rolled-up standing for one guild (agent squad).
@@ -422,6 +455,7 @@ mod tests {
                 treasury: 9000,
                 regions_held: 4,
                 districts_held: 1,
+                zone_points: 1234,
             }],
             guilds: vec![GuildStanding {
                 name: "Dead Signal".into(),
@@ -430,12 +464,19 @@ mod tests {
                 kills: 5,
                 wealth: 777,
             }],
+            zones: vec![ZoneStanding {
+                district: "NEXUS".into(),
+                control: FACTION_REBELS,
+                seconds: vec![ZoneSeconds { faction: FACTION_REBELS, seconds: 900 }],
+            }],
         });
         let text = encode(&msg);
         match decode::<S2C>(&text).unwrap() {
             S2C::LeaderboardState(data) => {
                 assert_eq!(data.boards[0].rows[0].guild.as_deref(), Some("Dead Signal"));
                 assert_eq!(data.factions[0].regions_held, 4);
+                assert_eq!(data.factions[0].zone_points, 1234);
+                assert_eq!(data.zones[0].seconds[0].seconds, 900);
                 assert_eq!(data.guilds[0].wealth, 777);
             }
             _ => panic!("wrong variant"),

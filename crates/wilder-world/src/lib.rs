@@ -130,13 +130,24 @@ const XP_RAIDER_KILL: u32 = 50;
 /// Territory control is a `FactionId` per region (`FACTION_NEUTRAL` = free).
 /// The wire encoding in `wilder_protocol::TerritoryCell` carries the id raw.
 ///
-/// Minimum presence for a faction to capture a region on agents alone;
-/// a living player of the faction anchors a capture by themselves.
-const CAPTURE_MIN: u32 = 3;
+/// Capture is Halo-style: a cell is claimed by the sole faction standing in
+/// it (first there wins an empty/neutral cell), an occupied cell only flips
+/// once every enemy body is cleared out, and ownership persists while the
+/// cell is empty. A cell with two or more factions present is a standoff and
+/// does not change hands.
+///
 /// Fraction (percent) of gathered/extracted yield seized in enemy regions.
 const TERRITORY_TAX_PCT: u32 = 25;
 /// Recompute territory occupancy every N ticks (20 Hz -> ~1 Hz).
 const TERRITORY_TICK_INTERVAL: u64 = 20;
+/// Faction slots the zone clock tracks (ids 0..=3: neutral, rebels, forum,
+/// wapes).
+const ZONE_FACTIONS: usize = 4;
+/// Rolling window (seconds) for the dashboard "zone points" momentum metric,
+/// split into fixed-size buckets that expire off the tail.
+const ZONE_WINDOW_SECS: f64 = 3600.0;
+const ZONE_BUCKET_SECS: f64 = 60.0;
+const ZONE_BUCKETS: usize = (ZONE_WINDOW_SECS / ZONE_BUCKET_SECS) as usize;
 /// Refresh leaderboards for economy subscribers every N ticks (~5 s).
 const LEADERBOARD_TICK_INTERVAL: u64 = 100;
 /// Stream whole-map intel blips to map subscribers every N ticks (~5 Hz) so
@@ -285,6 +296,76 @@ fn region_is_protected(r: (i32, i32)) -> bool {
 fn region_center(r: (i32, i32)) -> Vec3 {
     let side = REGION_CHUNKS as f32 * CHUNK_SIZE;
     Vec3::new((r.0 as f32 + 0.5) * side, 0.0, (r.1 as f32 + 0.5) * side)
+}
+
+/// Sliding-window accumulator of zone-seconds held per district and faction.
+/// Powers the dashboard "zone points" metric as a live momentum readout
+/// (rolling window) rather than a lifetime total, so it is kept purely
+/// in-memory and resets on restart.
+struct ZoneClock {
+    /// Ring of time buckets; `buckets[slot][district][faction]` = seconds a
+    /// faction held cells in that district during the slot.
+    buckets: Vec<Vec<[f64; ZONE_FACTIONS]>>,
+    /// Ring slot currently accruing.
+    head: usize,
+    /// Seconds already folded into the head bucket.
+    head_elapsed: f64,
+}
+
+impl ZoneClock {
+    fn new(districts: usize) -> Self {
+        ZoneClock {
+            buckets: vec![vec![[0.0; ZONE_FACTIONS]; districts]; ZONE_BUCKETS],
+            head: 0,
+            head_elapsed: 0.0,
+        }
+    }
+
+    /// Advance the clock by `dt` seconds, rolling to fresh buckets (dropping
+    /// the oldest) as slots fill up.
+    fn advance(&mut self, dt: f64) {
+        self.head_elapsed += dt;
+        while self.head_elapsed >= ZONE_BUCKET_SECS {
+            self.head_elapsed -= ZONE_BUCKET_SECS;
+            self.head = (self.head + 1) % self.buckets.len();
+            for cell in &mut self.buckets[self.head] {
+                *cell = [0.0; ZONE_FACTIONS];
+            }
+        }
+    }
+
+    /// Credit `dt` seconds of control to `faction` in `district`.
+    fn add(&mut self, district: usize, faction: FactionId, dt: f64) {
+        let f = faction as usize;
+        if f == 0 || f >= ZONE_FACTIONS {
+            return; // neutral holdings earn no points
+        }
+        if let Some(slot) = self.buckets[self.head].get_mut(district) {
+            slot[f] += dt;
+        }
+    }
+
+    /// Rolling seconds held per district, per faction (summed over the window).
+    fn seconds_by_district(&self) -> Vec<[u64; ZONE_FACTIONS]> {
+        let districts = self.buckets.first().map(|b| b.len()).unwrap_or(0);
+        let mut sums = vec![[0.0f64; ZONE_FACTIONS]; districts];
+        for bucket in &self.buckets {
+            for (di, cell) in bucket.iter().enumerate() {
+                for f in 0..ZONE_FACTIONS {
+                    sums[di][f] += cell[f];
+                }
+            }
+        }
+        sums.into_iter()
+            .map(|c| {
+                let mut r = [0u64; ZONE_FACTIONS];
+                for f in 0..ZONE_FACTIONS {
+                    r[f] = c[f].round() as u64;
+                }
+                r
+            })
+            .collect()
+    }
 }
 
 /// Every runner spawns armed: if neither weapon slot holds anything, equip
@@ -453,6 +534,36 @@ fn goal_service_target(goal: Goal) -> Option<EntityId> {
     }
 }
 
+/// WILD a vendor storefront of `store_kind` would actually pay for the
+/// agent's pack, per its price table. This — not raw carried value — is what
+/// prices a Sell errand: a Bodega pays nothing for an SMG, and an agent that
+/// values its own weapon at the counter walks into a sell-nothing loop at
+/// the door (arrive, sell zero items, re-decide, pick Sell again, forever).
+fn vendor_sell_value(agent: &FactionAgent, store_kind: EntityKind) -> u32 {
+    wilder_economy::vendor_offers(store_kind)
+        .iter()
+        .filter(|o| o.sell > 0)
+        .map(|o| o.sell.saturating_mul(agent.count_item(o.kind)))
+        .sum()
+}
+
+/// Whether an agent would put `kind` on the market book: raw resources and
+/// valuables, never the personal kit that keeps it combat-effective.
+fn market_listable(kind: ItemKind) -> bool {
+    !agents::is_kit(kind)
+        && (wilder_economy::RESOURCES.contains(&kind) || base_value(kind) >= 5)
+}
+
+/// Reference value of everything the agent would list on the market book.
+fn market_list_value(agent: &FactionAgent) -> u32 {
+    agent
+        .inventory
+        .iter()
+        .filter(|s| market_listable(s.kind))
+        .map(|s| base_value(s.kind) * s.count)
+        .sum()
+}
+
 /// Zone kind of the octant at index `oct`, where octant 0 points along +X
 /// (east) and octants advance counter-clockwise in world space (+Z = south).
 fn zone_of_octant(oct: i32) -> ZoneKind {
@@ -515,6 +626,10 @@ const DISTRICT: &[((i32, i32), EntityKind, &str)] = &[
     ((0, 1), EntityKind::Bodega, "Bodega"),
     ((0, -1), EntityKind::Safehouse, "Safehouse"),
     ((0, -1), EntityKind::Dealership, "Dealership"),
+    // Second hub Bodega on the opposite face: the spawn cohort is the densest
+    // crowd on the map, so it gets two sell/medkit sinks for congestion-aware
+    // routing to split across (one Bodega alone just relocates the pile-up).
+    ((0, -1), EntityKind::Bodega, "Bodega South"),
 ];
 
 /// Commerce outposts in the hostile ring. Unlike the protected hub regions,
@@ -973,6 +1088,8 @@ pub struct World {
     territory: HashMap<(i32, i32), FactionId>,
     /// Territory changed since the last save.
     territory_dirty: bool,
+    /// Rolling zone-seconds held per district/faction (dashboard momentum).
+    zone_clock: ZoneClock,
     /// Economy transaction ledger + supply counters (K dashboard).
     ledger: Ledger,
     /// Per-competitor stats + faction/guild lifetime totals (leaderboards).
@@ -1055,6 +1172,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         rx,
         territory,
         territory_dirty: false,
+        zone_clock: ZoneClock::new(districts::district_defs().len()),
         ledger: Ledger::new(ledger_save),
         stats,
         econ_subs: HashSet::new(),
@@ -1269,7 +1387,10 @@ impl World {
         let _ = tx.send(S2C::BlueprintsUpdate {
             known: player.blueprints.iter().cloned().collect(),
         });
-        let _ = tx.send(S2C::TerritoryState { cells: self.territory_cells() });
+        let _ = tx.send(S2C::TerritoryState {
+            cells: self.territory_cells(),
+            districts: self.district_control(),
+        });
         let _ = tx.send(S2C::PoiList {
             pois: self.poi_list(),
             zones: zone_infos(),
@@ -2502,8 +2623,12 @@ impl World {
 
     fn broadcast_territory(&self) {
         let cells = self.territory_cells();
+        let districts = self.district_control();
         for p in self.players.values() {
-            let _ = p.tx.send(S2C::TerritoryState { cells: cells.clone() });
+            let _ = p.tx.send(S2C::TerritoryState {
+                cells: cells.clone(),
+                districts: districts.clone(),
+            });
         }
     }
 
@@ -2515,12 +2640,14 @@ impl World {
             .is_some_and(|&holder| are_hostile(holder, faction))
     }
 
-    /// Recompute presence-based control for regions with any activity, per
-    /// faction. Players anchor a capture for their faction by themselves;
-    /// agents and wild Wapes need `CAPTURE_MIN` bodies and a strict majority
-    /// (a Wape pack squatting a block turns it hostile ground for everyone).
-    /// Sanctuary ground (and the protected hub) never flips; Guarded ground
-    /// only ever lights up for its home faction.
+    /// Recompute Halo-style control for regions with any activity. A cell is
+    /// claimed by the *sole* faction standing in it (first there wins an
+    /// empty/neutral cell), only flips once every enemy body has been cleared
+    /// out, and stays held while empty. A cell with two or more factions
+    /// present is a standoff and keeps its current owner. Sanctuary ground
+    /// (and the protected hub) never flips; Guarded ground only ever lights up
+    /// for its home faction. After settling ownership, the rolling zone clock
+    /// accrues seconds-held for the dashboard.
     fn tick_territory(&mut self) {
         if self.tick % TERRITORY_TICK_INTERVAL != 0 {
             return;
@@ -2583,25 +2710,16 @@ impl World {
                         }
                     }
                     DangerLevel::Contested | DangerLevel::Warzone => {
-                        let mut best: (FactionId, u32, u32) = (FACTION_NEUTRAL, 0, 0);
-                        let mut second = 0u32;
-                        for (&f, &(n, players)) in counts {
-                            if n > best.1 {
-                                second = best.1;
-                                best = (f, n, players);
-                            } else if n > second {
-                                second = n;
-                            }
-                        }
-                        let (winner, n, players) = best;
-                        if n > second && (players > 0 || n >= CAPTURE_MIN) {
-                            winner
-                        } else if cur != FACTION_NEUTRAL
-                            && counts.get(&cur).map(|&(n, _)| n).unwrap_or(0) > 0
-                        {
-                            cur // holder keeps it while still present
-                        } else {
-                            FACTION_NEUTRAL
+                        // Halo capture: the sole faction present owns the cell
+                        // (claims neutral ground on arrival, or takes it once
+                        // the last enemy is cleared). Empty cells keep their
+                        // holder; two-plus factions is a standoff (no flip).
+                        // `counts` only holds factions with at least one body.
+                        let mut present = counts.keys().copied();
+                        match (present.next(), present.next()) {
+                            (None, _) => cur,           // empty: holder persists
+                            (Some(only), None) => only, // sole presence claims
+                            (Some(_), Some(_)) => cur,  // standoff: no flip
                         }
                     }
                 }
@@ -2619,6 +2737,44 @@ impl World {
             self.territory_dirty = true;
             self.broadcast_territory();
         }
+
+        // Accrue rolling zone-seconds for whatever is held this tick. The
+        // territory tick runs at a fixed cadence, so each pass credits the
+        // same slice of wall-clock time to every held cell's district.
+        let dt = TERRITORY_TICK_INTERVAL as f64 / TICK_HZ as f64;
+        self.zone_clock.advance(dt);
+        for (&r, &holder) in &self.territory {
+            if let Some((di, _)) = districts::district_of(region_center(r)) {
+                self.zone_clock.add(di, holder, dt);
+            }
+        }
+    }
+
+    /// Per-neighborhood rolling territory standings for the dashboard: current
+    /// owner (most cells) plus seconds-held per faction over the window.
+    fn zone_standings(&self) -> Vec<ZoneStanding> {
+        let defs = districts::district_defs();
+        let control = self.district_control();
+        let secs = self.zone_clock.seconds_by_district();
+        let registry = faction_registry();
+        defs.iter()
+            .enumerate()
+            .map(|(di, d)| {
+                let per = secs.get(di).copied().unwrap_or([0; ZONE_FACTIONS]);
+                let seconds = registry
+                    .iter()
+                    .map(|f| ZoneSeconds {
+                        faction: f.id,
+                        seconds: per.get(f.id as usize).copied().unwrap_or(0),
+                    })
+                    .collect();
+                ZoneStanding {
+                    district: d.name.clone(),
+                    control: control.get(di).copied().unwrap_or(FACTION_NEUTRAL),
+                    seconds,
+                }
+            })
+            .collect()
     }
 
     /// District control rollup: the faction holding the most regions whose
@@ -4368,7 +4524,7 @@ impl World {
     /// Utility-AI: score candidate goals for one agent and commit to the best.
     fn decide_agent(&mut self, idx: usize) {
         use rand::Rng;
-        let (pos, role, faction, health_frac, wallet, carried, haul, entity, retreat_cd) = {
+        let (pos, role, faction, health_frac, wallet, haul, entity, retreat_cd) = {
             let a = &self.agents[idx];
             (
                 a.position,
@@ -4376,7 +4532,6 @@ impl World {
                 a.faction,
                 a.health / a.max_health,
                 a.wallet,
-                a.carried_value(),
                 a.haul_value(),
                 a.entity,
                 a.retreat_cooldown,
@@ -4435,24 +4590,33 @@ impl World {
             }
         }
 
-        // --- Sell: haul value to the nearest store ---
+        // --- Sell: price the errand by what the counter actually PAYS ---
+        // Traders list on the market book (any non-kit valuables); everyone
+        // else vendors at a Bodega, which only buys raw resources. Raw
+        // carried value is the wrong signal here: it counts the agent's own
+        // weapons/meds, which no counter accepts, so a kit-only agent would
+        // march to the Bodega, sell nothing, and re-pick Sell forever — a
+        // permanent statue crowd at the door. Destinations come from the
+        // congestion-aware router so packed storefronts price themselves out.
         let sell_mult = match role {
             Role::Trader => 1.4,
             Role::Scavenger => 1.2,
             _ => 1.0,
         };
-        if carried >= 30 {
-            // Traders prefer the market book; everyone else vendors at a
-            // Bodega. Either way the destination is chosen congestion-aware so
-            // a packed storefront pushes this errand's appeal (and score) down.
-            let want_market = role == Role::Trader && self.market.len() < 200;
-            let routed = want_market
-                .then(|| self.route_service(pos, EntityKind::MarketTerminal))
-                .flatten()
-                .map(|r| (true, r))
-                .or_else(|| self.route_service(pos, EntityKind::Bodega).map(|r| (false, r)));
-            if let Some((list_on_market, (store, store_pos, appeal))) = routed {
-                let score = carried as f32 * 0.08 * sell_mult * appeal;
+        let want_market = role == Role::Trader && self.market.len() < 200;
+        let sell_plan = if want_market {
+            self.route_service(pos, EntityKind::MarketTerminal)
+                .map(|r| (true, market_list_value(&self.agents[idx]), r))
+        } else {
+            None
+        }
+        .or_else(|| {
+            self.route_service(pos, EntityKind::Bodega)
+                .map(|r| (false, vendor_sell_value(&self.agents[idx], EntityKind::Bodega), r))
+        });
+        if let Some((list_on_market, payable, (store, store_pos, appeal))) = sell_plan {
+            if payable >= 30 {
+                let score = payable as f32 * 0.08 * sell_mult * appeal;
                 if score > best.0 {
                     best = (score, Goal::Sell { store, store_pos, list_on_market });
                 }
@@ -5020,7 +5184,7 @@ impl World {
         let carried: Vec<(ItemKind, u32)> = self.agents[idx]
             .inventory
             .iter()
-            .filter(|s| wilder_economy::RESOURCES.contains(&s.kind) || base_value(s.kind) >= 5)
+            .filter(|s| market_listable(s.kind))
             .map(|s| (s.kind, s.count))
             .collect();
         for (kind, count) in carried {
@@ -5726,6 +5890,7 @@ impl World {
             &faction_registry(),
             &regions_by_faction,
             &districts_by_faction,
+            self.zone_standings(),
         )
     }
 
@@ -6774,6 +6939,7 @@ mod tests {
             rx,
             territory: HashMap::new(),
             territory_dirty: false,
+            zone_clock: ZoneClock::new(districts::district_defs().len()),
             ledger: Ledger::new(LedgerSave::default()),
             stats: StatsBook::default(),
             econ_subs: HashSet::new(),
@@ -7185,6 +7351,126 @@ mod tests {
     }
 
     #[test]
+    fn service_routing_avoids_the_crowded_storefront() {
+        let (mut world, _dir) = test_world();
+        let place = |world: &mut World, pos: Vec3| -> EntityId {
+            let e = world.alloc_entity();
+            world.statics.insert(
+                e,
+                StaticEntity {
+                    entity: e,
+                    kind: EntityKind::Bodega,
+                    position: pos,
+                    name: "Bodega".into(),
+                    variant: 0,
+                    agent_id: static_agent_id(world.seed, e),
+                },
+            );
+            e
+        };
+        // Two Bodegas: A is nearer the agent, B a short detour farther.
+        let a = place(&mut world, Vec3::new(0.0, 0.0, 0.0));
+        let b = place(&mut world, Vec3::new(40.0, 0.0, 0.0));
+        let from = Vec3::new(-5.0, 0.0, 0.0);
+
+        // Empty: the nearer Bodega wins and its appeal is high.
+        let (near, _, near_appeal) = world.route_service(from, EntityKind::Bodega).unwrap();
+        assert_eq!(near, a, "with no crowd the nearer Bodega should win");
+
+        // Pack the near Bodega past capacity: routing flips to the emptier
+        // farther one (agents avoid the jam instead of piling on).
+        world.service_load.insert(a, 40);
+        let (routed, _, routed_appeal) = world.route_service(from, EntityKind::Bodega).unwrap();
+        assert_eq!(routed, b, "a packed Bodega should push agents to an emptier one");
+        assert!(
+            routed_appeal < near_appeal,
+            "congested routing appeal ({routed_appeal}) should fall below the uncontested one ({near_appeal})"
+        );
+    }
+
+    /// End-to-end crowd regression: run the full population for ~5
+    /// sim-minutes and check no Bodega accumulates a statue mob. Guards the
+    /// three historical pile-up bugs at once: kit-only agents looping Sell at
+    /// a counter that buys nothing, cold hunters shadowing victims into the
+    /// sanctuary forever, and errands never re-routing off a packed door.
+    /// Deterministic: fixed world seed, no wall-clock inputs.
+    #[test]
+    fn bodega_crowds_stay_dispersed() {
+        let (mut world, _dir) = test_world();
+        world.seed_district();
+        world.seed_neighborhood_stores();
+        world.seed_agents(500);
+        // Arm half the population: kit-heavy packs are what fed the old
+        // sell-nothing loop, so make sure the pressure is present.
+        for i in 0..world.agents.len() {
+            if i % 2 == 0 {
+                world.agents[i].add_item(ItemKind::Smg, 1);
+                world.agents[i].add_item(ItemKind::Ammo9mm, 60);
+            }
+        }
+        for _ in 0..6000 {
+            world.tick += 1;
+            world.ledger.set_tick(world.tick);
+            world.tick_agents();
+        }
+        for s in world.statics.values().filter(|s| s.kind == EntityKind::Bodega) {
+            let crowd = world
+                .agents
+                .iter()
+                .filter(|a| a.alive() && (a.position - s.position).length() < 12.0)
+                .count();
+            assert!(
+                crowd <= 20,
+                "{} has a {crowd}-agent mob at the door (statue-pile regression)",
+                s.name
+            );
+        }
+    }
+
+    #[test]
+    fn kit_only_agents_dont_mob_the_bodega() {
+        let (mut world, _dir) = test_world();
+        let pos = district_anchor("NEXUS");
+        // A Bodega right next door, so if Sell scores at all it wins routing.
+        let entity = world.alloc_entity();
+        world.statics.insert(
+            entity,
+            StaticEntity {
+                entity,
+                kind: EntityKind::Bodega,
+                position: pos + Vec3::new(10.0, 0.0, 0.0),
+                name: "Bodega".into(),
+                variant: 0,
+                agent_id: static_agent_id(world.seed, entity),
+            },
+        );
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Role::Scavenger, pos);
+        // A valuable pack — but it's all personal kit, which the Bodega
+        // (raw resources in, consumables out) pays nothing for. Under
+        // carried-value scoring this agent walked to the counter, sold
+        // nothing, re-picked Sell and stood at the door forever.
+        world.agents[idx].add_item(ItemKind::Smg, 1);
+        world.agents[idx].add_item(ItemKind::Ammo9mm, 60);
+        world.agents[idx].add_item(ItemKind::Medkit, 1);
+        for _ in 0..5 {
+            world.decide_agent(idx);
+            assert!(
+                !matches!(world.agents[idx].goal, Goal::Sell { .. }),
+                "kit-only agent must not queue at a store, got {:?}",
+                world.agents[idx].goal
+            );
+        }
+        // Give it goods the Bodega actually pays for: now Sell is rational.
+        world.agents[idx].add_item(ItemKind::Electronics, 40);
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Sell { .. }),
+            "agent hauling real resources should go sell, got {:?}",
+            world.agents[idx].goal
+        );
+    }
+
+    #[test]
     fn cold_war_rolls_casualties_where_factions_share_a_region() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
@@ -7358,22 +7644,31 @@ mod tests {
     }
 
     #[test]
-    fn territory_flips_per_faction() {
+    fn territory_capture_is_halo_style() {
         let (mut world, _dir) = test_world();
         let contested = district_anchor("NEXUS");
         let region = region_of(contested);
 
-        // Three Forum agents dominate the region: they take it.
-        for _ in 0..3 {
-            spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, contested);
-        }
+        // First there wins: a single Forum agent claims the empty cell.
+        let forum = spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, contested);
         world.tick_territory();
         assert_eq!(world.territory.get(&region), Some(&FACTION_FORUM));
 
-        // Four Rebels move in and outnumber them: the region flips.
+        // Rebels move in alongside Forum: a contested standoff does NOT flip
+        // the cell, no matter how many pile in.
         for _ in 0..4 {
             spawn_test_agent(&mut world, FACTION_REBELS, Role::Enforcer, contested);
         }
+        world.tick_territory();
+        assert_eq!(
+            world.territory.get(&region),
+            Some(&FACTION_FORUM),
+            "cell must not flip while the holder still has a body in it"
+        );
+
+        // Clear the last Forum body: now Rebels are the sole presence and
+        // take the cell.
+        world.agents[forum].health = 0.0;
         world.tick_territory();
         assert_eq!(world.territory.get(&region), Some(&FACTION_REBELS));
 
@@ -7381,12 +7676,38 @@ mod tests {
         assert!(world.region_hostile_to(contested, FACTION_FORUM));
         assert!(!world.region_hostile_to(contested, FACTION_REBELS));
 
-        // Everyone dies: the holder keeps nothing and control relaxes.
+        // Everyone leaves: ownership persists until someone else clears and
+        // claims it (Halo hill stays yours while empty).
         for agent in &mut world.agents {
             agent.health = 0.0;
         }
         world.tick_territory();
-        assert_eq!(world.territory.get(&region), None);
+        assert_eq!(world.territory.get(&region), Some(&FACTION_REBELS));
+    }
+
+    #[test]
+    fn zone_clock_accrues_rolling_seconds() {
+        let (mut world, _dir) = test_world();
+        let contested = district_anchor("NEXUS");
+        spawn_test_agent(&mut world, FACTION_FORUM, Role::Enforcer, contested);
+        // Hold the cell across several territory ticks (each credits ~1 s).
+        for _ in 0..5 {
+            world.tick_territory();
+        }
+        let zones = world.zone_standings();
+        let nexus = zones.iter().find(|z| z.district == "NEXUS").unwrap();
+        assert_eq!(nexus.control, FACTION_FORUM);
+        let forum_secs = nexus
+            .seconds
+            .iter()
+            .find(|s| s.faction == FACTION_FORUM)
+            .map(|s| s.seconds)
+            .unwrap_or(0);
+        assert!(forum_secs >= 4, "expected several seconds held, got {forum_secs}");
+        // Rolls up into the faction leaderboard as "zone points".
+        let data = world.leaderboard();
+        let forum = data.factions.iter().find(|f| f.faction == FACTION_FORUM).unwrap();
+        assert!(forum.zone_points >= 4);
     }
 
     #[test]

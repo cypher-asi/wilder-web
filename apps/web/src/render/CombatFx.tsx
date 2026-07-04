@@ -29,6 +29,7 @@ const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   shell: 700,
   lootPop: 650,
   coinBurst: 900,
+  capture: 1100,
 };
 
 interface ActiveFx {
@@ -58,6 +59,10 @@ const SHELL_GEO = new THREE.CylinderGeometry(0.014, 0.014, 0.05, 6);
 const HIT_SPARK_GEO = new THREE.SphereGeometry(0.22, 8, 8);
 const SHOCKWAVE_GEO = new THREE.RingGeometry(0.82, 1.0, 48);
 const DEATH_RING_GEO = new THREE.RingGeometry(0.7, 0.85, 32);
+// Territory capture: a broad ring that sweeps out across the ~64 m region,
+// plus a filled disc that flashes the whole cell in the faction color.
+const CAPTURE_RING_GEO = new THREE.RingGeometry(0.9, 1.0, 64);
+const CAPTURE_DISC_GEO = new THREE.CircleGeometry(1, 48);
 
 const TRACER_CORE_MAT = new THREE.MeshBasicMaterial({
   color: "#dff3ff",
@@ -314,6 +319,8 @@ export function CombatFx() {
           <CoinBurstFx key={id} ev={ev} />
         ) : ev.type === "gib" ? (
           <GibBurst key={id} ev={ev} />
+        ) : ev.type === "capture" ? (
+          <CaptureRing key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -637,6 +644,74 @@ function DeathPulse({ ev }: { ev: Extract<CombatFxEvent, { type: "death" }> }) {
           </div>
         </Html>
       </group>
+    </group>
+  );
+}
+
+const CAPTURE_RING_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#40e8ff",
+  transparent: true,
+  opacity: 0.8,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+
+/**
+ * Territory flip: a wide ground ring in the new holder's faction color that
+ * sweeps outward across the captured region, plus a soft floor disc that
+ * flashes and fades — the "cool transition" when a zone changes hands.
+ */
+function CaptureRing({ ev }: { ev: Extract<CombatFxEvent, { type: "capture" }> }) {
+  const ring = useRef<THREE.Mesh>(null);
+  const disc = useRef<THREE.Mesh>(null);
+  const ringMat = useClonedMaterial(CAPTURE_RING_MAT_BASE);
+  const discMat = useClonedMaterial(CAPTURE_RING_MAT_BASE);
+  useMemo(() => {
+    ringMat.color.set(ev.color);
+    discMat.color.set(ev.color);
+  }, [ringMat, discMat, ev.color]);
+  // Sweep out to roughly the region half-width (regions are ~64 m).
+  const RADIUS = 30;
+
+  useFrame(() => {
+    const t = (performance.now() - ev.at) / LIFETIME_MS.capture;
+    const visible = t < 1;
+    if (ring.current) {
+      ring.current.visible = visible;
+      if (visible) {
+        const ease = 1 - (1 - t) * (1 - t);
+        ring.current.scale.setScalar(0.5 + ease * RADIUS);
+        ringMat.opacity = THREE.MathUtils.clamp(1 - t, 0, 1) * 0.8;
+      }
+    }
+    if (disc.current) {
+      disc.current.visible = visible;
+      if (visible) {
+        discMat.opacity = THREE.MathUtils.clamp(1 - t * 1.6, 0, 1) * 0.28;
+      }
+    }
+  });
+
+  return (
+    <group>
+      <mesh
+        ref={ring}
+        position={[ev.x, 0.08, ev.z]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        geometry={CAPTURE_RING_GEO}
+        material={ringMat}
+        dispose={null}
+      />
+      <mesh
+        ref={disc}
+        position={[ev.x, 0.06, ev.z]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        scale={RADIUS}
+        geometry={CAPTURE_DISC_GEO}
+        material={discMat}
+        dispose={null}
+      />
     </group>
   );
 }

@@ -381,6 +381,23 @@ export interface FactionStanding {
   treasury: number;
   regions_held: number;
   districts_held: number;
+  /** Rolling "zone points": total cell-seconds held over the recent window. */
+  zone_points: number;
+}
+
+/** One faction's rolling seconds-held in a neighborhood. */
+export interface ZoneSeconds {
+  faction: FactionId;
+  seconds: number;
+}
+
+/** Rolling territory standing for one named neighborhood. */
+export interface ZoneStanding {
+  district: string;
+  /** Faction holding the most cells in the neighborhood right now. */
+  control: FactionId;
+  /** Rolling seconds each faction has held cells here. */
+  seconds: ZoneSeconds[];
 }
 
 /** Rolled-up standing for one guild (agent squad). */
@@ -397,6 +414,8 @@ export interface LeaderboardData {
   boards: Board[];
   factions: FactionStanding[];
   guilds: GuildStanding[];
+  /** Per-neighborhood territory standings (rolling zone-seconds by faction). */
+  zones: ZoneStanding[];
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +562,7 @@ export type S2C =
         districts: DistrictInfo[];
       }
     >
-  | Tagged<"TerritoryState", { cells: TerritoryCell[] }>
+  | Tagged<"TerritoryState", { cells: TerritoryCell[]; districts: FactionId[] }>
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"EconomyState", { stats: EconomyStats; recent: EconTx[] }>
   | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>

@@ -143,6 +143,15 @@ export type CombatFxEvent =
       /** Coin tint: gold for rewards, silver for the death shower. */
       metal?: "gold" | "silver";
       at: number;
+    }
+  | {
+      type: "capture";
+      /** Region center on the ground plane (world meters). */
+      x: number;
+      z: number;
+      /** New holder's faction color (CSS hex). */
+      color: string;
+      at: number;
     };
 
 /** Weapon mount registered per character entity (muzzle FX + recoil kick). */

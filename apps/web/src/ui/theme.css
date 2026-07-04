@@ -3323,6 +3323,55 @@ body {
   background: rgba(159, 180, 200, 0.08);
 }
 
+/* Territory standings: full-width row under the board + guild columns. */
+.econ-lb-zones {
+  grid-column: 1 / -1;
+}
+
+.econ-lb-zone {
+  padding: 6px 6px 8px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.08);
+}
+
+.econ-lb-zone-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.econ-lb-zone-name {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.econ-lb-zone-owner {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-lb-zone-bar {
+  display: flex;
+  height: 7px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(159, 180, 200, 0.1);
+}
+
+.econ-lb-zone-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.4s ease;
+}
+
+.econ-lb-zone-empty {
+  width: 100%;
+}
+
 .econ-lb-rank {
   color: var(--text-dim);
 }
@@ -3464,6 +3513,14 @@ body {
 }
 
 .bsod-cursor {
+  animation: bsod-blink 1s steps(2) infinite;
+}
+
+.bsod-lockout {
+  opacity: 0.55;
+}
+
+.bsod-ready {
   animation: bsod-blink 1s steps(2) infinite;
 }
 

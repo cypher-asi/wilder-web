@@ -681,6 +681,618 @@ body,
   color: var(--text-dim);
 }
 
+/* ---------------------------------------------------------------------------
+   Map tab: HoloMapView (standalone) fills the area above the tab bar; the
+   chrome (legend, my-agents, tap chips) floats over it.
+--------------------------------------------------------------------------- */
+
+.m-map {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  background: #010409;
+}
+
+/* Bottom-right floating buttons (legend toggle + my-agents recenter).
+   Chrome sits above .map-overlay (z-index 20 in theme.css). */
+.m-map-fabs {
+  position: absolute;
+  right: 12px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  z-index: 25;
+}
+
+.m-map-fab {
+  min-height: 44px;
+  padding: 0 14px;
+  background: rgba(6, 14, 22, 0.85);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.m-map-fab.active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+/* Tapped-district readout chip (top center). */
+.m-map-chip {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: rgba(6, 14, 22, 0.88);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  z-index: 25;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.m-map-chip-name {
+  font: 800 12px/1 var(--font-display);
+  letter-spacing: 0.2em;
+  color: var(--accent-bright);
+}
+
+.m-map-chip-danger {
+  font: 700 10px/1 var(--font-display);
+  letter-spacing: 0.14em;
+}
+
+.m-map-chip-danger.danger-sanctuary { color: #2de08c; }
+.m-map-chip-danger.danger-guarded   { color: #4fa8ff; }
+.m-map-chip-danger.danger-contested { color: #ffb02e; }
+.m-map-chip-danger.danger-warzone   { color: #ff3860; }
+
+/* Tapped owned-agent info chip (bottom center, above the fabs). */
+.m-map-agent-chip {
+  position: absolute;
+  left: 12px;
+  right: 88px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(4, 10, 18, 0.9);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  z-index: 26;
+}
+
+.m-map-agent-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.m-map-agent-activity {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-map-agent-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.m-map-watch-btn {
+  min-height: 44px;
+  padding: 0 14px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent);
+  clip-path: var(--clip-notch-sm);
+  font: 800 11px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.m-map-chip-close {
+  min-width: 40px;
+  min-height: 44px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* Legend panel (toggled by the fab). */
+.m-map-legend {
+  position: absolute;
+  right: 12px;
+  bottom: 118px;
+  max-height: 55%;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(6, 14, 22, 0.92);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  z-index: 25;
+}
+
+.m-map-legend-title {
+  margin-top: 6px;
+  font: 800 9px/1 var(--font-display);
+  letter-spacing: 0.22em;
+  color: var(--text-dim);
+}
+
+.m-map-legend-title:first-child {
+  margin-top: 0;
+}
+
+.m-map-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+
+.m-map-legend-glyph {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-style: normal;
+}
+
+/* ---------------------------------------------------------------------------
+   Economy tab: KPI card swiper, supply list + item drill-in, live tx feed.
+--------------------------------------------------------------------------- */
+
+.m-econ {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #05060a;
+  font-family: var(--font-display);
+}
+
+.m-econ-head {
+  flex: none;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+
+/* --- KPI swiper ------------------------------------------------------------- */
+
+.m-econ-kpis {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+.m-econ-kpis::-webkit-scrollbar {
+  display: none;
+}
+
+.m-econ-kpi {
+  flex: none;
+  scroll-snap-align: start;
+  min-width: 128px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+}
+
+.m-econ-kpi-value {
+  font-size: 19px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+}
+
+.m-econ-kpi-label {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+}
+
+.m-econ-kpi-delta {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.m-econ-kpi-delta.up { color: #7be0c2; }
+.m-econ-kpi-delta.down { color: #ff6a7c; }
+
+/* --- Section switcher --------------------------------------------------------- */
+
+.m-econ-sections {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px 8px;
+}
+
+.m-econ-section-btn {
+  flex: 1;
+  min-height: 44px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font: 700 12px/1 var(--font-display);
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.m-econ-section-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+  color: var(--accent);
+}
+
+/* --- Supply list ------------------------------------------------------------- */
+
+.m-econ-cats {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.m-econ-cats::-webkit-scrollbar {
+  display: none;
+}
+
+.m-econ-cat {
+  flex: none;
+  min-height: 34px;
+  padding: 0 12px;
+  background: none;
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font: 700 10px/1 var(--font-display);
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.m-econ-cat.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.m-econ-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 14px 16px;
+}
+
+.m-econ-item-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 8px 12px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font-family: var(--font-display);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.m-econ-item-row:active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.m-econ-item-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-econ-item-ticker {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
+.m-econ-item-supply {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.m-econ-item-live {
+  font-size: 13px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #7be0c2;
+}
+
+.m-econ-item-sub {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.m-econ-item-chev {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 16px;
+}
+
+/* --- Transaction feed ----------------------------------------------------------- */
+
+.m-econ-tx {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: rgba(4, 10, 18, 0.7);
+  border-left: 2px solid var(--accent-dim);
+}
+
+.m-econ-tx-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.m-econ-tx-kind {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.m-econ-tx-amount {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-econ-tx-age {
+  flex: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.m-econ-tx-parties {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-econ-tx-arrow {
+  color: var(--text-dim);
+}
+
+.m-econ-tx-kernel {
+  color: var(--text-dim);
+  letter-spacing: 0.14em;
+}
+
+/* --- Item drill-in page --------------------------------------------------------- */
+
+.m-econ-detail {
+  gap: 14px;
+  padding: 10px 14px 20px;
+}
+
+.m-econ-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.m-econ-detail-glyph {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid;
+  clip-path: var(--clip-notch-sm);
+  background: var(--panel);
+}
+
+.m-econ-detail-id {
+  flex: 1;
+  min-width: 0;
+}
+
+.m-econ-detail-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--white);
+}
+
+.m-econ-detail-cat {
+  margin-top: 4px;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+}
+
+.m-econ-detail-price {
+  flex: none;
+  text-align: right;
+}
+
+.m-econ-detail-price-value {
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+}
+
+.m-econ-detail-price-cur {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+.m-econ-detail-change {
+  margin-top: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.m-econ-detail-desc {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.m-econ-chart {
+  width: 100%;
+  height: auto;
+  background: rgba(4, 10, 18, 0.6);
+  border: 1px solid var(--panel-border);
+}
+
+.m-econ-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+}
+
+.m-econ-stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.m-econ-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
+.m-econ-stat-value {
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.m-econ-fills {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.m-econ-fill {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px;
+  background: rgba(4, 10, 18, 0.7);
+  border-left: 2px solid var(--accent-dim);
+  font-size: 10px;
+}
+
+.m-econ-fill-time {
+  flex: none;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-econ-fill-price {
+  flex: none;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+}
+
+.m-econ-fill-qty {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.m-econ-fill-names {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --- Hire offers in the sheet ---------------------------------------------------- */
 
 .m-ag-offer {

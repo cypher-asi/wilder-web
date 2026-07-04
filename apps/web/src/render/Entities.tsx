@@ -961,6 +961,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       }
     }
 
+    perf.end("entities.anim");
+
+    // ---- Procedural rig layer (spine twist + gun-aim bones) --------------
+    perf.begin("entities.rig");
     // Whole model turns with the legs; the spine counter-twists back to the
     // aim so the torso (and gun) keep pointing at the cursor.
     const turn = legYaw.current * locoScale.current;
@@ -1008,7 +1012,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         mount.holder.quaternion.multiply(gunRecoilQ);
       }
     }
-    perf.end("entities.anim");
+    perf.end("entities.rig");
   });
 
   // Nothing while the GLB loads (preloaded at character select, so this is
@@ -1108,6 +1112,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
   const spinner = useRef<THREE.Group>(null);
   const iconBaseY = isAmmo ? 1.02 : 0.66;
   useFrame(({ clock }) => {
+    perf.begin("shaders.misc");
     // Shared materials only need one update per frame, not one per crate.
     if (cratePulseFrame !== clock.elapsedTime) {
       cratePulseFrame = clock.elapsedTime;
@@ -1124,6 +1129,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       spinner.current.rotation.y = clock.elapsedTime * 1.8 + entity.id;
       spinner.current.position.y = 0.32 + Math.sin(clock.elapsedTime * 2 + entity.id) * 0.06;
     }
+    perf.end("shaders.misc");
   });
 
   return (
@@ -1719,20 +1725,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
       );
       break;
     case "Agent":
-      body = (
-        <group
-          onPointerOver={() => {
-            game.hoverTargetId = entity.id;
-          }}
-          onPointerOut={() => {
-            if (game.hoverTargetId === entity.id) game.hoverTargetId = null;
-          }}
-        >
-          <CharacterModel entity={entity} />
-          <HealthBar entity={entity} />
-          <AgentNameplate entity={entity} />
-        </group>
-      );
+      // LOD-gated: the full rig mounts only while this agent is among the
+      // nearest few; otherwise AgentImpostors draws it in one instanced pass.
+      body = <AgentBody entity={entity} />;
       break;
     default:
       body = <CharacterModel entity={entity} />;
@@ -1899,6 +1894,176 @@ function AgentNameplate({ entity }: { entity: GameEntity }) {
  * roster changes only reconcile keys instead of re-rendering every view. */
 const MemoEntityView = memo(EntityView);
 
+// ---------------------------------------------------------------------------
+// Agent render LOD
+// ---------------------------------------------------------------------------
+//
+// Every hot agent used to mount a full character rig (cloned skinned GLB,
+// AnimationMixer, inverted-hull outline meshes, Html nameplate/healthbar,
+// several useFrame hooks). With hundreds of agents staged around the hub that
+// dominated frame cost. Instead, only the nearest few agents get the full
+// rig; everyone else renders through one InstancedMesh of faction-tinted
+// silhouettes (one draw call for the whole crowd).
+
+/** Full character rigs are granted to at most this many nearest agents. */
+const MAX_AGENT_RIGS = 24;
+/** Beyond this camera distance an agent never gets a full rig (m). */
+const RIG_MAX_DIST = 60;
+/** Distance bonus for current rig holders, so ranks don't flap at the cut. */
+const RIG_HYSTERESIS = 8;
+/** How often the arbiter re-scores rig assignments (s). */
+const RIG_RESCORE_INTERVAL = 0.15;
+/** Instanced silhouette capacity; agents beyond this simply don't draw. */
+const IMPOSTOR_MAX = 512;
+
+/** Agents currently granted a full rig. Read by AgentBody via the store. */
+const fullRigIds = new Set<number>();
+let agentLodVersion = 0;
+const agentLodListeners = new Set<() => void>();
+
+function subscribeAgentLod(fn: () => void): () => void {
+  agentLodListeners.add(fn);
+  return () => agentLodListeners.delete(fn);
+}
+
+function getAgentLodVersion(): number {
+  return agentLodVersion;
+}
+
+/** Scratch array reused between rescores (no per-pass allocation). */
+const rigCandidates: { id: number; score: number }[] = [];
+
+/**
+ * Re-scores which agents deserve a full rig a few times a second: nearest
+ * `MAX_AGENT_RIGS` within `RIG_MAX_DIST`, with hysteresis so an agent
+ * hovering at the boundary doesn't remount its rig every pass. Bumps the
+ * external store (and so re-renders the per-agent gates) only when the
+ * membership actually changes. Renders nothing.
+ */
+function AgentLodArbiter() {
+  const accum = useRef(RIG_RESCORE_INTERVAL);
+  useFrame(({ camera }, dt) => {
+    accum.current += dt;
+    if (accum.current < RIG_RESCORE_INTERVAL) return;
+    accum.current = 0;
+
+    rigCandidates.length = 0;
+    const cx = camera.position.x;
+    const cz = camera.position.z;
+    for (const e of game.entities.values()) {
+      if (e.kind !== "Agent") continue;
+      const dx = e.x - cx;
+      const dz = e.z - cz;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const score = dist - (fullRigIds.has(e.id) ? RIG_HYSTERESIS : 0);
+      if (score < RIG_MAX_DIST) rigCandidates.push({ id: e.id, score });
+    }
+    rigCandidates.sort((a, b) => a.score - b.score);
+    const keep = Math.min(rigCandidates.length, MAX_AGENT_RIGS);
+
+    let changed = fullRigIds.size !== keep;
+    if (!changed) {
+      for (let i = 0; i < keep; i++) {
+        if (!fullRigIds.has(rigCandidates[i].id)) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed) return;
+    fullRigIds.clear();
+    for (let i = 0; i < keep; i++) fullRigIds.add(rigCandidates[i].id);
+    agentLodVersion++;
+    for (const fn of agentLodListeners) fn();
+  });
+  return null;
+}
+
+/**
+ * Per-agent LOD gate: the full rig (skinned character + healthbar +
+ * nameplate) mounts only while the arbiter grants it; otherwise the agent is
+ * drawn by the instanced silhouette pass and this renders nothing.
+ */
+function AgentBody({ entity }: { entity: GameEntity }) {
+  useSyncExternalStore(subscribeAgentLod, getAgentLodVersion);
+  if (!fullRigIds.has(entity.id)) return null;
+  return (
+    <group
+      onPointerOver={() => {
+        game.hoverTargetId = entity.id;
+      }}
+      onPointerOut={() => {
+        if (game.hoverTargetId === entity.id) game.hoverTargetId = null;
+      }}
+    >
+      <CharacterModel entity={entity} />
+      <HealthBar entity={entity} />
+      <AgentNameplate entity={entity} />
+    </group>
+  );
+}
+
+/** Body silhouette for distant agents: a capsule that reads as a standing
+ * figure. Feet at y=0 (translated up by half height + radius). */
+const impostorGeo = (() => {
+  const geo = new THREE.CapsuleGeometry(0.26, 1.1, 3, 10);
+  geo.translate(0, 0.81, 0);
+  return geo;
+})();
+/** Unlit neon-tinted fill; per-instance color carries the faction tint. */
+const impostorMat = (() => {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  mat.toneMapped = false;
+  return mat;
+})();
+const impostorMatrix = new THREE.Matrix4();
+const impostorQuat = new THREE.Quaternion();
+const impostorPos = new THREE.Vector3();
+const impostorScale = new THREE.Vector3(1, 1, 1);
+const impostorColor = new THREE.Color();
+
+/**
+ * One InstancedMesh drawing every alive agent that does not hold a full rig.
+ * Position/yaw come from the same interpolated entity fields the rigs use
+ * (EntityView keeps sampling transforms whether or not the rig is mounted),
+ * so promotion to a full rig is seamless.
+ */
+function AgentImpostors() {
+  const mesh = useRef<THREE.InstancedMesh>(null);
+  useFrame(() => {
+    const m = mesh.current;
+    if (!m) return;
+    perf.begin("entities.impostors");
+    let i = 0;
+    for (const e of game.entities.values()) {
+      if (e.kind !== "Agent" || fullRigIds.has(e.id)) continue;
+      if (e.healthPct <= 0 || e.anim === "Death") continue;
+      if (i >= IMPOSTOR_MAX) break;
+      impostorPos.set(e.x, e.y + groundHeightAt(e.x, e.z), e.z);
+      impostorQuat.setFromAxisAngle(Y_AXIS, -e.yaw + Math.PI / 2);
+      impostorMatrix.compose(impostorPos, impostorQuat, impostorScale);
+      m.setMatrixAt(i, impostorMatrix);
+      // Dimmed faction tint: bright enough to read as a body against the
+      // dark city, dim enough that the nearby full rigs stay the focus.
+      impostorColor.set(e.tint || 0x4fd0e0).multiplyScalar(0.6);
+      m.setColorAt(i, impostorColor);
+      i++;
+    }
+    m.count = i;
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    perf.end("entities.impostors");
+  });
+  return (
+    <instancedMesh
+      ref={mesh}
+      args={[impostorGeo, impostorMat, IMPOSTOR_MAX]}
+      frustumCulled={false}
+      raycast={noRaycast}
+    />
+  );
+}
+
 /** Radius (m) around the player within which agents feed the crowd bed. */
 const CROWD_RADIUS = 22;
 const CROWD_RADIUS_SQ = CROWD_RADIUS * CROWD_RADIUS;
@@ -1941,6 +2106,8 @@ export function Entities() {
       {[...game.entities.values()].map((entity) => (
         <MemoEntityView key={entity.id} entity={entity} />
       ))}
+      <AgentLodArbiter />
+      <AgentImpostors />
       <CrowdChatter />
       <TargetReticle />
     </>

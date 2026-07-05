@@ -50,8 +50,8 @@ use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
 use stats::{build_leaderboard, ActorRef, LiveActor, StatsBook};
 use wilder_exchange::{
-    Asset, Escrow, Exchange, ExchangeSave, Inbox, OrderKind, OrderOwner, PlaceOutcome, Side,
-    Venue, VenueId,
+    Asset, Escrow, Exchange, ExchangeSave, Fill, FillEffect, Inbox, OrderKind, OrderOwner,
+    PlaceOutcome, Side, Venue, VenueId,
 };
 use smallvec::SmallVec;
 
@@ -185,6 +185,38 @@ const AGENT_OPEN_ORDER_CAP: usize = 12;
 /// replacement for the old global ask decay — unsold stock still walks down
 /// to meet demand, but only when the seller is physically back at the book).
 const AGENT_ASK_STALE_MS: u64 = 5 * 60_000;
+/// Market-making desk: the exchange's own liquidity provider. One venue is
+/// re-quoted per desk pass (round-robin every `DESK_TICK_INTERVAL` ticks,
+/// ~5 s), so every book in the city refreshes without a whole-exchange
+/// sweep landing in one tick.
+const DESK_TICK_INTERVAL: u64 = 100;
+/// Desk half-spread as a fraction of its reference price: bid quotes ~10%
+/// under, ask ~10% over (integer prices keep at least 1 MILD between them).
+const DESK_SPREAD: f32 = 0.10;
+/// Target WILD notional per desk quote side: cheap resources quote in
+/// stacks, gear quotes in single units.
+const DESK_QUOTE_NOTIONAL: u32 = 120;
+/// Unit cap per desk quote regardless of notional (bounds cheap-item spam).
+const DESK_QUOTE_QTY_CAP: u32 = 20;
+/// WILD notional of desk inventory seeded per asset on a fresh world.
+const DESK_SEED_NOTIONAL: u32 = 600;
+/// MILD budget the desk opens with (bounds how much it can buy; sales
+/// replenish it, so a drained desk stops bidding until stock moves).
+const DESK_SEED_BUDGET: u64 = 60_000;
+/// Reference-price impulse per unit of realized desk flow: each unit the
+/// desk sells nudges the price up this fraction, each unit bought nudges
+/// it down — sustained one-sided flow walks the price until it clears.
+const DESK_IMPULSE_PER_UNIT: f32 = 0.004;
+/// Cap on one fill's total impulse so a block trade can't teleport a price.
+const DESK_IMPULSE_CAP: f32 = 0.08;
+/// Per-rotation pull of a reference price back toward its anchor value.
+const DESK_REVERT_RATE: f32 = 0.02;
+/// Per-rotation random-walk kick (fraction) so quiet charts still breathe.
+const DESK_JITTER: f32 = 0.012;
+/// A (venue, asset) with no trade for this long gets a synthetic 1-unit
+/// mark at the desk reference on the next requote, so tickers and charts
+/// track the drifting quote between real fills.
+const DESK_MARK_STALE_MS: u64 = 30 * 60_000;
 /// MILD granted to every account once.
 const WALLET_GRANT: u32 = 200;
 /// Max agents one character can own at a time.
@@ -840,6 +872,78 @@ fn vendor_sell_value(agent: &FactionAgent, store_kind: EntityKind) -> u32 {
         .filter(|o| o.sell > 0)
         .map(|o| o.sell.saturating_mul(agent.count_item(o.kind)))
         .sum()
+}
+
+/// Per-asset state of the market-making desk: a floating reference price
+/// its quotes straddle, and the units it holds (virtual — outside world
+/// supply; see [`World::settle_exchange_fill`] for the mint/burn rule).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeskBook {
+    ref_price: f32,
+    inventory: u32,
+}
+
+/// The exchange's market-making desk: one world-owned liquidity provider
+/// quoting a two-sided market for every listable asset at every venue, so
+/// no book is ever empty and every ticker carries a live price. Holdings
+/// are virtual: goods it sells MINT into circulation at fill time, goods
+/// it buys BURN out, same for the MILD legs — the desk is a bounded
+/// faucet/sink like the vendors, not a hidden hoard inside supply.
+/// Reference prices move on realized flow (sales up, buys down), with slow
+/// mean-reversion toward an anchor plus jitter. Persisted in world meta
+/// (`market_desk`) beside the exchange itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MarketDesk {
+    /// Per-asset books (Vec keyed by asset keeps the JSON map-key free).
+    books: Vec<(Asset, DeskBook)>,
+    /// MILD available to bid with (escrow debits it, sales replenish it).
+    budget: u64,
+    /// Venue rotation cursor for the requote round-robin.
+    cursor: usize,
+}
+
+impl MarketDesk {
+    fn book_mut(&mut self, asset: Asset) -> &mut DeskBook {
+        if let Some(i) = self.books.iter().position(|(a, _)| *a == asset) {
+            return &mut self.books[i].1;
+        }
+        self.books.push((asset, DeskBook { ref_price: desk_anchor(asset), inventory: 0 }));
+        &mut self.books.last_mut().expect("just pushed").1
+    }
+
+    fn ref_price(&self, asset: Asset) -> f32 {
+        self.books
+            .iter()
+            .find(|(a, _)| *a == asset)
+            .map(|(_, b)| b.ref_price)
+            .unwrap_or_else(|| desk_anchor(asset))
+    }
+
+    fn inventory(&self, asset: Asset) -> u32 {
+        self.books.iter().find(|(a, _)| *a == asset).map(|(_, b)| b.inventory).unwrap_or(0)
+    }
+}
+
+/// Anchor value a desk reference price reverts toward. Items sit at their
+/// static base value, floored just above the best vendor pay line so the
+/// desk's bid outbids the vendor floor at bootstrap — the market is meant
+/// to be the better place to sell in bulk, with vendors as the fallback.
+/// Oversupply still wins: sustained selling walks the reference down to
+/// the clamp floor (anchor/3), where the vendor floor takes over again.
+fn desk_anchor(asset: Asset) -> f32 {
+    match asset {
+        Asset::Item(kind) => {
+            let vendor_pays = wilder_economy::reference_prices(kind).1;
+            base_value(kind).max(vendor_pays + 1).max(1) as f32
+        }
+        Asset::Shards => 4.0,
+        Asset::Energy => ENERGY_MILD_VALUE,
+    }
+}
+
+/// Clamp a desk reference price to its sane band around the anchor.
+fn desk_clamp(anchor: f32, price: f32) -> f32 {
+    price.clamp((anchor / 3.0).max(1.0), anchor * 4.0)
 }
 
 /// Whether `kind` ever goes on the market book: raw resources, valuables,
@@ -1552,6 +1656,9 @@ pub struct World {
     /// Venue lookup, sorted by venue id: (venue, terminal entity, terminal
     /// position). Derived deterministically at boot by `init_exchange`.
     venue_terminals: Vec<(VenueId, EntityId, Vec3)>,
+    /// The exchange's market-making desk (see [`MarketDesk`]): loaded or
+    /// seeded by `init_market_desk`, requoted by `tick_market_desk`.
+    desk: MarketDesk,
     /// Books whose depth changed (order placed/filled/cancelled) since the
     /// last book broadcast — wakes `BookSub` watchers.
     book_dirty: HashSet<(VenueId, Asset)>,
@@ -1723,6 +1830,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
         exchange: Exchange::default(),
         venue_terminals: Vec::new(),
+        desk: MarketDesk::default(),
         book_dirty: HashSet::new(),
         markets_dirty: false,
         vendor_stock,
@@ -3982,6 +4090,239 @@ impl World {
             }
             _ => Exchange::new(venues),
         };
+        self.init_market_desk();
+    }
+
+    /// Restore the market-making desk, or seed a fresh one: every listable
+    /// asset opens at its anchor price with a modest inventory float (sized
+    /// so every venue can carry an ask), plus a MILD budget to bid with.
+    /// The float is virtual (outside supply — units mint into circulation
+    /// only when sold), so seeding records no ledger legs.
+    fn init_market_desk(&mut self) {
+        self.desk = match self.store.meta::<MarketDesk>("market_desk") {
+            Ok(Some(desk)) => desk,
+            _ => {
+                let venues = self.venue_terminals.len().max(1) as u32;
+                let mut desk = MarketDesk { budget: DESK_SEED_BUDGET, ..Default::default() };
+                for asset in Asset::all() {
+                    let anchor = desk_anchor(asset);
+                    let per_venue = ((DESK_SEED_NOTIONAL as f32 / anchor) as u32).clamp(2, 40);
+                    desk.books.push((
+                        asset,
+                        DeskBook { ref_price: anchor, inventory: per_venue * venues },
+                    ));
+                }
+                desk
+            }
+        };
+    }
+
+    /// Persist the desk (called with `save_exchange` — its escrow lives in
+    /// the exchange's settlement locks, so the two snapshots travel together).
+    fn save_desk(&self) {
+        if let Err(e) = self.store.save_meta("market_desk", &self.desk) {
+            tracing::error!("market desk save failed: {e}");
+        }
+    }
+
+    /// The market-making desk's heartbeat: one venue per pass (round-robin,
+    /// `DESK_TICK_INTERVAL` ticks apart), so every book in the city
+    /// refreshes without a whole-exchange sweep in one tick. A pass sweeps
+    /// the desk's settled fills at the venue into its virtual holdings,
+    /// cancels its old quotes there, re-quotes a two-sided market for every
+    /// listable asset at current prices, and — once per full rotation —
+    /// drifts the reference prices (mean-reversion plus jitter).
+    fn tick_market_desk(&mut self) {
+        if self.venue_terminals.is_empty() {
+            return;
+        }
+        let cursor = self.desk.cursor % self.venue_terminals.len();
+        self.desk.cursor = (cursor + 1) % self.venue_terminals.len();
+        if cursor == 0 {
+            self.desk_drift();
+        }
+        let (venue, _, terminal_pos) = self.venue_terminals[cursor];
+        self.desk_claim(venue);
+        // Cancel this venue's standing desk quotes, refunding their escrow
+        // to the virtual holdings, before quoting fresh.
+        for order in self.exchange.open_orders(OrderOwner::Desk) {
+            if order.venue != venue {
+                continue;
+            }
+            if let Ok(escrow) = self.exchange.cancel(OrderOwner::Desk, order.id) {
+                self.desk_credit(escrow);
+            }
+        }
+        let now_ms = ledger::unix_ms();
+        for asset in Asset::all() {
+            self.desk_requote(venue, terminal_pos, asset, now_ms);
+        }
+        // Quotes that crossed resting actor orders settled into the desk's
+        // inbox as taker fills: sweep those in too.
+        self.desk_claim(venue);
+        self.markets_dirty = true;
+        self.save_exchange();
+        self.save_desk();
+    }
+
+    /// Sweep the desk's settlement inbox at one venue into its virtual
+    /// holdings. No ledger legs: supply was already adjusted at fill time
+    /// (`settle_exchange_fill`), and the desk's holdings live outside it.
+    fn desk_claim(&mut self, venue: VenueId) {
+        let inbox = self.exchange.claim(OrderOwner::Desk, venue);
+        self.desk.budget += inbox.mild;
+        for (asset, qty) in inbox.assets {
+            self.desk.book_mut(asset).inventory += qty;
+        }
+    }
+
+    /// Return refunded/cancelled escrow to the desk's virtual holdings.
+    fn desk_credit(&mut self, escrow: Escrow) {
+        match escrow {
+            Escrow::Mild(m) => self.desk.budget += m,
+            Escrow::Asset { asset, qty } => self.desk.book_mut(asset).inventory += qty,
+        }
+    }
+
+    /// Desk quote prices for one asset off its floating reference: bid
+    /// ~`DESK_SPREAD` under, ask the same over — always at least 1 MILD
+    /// apart so cheap goods (iron at 2-3) keep a real spread instead of
+    /// collapsing to bid == ask.
+    fn desk_quotes(&self, asset: Asset) -> (u32, u32) {
+        let r = self.desk.ref_price(asset);
+        let bid = ((r * (1.0 - DESK_SPREAD)).round() as u32).max(1);
+        let ask = ((r * (1.0 + DESK_SPREAD)).round() as u32).max(bid + 1);
+        (bid, ask)
+    }
+
+    /// Refresh the desk's two-sided quote for one asset at one venue (the
+    /// caller already cancelled its old quotes there). Sizes target a fixed
+    /// WILD notional per side, so cheap resources quote in stacks and gear
+    /// quotes in single units; the ask is bounded by desk inventory and the
+    /// bid by its budget — a drained side simply doesn't quote until flow
+    /// replenishes it. Books that have been quiet too long get a synthetic
+    /// 1-unit mark at the reference so the ticker tracks the drifting quote.
+    fn desk_requote(&mut self, venue: VenueId, terminal_pos: Vec3, asset: Asset, now_ms: u64) {
+        let (bid, ask) = self.desk_quotes(asset);
+        let bid_qty = (DESK_QUOTE_NOTIONAL / bid).clamp(1, DESK_QUOTE_QTY_CAP);
+        let ask_qty = (DESK_QUOTE_NOTIONAL / ask)
+            .clamp(1, DESK_QUOTE_QTY_CAP)
+            .min(self.desk.inventory(asset));
+        if self.desk.budget >= bid as u64 * bid_qty as u64 {
+            self.desk_place(venue, terminal_pos, asset, Side::Bid, bid, bid_qty, now_ms);
+        }
+        if ask_qty > 0 {
+            self.desk_place(venue, terminal_pos, asset, Side::Ask, ask, ask_qty, now_ms);
+        }
+        let stats = self.exchange.stats(venue, asset, now_ms);
+        let quiet = stats
+            .last_trade_ms
+            .is_none_or(|t| now_ms.saturating_sub(t) > DESK_MARK_STALE_MS);
+        if quiet {
+            let mark = (self.desk.ref_price(asset).round() as u32).max(1);
+            self.exchange.record_print(venue, asset, mark, 1, now_ms);
+        }
+        self.book_dirty.insert((venue, asset));
+    }
+
+    /// Place one desk limit order, escrowed against the desk's virtual
+    /// holdings instead of an actor inventory/purse (this is `desk_place`,
+    /// the desk's analog of `exchange_place` — no terminal-presence rule,
+    /// the desk IS the venue's own liquidity). Immediate fills — the quote
+    /// crossed resting actor orders — settle exactly like actor fills;
+    /// refunds (IOC leftovers, bid price improvement) return to the desk.
+    #[allow(clippy::too_many_arguments)]
+    fn desk_place(
+        &mut self,
+        venue: VenueId,
+        terminal_pos: Vec3,
+        asset: Asset,
+        side: Side,
+        price: u32,
+        qty: u32,
+        now_ms: u64,
+    ) {
+        // Escrow leaves the virtual holdings up front (mirrors debit_escrow).
+        match side {
+            Side::Bid => {
+                let need = price as u64 * qty as u64;
+                if self.desk.budget < need {
+                    return;
+                }
+                self.desk.budget -= need;
+            }
+            Side::Ask => {
+                let book = self.desk.book_mut(asset);
+                if book.inventory < qty {
+                    return;
+                }
+                book.inventory -= qty;
+            }
+        }
+        let placed = self.exchange.place(
+            OrderOwner::Desk,
+            venue,
+            asset,
+            side,
+            OrderKind::Limit { price },
+            qty,
+            None,
+            MARKET_FEE_PCT,
+            now_ms,
+        );
+        let outcome = match placed {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                // The order never existed: put the pre-debited escrow back.
+                self.desk_credit(match side {
+                    Side::Bid => Escrow::Mild(price as u64 * qty as u64),
+                    Side::Ask => Escrow::Asset { asset, qty },
+                });
+                return;
+            }
+        };
+        for (fill, effect) in outcome.fills.clone() {
+            self.settle_exchange_fill(venue, terminal_pos, asset, &fill, &effect);
+        }
+        self.notify_player_makers(&outcome.fills);
+        if let Some(refund) = outcome.refund {
+            self.desk_credit(refund);
+        }
+    }
+
+    /// Once per venue rotation: every reference price relaxes a step toward
+    /// its anchor and takes a small random-walk kick, so quiet markets
+    /// wander believably instead of flatlining — realized desk flow
+    /// (`desk_on_fill`) stays the dominant signal.
+    fn desk_drift(&mut self) {
+        use rand::Rng;
+        for i in 0..self.desk.books.len() {
+            let asset = self.desk.books[i].0;
+            let anchor = desk_anchor(asset);
+            let jitter = 1.0 + self.rng.random_range(-DESK_JITTER..=DESK_JITTER);
+            let book = &mut self.desk.books[i].1;
+            book.ref_price += (anchor - book.ref_price) * DESK_REVERT_RATE;
+            book.ref_price = desk_clamp(anchor, book.ref_price * jitter);
+        }
+    }
+
+    /// Nudge the desk's reference price on realized flow: a desk sale is
+    /// demand (price drifts up), a desk buy is oversupply (down). Per-unit
+    /// impulse, capped per fill so one block trade can't teleport a price.
+    /// No-op for fills the desk isn't part of.
+    fn desk_on_fill(&mut self, asset: Asset, fill: &Fill) {
+        let desk_sold = (fill.maker == OrderOwner::Desk && fill.taker_side == Side::Bid)
+            || (fill.taker == OrderOwner::Desk && fill.taker_side == Side::Ask);
+        let desk_bought = (fill.maker == OrderOwner::Desk && fill.taker_side == Side::Ask)
+            || (fill.taker == OrderOwner::Desk && fill.taker_side == Side::Bid);
+        if !desk_sold && !desk_bought {
+            return;
+        }
+        let impulse = (fill.qty as f32 * DESK_IMPULSE_PER_UNIT).min(DESK_IMPULSE_CAP);
+        let factor = if desk_sold { 1.0 + impulse } else { 1.0 - impulse };
+        let anchor = desk_anchor(asset);
+        let book = self.desk.book_mut(asset);
+        book.ref_price = desk_clamp(anchor, book.ref_price * factor);
     }
 
     /// Persist the whole exchange (books, inboxes, market data). Called on
@@ -4049,11 +4390,23 @@ impl World {
         }
     }
 
+    /// Ledger identity of the market-making desk (stable per world seed).
+    fn desk_party(&self) -> TxParty {
+        TxParty::Agent {
+            id: static_agent_id(self.seed, u64::MAX),
+            name: "Exchange Desk".into(),
+            faction: FACTION_NEUTRAL,
+        }
+    }
+
     /// Ledger party for an order owner (fill attribution). Live actors
     /// resolve to their real identity; an owner that has left the world
     /// (offline player, respawned agent) attributes to a stored character
     /// when one exists, else burns — mirroring the old seller-credit rule.
     fn order_owner_party(&self, owner: OrderOwner) -> TxParty {
+        if owner == OrderOwner::Desk {
+            return self.desk_party();
+        }
         let id = owner.id();
         if let Some(p) = self.players.values().find(|p| p.character.id == id) {
             return player_party(p);
@@ -4221,62 +4574,113 @@ impl World {
             self.ledger.record(TxKind::MarketList, actor_party, venue_agent.clone(), amount, 0);
         }
 
-        // Settle each fill on the ledger, mirroring the old market's legs:
-        // escrowed goods leave the venue for the bid side, the bid side's
-        // MILD nets to the ask side, and the fee is commerce for whoever
-        // holds the venue's ground (burned on neutral territory).
-        for (fill, effect) in &outcome.fills {
-            let (bid_owner, ask_owner) = match fill.taker_side {
-                Side::Bid => (fill.taker, fill.maker),
-                Side::Ask => (fill.maker, fill.taker),
-            };
-            let bid_party = self.order_owner_party(bid_owner);
-            let ask_party = self.order_owner_party(ask_owner);
-            let fee = effect.fee_mild.min(u32::MAX as u64) as u32;
-            self.ledger.record(
-                TxKind::MarketBuy,
-                venue_agent.clone(),
-                bid_party.clone(),
-                Self::asset_amount(asset, fill.qty),
-                fee,
-            );
-            self.ledger.record(
-                TxKind::MarketBuy,
-                bid_party.clone(),
-                ask_party.clone(),
-                TxAmount::Wild { amount: effect.seller_proceeds.min(u32::MAX as u64) as u32 },
-                fee,
-            );
-            if fee > 0 {
-                self.ledger.record(
-                    TxKind::Fee,
-                    bid_party.clone(),
-                    venue_agent.clone(),
-                    TxAmount::Wild { amount: fee },
-                    0,
-                );
-            }
-            self.distribute_commerce(terminal_pos, fee, venue_agent.clone(), false);
-            // Leaderboards: both sides of a fill count a trade.
-            if let Some(b) = party_actor(&bid_party) {
-                self.stats.add_trade(&b);
-            }
-            if let Some(s) = party_actor(&ask_party) {
-                self.stats.add_trade(&s);
-            }
-            self.ledger.trades += 1;
+        // Settle each fill on the ledger (shared with the desk's own
+        // quoting path — see `settle_exchange_fill` for the legs).
+        for (fill, effect) in outcome.fills.clone() {
+            self.settle_exchange_fill(venue, terminal_pos, asset, &fill, &effect);
         }
         // The book changed (fills, resting remainder or IOC cleanup): wake
         // this book's watchers and the markets index on their next cadence.
         self.book_dirty.insert((venue, asset));
         self.markets_dirty = true;
 
-        // Maker fill notifications: resting orders that just executed
-        // belong to actors who may be far away. Online player makers get a
-        // toast-level `OrderUpdate` per fill plus their refreshed global
-        // exchange state; agents ignore (they poll their books at venues).
-        let maker_events: Vec<(EntityId, OrderOwner, u64, u32, u32)> = outcome
-            .fills
+        self.notify_player_makers(&outcome.fills);
+
+        // IOC remainder / unspent budget / price improvement comes right back.
+        if let Some(refund) = &outcome.refund {
+            self.credit_escrow(actor, refund);
+        }
+        self.persist_actor_purse(actor);
+        self.save_exchange();
+        Ok(outcome)
+    }
+
+    /// Ledger, commerce and stats legs for one executed fill, mirroring the
+    /// old market's legs: escrowed goods leave the venue for the bid side,
+    /// the bid side's MILD nets to the ask side, and the fee is commerce
+    /// for whoever holds the venue's ground (burned on neutral territory).
+    /// Desk fills additionally adjust circulating supply — the desk's
+    /// holdings live OUTSIDE the ledger's counters, so goods it sells mint
+    /// into circulation and goods it buys burn out (same for the MILD
+    /// legs) — and nudge the desk's floating reference price. Shared by the
+    /// actor path (`exchange_place`) and the desk's quoting (`desk_place`).
+    fn settle_exchange_fill(
+        &mut self,
+        venue: VenueId,
+        terminal_pos: Vec3,
+        asset: Asset,
+        fill: &Fill,
+        effect: &FillEffect,
+    ) {
+        let venue_agent = self.venue_party(venue);
+        let (bid_owner, ask_owner) = match fill.taker_side {
+            Side::Bid => (fill.taker, fill.maker),
+            Side::Ask => (fill.maker, fill.taker),
+        };
+        let bid_party = self.order_owner_party(bid_owner);
+        let ask_party = self.order_owner_party(ask_owner);
+        let fee = effect.fee_mild.min(u32::MAX as u64) as u32;
+        // Supply effects when the desk is on one side (never both — the
+        // book's self-match prevention skips own orders): a desk sale puts
+        // new units into the world, a desk buy retires them; the opposing
+        // MILD leg mirrors it.
+        let item_effect = if bid_owner == OrderOwner::Desk {
+            SupplyEffect::Burn // bought goods vanish into the desk float
+        } else if ask_owner == OrderOwner::Desk {
+            SupplyEffect::Mint // desk float enters the world
+        } else {
+            SupplyEffect::Auto
+        };
+        let mild_effect = if ask_owner == OrderOwner::Desk {
+            SupplyEffect::Burn // buyer MILD sinks into the desk budget
+        } else if bid_owner == OrderOwner::Desk {
+            SupplyEffect::Mint // desk MILD enters the seller's purse
+        } else {
+            SupplyEffect::Auto
+        };
+        self.ledger.record_ex(
+            TxKind::MarketBuy,
+            venue_agent.clone(),
+            bid_party.clone(),
+            Self::asset_amount(asset, fill.qty),
+            fee,
+            item_effect,
+        );
+        self.ledger.record_ex(
+            TxKind::MarketBuy,
+            bid_party.clone(),
+            ask_party.clone(),
+            TxAmount::Wild { amount: effect.seller_proceeds.min(u32::MAX as u64) as u32 },
+            fee,
+            mild_effect,
+        );
+        if fee > 0 {
+            self.ledger.record(
+                TxKind::Fee,
+                bid_party.clone(),
+                venue_agent.clone(),
+                TxAmount::Wild { amount: fee },
+                0,
+            );
+        }
+        self.distribute_commerce(terminal_pos, fee, venue_agent, false);
+        // Leaderboards: both sides of a fill count a trade.
+        if let Some(b) = party_actor(&bid_party) {
+            self.stats.add_trade(&b);
+        }
+        if let Some(s) = party_actor(&ask_party) {
+            self.stats.add_trade(&s);
+        }
+        self.ledger.trades += 1;
+        self.desk_on_fill(asset, fill);
+    }
+
+    /// Maker fill notifications: resting orders that just executed belong
+    /// to actors who may be far away. Online player makers get a
+    /// toast-level `OrderUpdate` per fill plus their refreshed global
+    /// exchange state; agents ignore (they poll their books at venues).
+    fn notify_player_makers(&mut self, fills: &[(Fill, FillEffect)]) {
+        let maker_events: Vec<(EntityId, OrderOwner, u64, u32, u32)> = fills
             .iter()
             .filter_map(|(fill, _)| {
                 let OrderOwner::Player(char_id) = fill.maker else { return None };
@@ -4296,14 +4700,6 @@ impl World {
             }
             self.push_my_exchange_state(maker_entity);
         }
-
-        // IOC remainder / unspent budget / price improvement comes right back.
-        if let Some(refund) = &outcome.refund {
-            self.credit_escrow(actor, refund);
-        }
-        self.persist_actor_purse(actor);
-        self.save_exchange();
-        Ok(outcome)
     }
 
     /// Cancel a resting order and refund the remaining escrow to holdings.
@@ -5409,6 +5805,11 @@ impl World {
         self.timed(TickPhase::Regen, |w| w.tick_regen());
         self.timed(TickPhase::Interest, |w| w.update_interest());
         self.timed(TickPhase::Replicate, |w| w.replicate());
+        // The market-making desk requotes one venue per pass (~5 s apart),
+        // before the economy flush so its ledger legs ship this tick.
+        if self.tick % DESK_TICK_INTERVAL == 0 {
+            self.timed(TickPhase::Economy, |w| w.tick_market_desk());
+        }
         self.timed(TickPhase::Economy, |w| w.flush_economy());
         self.timed(TickPhase::Broadcasts, |w| {
             // Leaderboards refresh for dashboard subscribers every ~5 s.
@@ -6968,7 +7369,10 @@ impl World {
             self.route_service(pos, EntityKind::Bodega).map(|r| (false, vendor_pay, r))
         });
         if let Some((list_on_market, payable, (store, store_pos, appeal))) = sell_plan {
-            if payable >= 30 {
+            // Low bar on purpose: with the desk quoting every book, small
+            // surpluses (a stack of iron at 2-3 MILD) are sellable errands
+            // too — steady small flow is what keeps the tickers alive.
+            if payable >= 15 {
                 let score = payable as f32 * 0.08 * sell_mult * appeal;
                 if score > best.0 {
                     best = (score, Goal::Sell { store, store_pos, list_on_market });
@@ -7251,11 +7655,14 @@ impl World {
                 }
             }
         }
-        // Craft-leaning agents missing inputs restock off the market book
-        // when a fair listing exists. Wanted kinds come from actual recipe
-        // inputs — raw resources AND intermediates (plates, polymer,
-        // boards...) — so every production input has real buy-side demand.
-        if traits.leans(Activity::Craft) && best_recipe.is_none() && wallet >= 30 {
+        // Agents missing craft inputs restock off the market book when a
+        // fair listing exists. Wanted kinds come from actual recipe inputs
+        // — raw resources AND intermediates (plates, polymer, boards...) —
+        // so every production input has real buy-side demand. Not gated on
+        // a learned Craft leaning: the desk quotes every book now, so the
+        // errand is always priceable and the leaning weighs the score
+        // instead of vetoing the demand outright.
+        if best_recipe.is_none() && wallet >= 30 {
             let restock = self.nearest_venue(pos).and_then(|(venue, terminal_pos)| {
                 wilder_crafting::RECIPES
                     .iter()
@@ -7269,7 +7676,7 @@ impl World {
                     })
             });
             if let Some((kind, ask, terminal_pos)) = restock {
-                let score = 12.0;
+                let score = 12.0 * craft_mult;
                 if score > best.0 {
                     best = (
                         score,
@@ -10320,8 +10727,10 @@ impl World {
             tracing::error!("ledger save failed: {e}");
         }
         // The exchange (books, escrow, inboxes, price history) also saves
-        // after every order event; this pass catches anything between.
+        // after every order event; this pass catches anything between. The
+        // desk snapshot travels with it (its escrow lives in the exchange).
         self.save_exchange();
+        self.save_desk();
         // Faction agents persist separately in rotating shards (see
         // `tick_agent_saves`) so this pass never serializes the population.
         // Leaderboard stats book (competitor records + lifetime rollups).
@@ -10914,6 +11323,7 @@ mod tests {
             chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
             exchange: Exchange::default(),
             venue_terminals: Vec::new(),
+            desk: MarketDesk::default(),
             book_dirty: HashSet::new(),
             markets_dirty: false,
             vendor_stock: HashMap::new(),
@@ -12752,6 +13162,83 @@ mod tests {
         assert_eq!(tick_state.candles.len(), 1);
         assert_eq!(tick_state.candles[0].close, listing_price);
         assert_eq!(tick_state.candles[0].t % 1_000, 0);
+    }
+
+    #[test]
+    fn desk_quotes_every_book_and_marks_opening_prices() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        // One full rotation requotes every venue in the city.
+        for _ in 0..world.venue_terminals.len() {
+            world.tick_market_desk();
+        }
+        for &(venue, ..) in &world.venue_terminals {
+            for asset in Asset::all() {
+                assert!(
+                    world.exchange.best_bid(venue, asset).is_some(),
+                    "desk bid missing for {} at {venue:?}",
+                    asset.ticker()
+                );
+                assert!(
+                    world.exchange.best_ask(venue, asset).is_some(),
+                    "desk ask missing for {} at {venue:?}",
+                    asset.ticker()
+                );
+                let (bid, ask) = world.desk_quotes(asset);
+                assert!(bid < ask, "{}: bid {bid} must sit under ask {ask}", asset.ticker());
+            }
+        }
+        // Every ticker shows a live price from day one: books nothing has
+        // crossed yet carry the desk's synthetic opening mark.
+        let now_ms = ledger::unix_ms();
+        for row in world.exchange.markets_index(now_ms) {
+            assert!(
+                row.summary.last_price.is_some(),
+                "no live price for {}",
+                row.asset.ticker()
+            );
+        }
+    }
+
+    #[test]
+    fn agents_sell_surplus_into_the_desk_bid() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        for _ in 0..world.venue_terminals.len() {
+            world.tick_market_desk();
+        }
+        let contested = district_anchor("NEXUS");
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let seller =
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::trader(), terminal_pos);
+        let venue = world.venue_at(EconActor::Agent(seller)).expect("at a venue");
+        let iron = Asset::Item(ItemKind::Iron);
+        let desk_bid = world.exchange.best_bid(venue, iron).expect("desk bid resting");
+        world.agents[seller].add_item(ItemKind::Iron, 30);
+
+        // The desk bid pays more than the Bodega's 2-MILD floor, so the
+        // sell channel comparison routes surplus to the market.
+        let vendor_pay = vendor_sell_value(&world.agents[seller], EntityKind::Bodega);
+        assert!(
+            desk_bid as u64 * 30 > vendor_pay as u64,
+            "desk bid {desk_bid} should beat the vendor floor"
+        );
+
+        // Listing prices under the desk ask and crosses the desk bid: real
+        // fills print immediately instead of waiting for a counterparty.
+        world.agent_market_list(seller);
+        let now_ms = ledger::unix_ms();
+        let stats = world.exchange.stats(venue, iron, now_ms);
+        assert_eq!(stats.last_price, Some(desk_bid), "list should cross the desk bid");
+        assert!(stats.volume_24h_units > 0, "the fill must print volume");
+        // Proceeds (gross minus the market fee) settle into the seller's
+        // inbox at the venue.
+        let owner = OrderOwner::Agent(world.agents[seller].agent_id);
+        let inbox = world.exchange.inbox(owner, venue).expect("proceeds inbox");
+        assert!(inbox.mild > 0, "seller proceeds should be waiting");
     }
 
     #[test]

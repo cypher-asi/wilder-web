@@ -352,6 +352,27 @@ impl Exchange {
         self.data.asset_summary(asset, now_ms)
     }
 
+    /// Record a synthetic market-data print — candles, tape and last price
+    /// only; no book, escrow or settlement involvement. The world's market
+    /// desk uses it to mark an opening price on a (venue, asset) nothing
+    /// has ever crossed, so the ticker has a live quote from day one.
+    pub fn record_print(&mut self, venue: VenueId, asset: Asset, price: u32, qty: u32, now_ms: u64) {
+        if self.venue(venue).is_none() || price == 0 || qty == 0 {
+            return;
+        }
+        let fill = Fill {
+            taker_order: 0,
+            maker_order: 0,
+            taker: OrderOwner::Desk,
+            maker: OrderOwner::Desk,
+            taker_side: Side::Bid,
+            price,
+            qty,
+            at_ms: now_ms,
+        };
+        self.data.record_fill(venue, asset, &fill);
+    }
+
     /// One row per listable asset (traded or not) — the markets table.
     pub fn markets_index(&self, now_ms: u64) -> Vec<MarketRow> {
         Asset::all()

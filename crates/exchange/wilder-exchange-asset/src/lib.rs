@@ -126,17 +126,23 @@ pub struct Venue {
 /// uuid-based `CharacterId` space (agents mint a fresh uuid per spawn, same
 /// as `TxParty::Agent` in the ledger); the variant records which kind of
 /// actor placed the order so the world knows which inventory/purse to hit.
+/// `Desk` is the exchange's own market-making desk — a single world-owned
+/// liquidity provider whose escrow lives outside any inventory/purse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OrderOwner {
     Player(CharacterId),
     Agent(CharacterId),
+    Desk,
 }
 
 impl OrderOwner {
-    /// The underlying uuid, regardless of actor kind.
+    /// The underlying uuid, regardless of actor kind. The desk has no
+    /// character; it maps to the nil uuid (which no player or agent ever
+    /// mints — v4 uuids are never nil).
     pub fn id(&self) -> CharacterId {
         match self {
             OrderOwner::Player(id) | OrderOwner::Agent(id) => *id,
+            OrderOwner::Desk => CharacterId::nil(),
         }
     }
 }
@@ -221,9 +227,11 @@ mod tests {
             let back: Asset = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(asset, back);
         }
-        let owner = OrderOwner::Player(CharacterId::new_v4());
-        let json = serde_json::to_string(&owner).expect("serialize");
-        let back: OrderOwner = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(owner, back);
+        for owner in [OrderOwner::Player(CharacterId::new_v4()), OrderOwner::Desk] {
+            let json = serde_json::to_string(&owner).expect("serialize");
+            let back: OrderOwner = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(owner, back);
+        }
+        assert_eq!(OrderOwner::Desk.id(), CharacterId::nil());
     }
 }

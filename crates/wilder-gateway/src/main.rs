@@ -6,6 +6,8 @@ mod ws;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::http::header::{HeaderValue, CONTENT_TYPE};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -69,11 +71,38 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("serving web client from {web_dist}");
     }
 
-    let app = app.layer(CorsLayer::permissive()).with_state(state);
+    let app = app
+        .layer(axum::middleware::map_response(utf8_charset))
+        .layer(CorsLayer::permissive())
+        .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("gateway listening on http://localhost:{port}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Stamp `charset=utf-8` onto text-ish responses. tower-http's `ServeDir`
+/// emits bare `text/html` / `text/javascript` content types; without an
+/// explicit charset, proxies and capture tools (and any browser that misses
+/// the meta tag) fall back to Latin-1 and mangle the client's UTF-8 glyphs
+/// (em dashes and item icons) into mojibake.
+async fn utf8_charset(mut response: Response) -> Response {
+    let amended = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|ct| !ct.contains("charset"))
+        .filter(|ct| {
+            ct.starts_with("text/")
+                || *ct == "application/javascript"
+                || *ct == "application/json"
+                || *ct == "image/svg+xml"
+        })
+        .and_then(|ct| HeaderValue::from_str(&format!("{ct}; charset=utf-8")).ok());
+    if let Some(value) = amended {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
 }

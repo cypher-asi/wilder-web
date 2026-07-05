@@ -720,6 +720,35 @@ fn change_bp(last: Option<u32>, reference: Option<u32>) -> i32 {
     }
 }
 
+/// Sparkline points for a markets-index row: up to [`SPARK_POINTS`] close
+/// prices sampled at even intervals over the trailing 24 h (oldest first,
+/// carrying the last close forward across quiet slots). Empty when the
+/// market never traded.
+fn spark_points(candles: &[wilder_exchange::Candle], now_ms: u64) -> Vec<u32> {
+    const SPARK_POINTS: u64 = 48;
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    if candles.is_empty() {
+        return Vec::new();
+    }
+    let now_min = now_ms / 60_000;
+    let start_min = now_min.saturating_sub(DAY_MS / 60_000);
+    let step = (now_min - start_min).max(SPARK_POINTS) / SPARK_POINTS;
+    let mut points = Vec::with_capacity(SPARK_POINTS as usize);
+    let mut idx = 0usize;
+    let mut close: Option<u32> = None;
+    for slot in 1..=SPARK_POINTS {
+        let slot_end = start_min + slot * step;
+        while idx < candles.len() && candles[idx].minute <= slot_end {
+            close = Some(candles[idx].close);
+            idx += 1;
+        }
+        if let Some(c) = close {
+            points.push(c);
+        }
+    }
+    points
+}
+
 /// Street Cash a seeded/respawned Wape carries, zone-scaled off the retired
 /// NPC drop tables (blast-zone rubble hides more). Keeps the Cash -> Bank
 /// conversion loop fed now that wild Wapes are full faction agents.
@@ -4402,6 +4431,16 @@ impl World {
         self.push_book_state(entity);
     }
 
+    /// Circulating supply of one asset from the ledger's mint/burn counters
+    /// (the market-cap denominator on the Trade screen).
+    fn asset_circulating(&self, asset: Asset) -> u64 {
+        match asset {
+            Asset::Item(kind) => self.ledger.item_circulating(kind),
+            Asset::Shards => self.ledger.shards_circulating(),
+            Asset::Energy => self.ledger.energy_circulating(),
+        }
+    }
+
     /// Build the markets index message: one row per listable asset with its
     /// cross-venue rollup and per-venue breakdown, plus venue metadata.
     fn markets_state(&self) -> S2C {
@@ -4436,15 +4475,24 @@ impl World {
                         volume_24h_wild: self.exchange.stats(venue, asset, now_ms).volume_24h_wild,
                     });
                 }
+                let last = summary.last_price.unwrap_or(0);
+                let supply = self.asset_circulating(asset);
+                let spark = summary
+                    .last_venue
+                    .map(|v| spark_points(self.exchange.candles(v, asset), now_ms))
+                    .unwrap_or_default();
                 MarketRow {
                     asset: asset_to_msg(asset),
                     ticker: asset.ticker().to_string(),
-                    last: summary.last_price.unwrap_or(0),
+                    last,
                     change_24h_bp: change_bp(summary.last_price, summary.price_24h_ago),
                     volume_24h_wild: summary.volume_24h_wild,
                     volume_24h_units: summary.volume_24h_units.min(u32::MAX as u64) as u32,
                     best_bid,
                     best_ask,
+                    supply,
+                    market_cap: last as u64 * supply,
+                    spark,
                     venues,
                 }
             })
@@ -6873,10 +6921,14 @@ impl World {
 
         // --- Loot: grab dropped containers nearby (free value on the ground).
         // Ammo caches (variant 1) are world spawns left for players; agents
-        // only chase death drops. ---
+        // only chase death drops. A battlefield of drops is worth more than
+        // any single crate: each candidate is scored with a share of the
+        // rest of the pile in scan range, since taking one crate puts the
+        // agent on top of the others (arrival chains through the pile). ---
         if free_volume > 2 {
             let loot_mult = traits.mult(Activity::Haul);
-            let mut best_loot: Option<(f32, EntityId, Vec3)> = None;
+            let mut candidates: Vec<(EntityId, Vec3, u32, f32)> = Vec::new();
+            let mut pile_total: u32 = 0;
             for c in self.loot.values() {
                 if c.variant != 0 {
                     continue;
@@ -6886,14 +6938,26 @@ impl World {
                     continue;
                 }
                 let value: u32 = c.items.iter().map(|s| base_value(s.kind) * s.count).sum();
-                if value < 5 {
+                // Small stacks aren't worth a walk — but loot a few steps
+                // away is free value regardless of size.
+                if value < 5 && dist > 12.0 {
                     continue;
                 }
-                // Nearer drops of equal value win (half weight at max range).
-                let score =
-                    value as f32 * loot_mult * (1.0 - 0.5 * dist / agents::LOOT_SCAN_RANGE);
+                if value == 0 {
+                    continue;
+                }
+                pile_total += value;
+                candidates.push((c.entity, c.position, value, dist));
+            }
+            let mut best_loot: Option<(f32, EntityId, Vec3)> = None;
+            for (entity, cpos, value, dist) in candidates {
+                // Sharp distance falloff: loot at the agent's feet keeps its
+                // full value, loot at the scan edge is worth ~30%.
+                let near = 1.0 / (1.0 + dist / 24.0);
+                let haul = value as f32 + 0.35 * (pile_total - value) as f32;
+                let score = haul * loot_mult * near;
                 if best_loot.map(|(s, _, _)| score > s).unwrap_or(true) {
-                    best_loot = Some((score, c.entity, c.position));
+                    best_loot = Some((score, entity, cpos));
                 }
             }
             if let Some((score, container, cpos)) = best_loot {

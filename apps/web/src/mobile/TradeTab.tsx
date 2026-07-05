@@ -95,7 +95,10 @@ function MarketList({
           r.ticker.toLowerCase().includes(q) ||
           assetLabel(r.asset).toLowerCase().includes(q),
       )
-      .sort((a, b) => b.volume_24h_wild - a.volume_24h_wild);
+      .sort((a, b) => {
+        const d = b.market_cap - a.market_cap;
+        return d !== 0 ? d : b.volume_24h_wild - a.volume_24h_wild;
+      });
   }, [rows, search]);
 
   return (

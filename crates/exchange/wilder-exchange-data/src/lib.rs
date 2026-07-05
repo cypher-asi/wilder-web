@@ -77,6 +77,9 @@ pub struct AssetSummary {
     /// Last trade price per venue that has ever traded this asset (sorted by
     /// venue id) — the arbitrage breakdown row.
     pub venue_prices: Vec<(VenueId, u32)>,
+    /// Venue of the globally most recent trade (candle source for rollup
+    /// sparklines); `None` if never traded.
+    pub last_venue: Option<VenueId>,
 }
 
 /// One (venue, asset) price series: candles + tape + last trade.
@@ -243,6 +246,7 @@ impl MarketData {
                 summary.last_price = Some(series.last_price);
                 summary.last_trade_ms = Some(series.last_trade_ms);
                 summary.price_24h_ago = stats.price_24h_ago;
+                summary.last_venue = Some(venue);
             }
         }
         summary.venue_prices.sort_by_key(|(v, _)| *v);

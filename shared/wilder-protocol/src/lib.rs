@@ -441,6 +441,15 @@ pub struct MarketRow {
     /// Best bid/ask across every venue's book (0 = side empty everywhere).
     pub best_bid: u32,
     pub best_ask: u32,
+    /// Circulating supply of the asset (ledger minted - burned).
+    pub supply: u64,
+    /// Market cap in WILD: `last * supply` (0 until the asset trades).
+    /// The markets table's default ordering.
+    pub market_cap: u64,
+    /// Sparkline: up to 48 close prices sampled over the trailing 24 h from
+    /// the venue of the most recent trade (oldest first, empty if never
+    /// traded) — the CMC-style mini price chart.
+    pub spark: Vec<u32>,
     /// Per-venue breakdown (only venues with a trade or a live book) —
     /// the arbitrage row. Venue names live in `MarketsState.venues`.
     pub venues: Vec<VenuePrice>,

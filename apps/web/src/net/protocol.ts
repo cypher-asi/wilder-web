@@ -374,6 +374,13 @@ export interface MarketRow {
   /** Best bid/ask across every venue's book (0 = side empty everywhere). */
   best_bid: number;
   best_ask: number;
+  /** Circulating supply of the asset (ledger minted - burned). */
+  supply: number;
+  /** Market cap in WILD: last * supply (0 until the asset trades). */
+  market_cap: number;
+  /** Up to 48 close prices over the trailing 24h (oldest first) — the
+   * CMC-style sparkline; empty if never traded. */
+  spark: number[];
   /** Per-venue breakdown (venues with a trade or a live book only). */
   venues: VenuePrice[];
 }

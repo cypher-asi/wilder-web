@@ -5009,13 +5009,53 @@ body {
 }
 
 .trade-mkt-row {
+  /* CMC-style columns: star, rank, name, price, 24h %, market cap,
+     volume, circulating supply, sparkline, chevron. */
   display: grid;
-  grid-template-columns: 26px minmax(160px, 1.7fr) 1fr 1fr 1.2fr 1fr 1fr 64px 26px;
+  grid-template-columns:
+    24px 30px minmax(150px, 1.6fr) 1.1fr 0.7fr 1.2fr 1.2fr 1.2fr 112px 26px;
   gap: 8px;
   align-items: center;
-  padding: 5px 6px;
+  padding: 6px 6px;
   font-size: 12px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
+}
+
+.trade-mkt-rank {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* Two-line numeric cells (value + dim USD/MILD sub-line). */
+.trade-cell-2l {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+.trade-cell-sub {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.trade-spark-cell {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.trade-spark {
+  display: block;
+}
+
+.trade-spark-empty {
+  color: var(--text-dim);
+}
+
+.trade-stat-usd {
+  font-size: 10.5px;
+  color: var(--text-dim);
 }
 
 .trade-mkt-head {
@@ -5088,6 +5128,19 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Markets table rows read CMC-style: bold display name, dim ticker after. */
+.trade-mkt-link .trade-mkt-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.trade-mkt-link .trade-mkt-ticker {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-dim);
 }
 
 .trade-chevron {

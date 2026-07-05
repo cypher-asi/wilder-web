@@ -267,6 +267,23 @@ impl Ledger {
         ItemSupply { kind, minted, burned }
     }
 
+    /// Circulating units of one item kind: minted - burned, floored at zero
+    /// (market-cap denominator on the Trade screen).
+    pub fn item_circulating(&self, kind: ItemKind) -> u64 {
+        let (minted, burned) = self.items.get(&kind).copied().unwrap_or((0, 0));
+        minted.saturating_sub(burned)
+    }
+
+    /// Circulating Shards supply (minted - burned).
+    pub fn shards_circulating(&self) -> u64 {
+        self.shards_minted.saturating_sub(self.shards_burned)
+    }
+
+    /// Circulating Energy supply (minted - burned).
+    pub fn energy_circulating(&self) -> u64 {
+        self.energy_minted.saturating_sub(self.energy_burned)
+    }
+
     fn item_supplies(&self) -> Vec<ItemSupply> {
         let mut items: Vec<ItemSupply> = self
             .items

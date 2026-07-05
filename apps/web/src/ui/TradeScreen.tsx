@@ -26,6 +26,7 @@ import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
 import { fmtCompact, fmtMild, formatAge } from "./format";
 import { FeedIcon, ITEM_INFO, ItemIcon, itemLabel } from "./ItemIcon";
+import { fmtUsd, useWildUsd } from "./useWildUsd";
 
 // ---------------------------------------------------------------------------
 // Shared constants / asset helpers
@@ -230,6 +231,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
 
   const venues = markets?.venues ?? [];
   const prox = useVenueProximity(venues, open);
+  const wildUsd = useWildUsd();
 
   if (!open) return null;
 
@@ -253,7 +255,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
       {markets === null ? (
         <div className="econ-empty trade-syncing">SYNCING MARKETS…</div>
       ) : sel === null ? (
-        <MarketsView rows={markets.rows} venues={venues} onOpen={openMarket} />
+        <MarketsView rows={markets.rows} venues={venues} onOpen={openMarket} wildUsd={wildUsd} />
       ) : (
         <MarketDetail
           connection={connection}
@@ -262,6 +264,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
           rows={markets.rows}
           venues={venues}
           prox={prox}
+          wildUsd={wildUsd}
           onBack={() => setSel(null)}
         />
       )}
@@ -273,7 +276,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
 // Markets view
 // ---------------------------------------------------------------------------
 
-type SortKey = "volume" | "change" | "price";
+type SortKey = "cap" | "price" | "change" | "volume" | "supply";
 
 const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
   { id: "fav", label: "★ FAVORITES" },
@@ -284,19 +287,42 @@ const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
   { id: "currency", label: "CURRENCY" },
 ];
 
+/** CMC-style 24h sparkline: pure-SVG close-price polyline colored by the
+ * row's 24h direction. */
+function Spark({ points, changeBp }: { points: number[]; changeBp: number }) {
+  if (points.length < 2) return <span className="trade-spark-empty">—</span>;
+  const w = 104;
+  const h = 30;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = Math.max(1, max - min);
+  const step = w / (points.length - 1);
+  const path = points
+    .map((p, i) => `${(i * step).toFixed(1)},${(h - 3 - ((p - min) / span) * (h - 6)).toFixed(1)}`)
+    .join(" ");
+  const color = changeBp < 0 ? DOWN : UP;
+  return (
+    <svg className="trade-spark" width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+      <polyline points={path} fill="none" stroke={color} strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function MarketsView({
   rows,
   venues,
   onOpen,
+  wildUsd,
 }: {
   rows: MarketRow[];
   venues: VenueInfo[];
   onOpen: (row: MarketRow, venue?: number) => void;
+  wildUsd: number | null;
 }) {
   const [search, setSearch] = useState("");
   const [chip, setChip] = useState<MarketCat | "all" | "fav">("all");
   const [favs, setFavs] = useState<Set<string>>(loadFavs);
-  const [sortKey, setSortKey] = useState<SortKey>("volume");
+  const [sortKey, setSortKey] = useState<SortKey>("cap");
   const [sortDesc, setSortDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -304,6 +330,15 @@ function MarketsView({
     () => new Map(venues.map((v) => [v.venue, v.name])),
     [venues],
   );
+
+  // CMC-style ranks are fixed by market cap no matter the active sort.
+  const rank = useMemo(() => {
+    const byCap = [...rows].sort((a, b) => {
+      const d = b.market_cap - a.market_cap;
+      return d !== 0 ? d : a.ticker.localeCompare(b.ticker);
+    });
+    return new Map(byCap.map((r, i) => [assetKey(r.asset), i + 1]));
+  }, [rows]);
 
   const toggleFav = (key: string) => {
     setFavs((prev) => {
@@ -336,7 +371,15 @@ function MarketsView({
     });
     const dir = sortDesc ? -1 : 1;
     const val = (r: MarketRow) =>
-      sortKey === "volume" ? r.volume_24h_wild : sortKey === "change" ? r.change_24h_bp : r.last;
+      sortKey === "cap"
+        ? r.market_cap
+        : sortKey === "volume"
+          ? r.volume_24h_wild
+          : sortKey === "change"
+            ? r.change_24h_bp
+            : sortKey === "supply"
+              ? r.supply
+              : r.last;
     return [...filtered].sort((a, b) => {
       const d = val(a) - val(b);
       if (d !== 0) return d * dir;
@@ -353,6 +396,7 @@ function MarketsView({
         MARKETS
         <span className="econ-panel-sub">
           {rows.length} TICKERS · {venues.length} VENUES · QUOTED IN MILD
+          {wildUsd !== null && ` · WILD ${fmtUsd(wildUsd)}`}
         </span>
       </div>
       <div className="trade-toolbar">
@@ -376,19 +420,24 @@ function MarketsView({
       </div>
       <div className="trade-mkt-row trade-mkt-head">
         <span />
-        <span>MARKET</span>
+        <span className="num">#</span>
+        <span>NAME</span>
         <span className="num trade-sort" onClick={() => setSort("price")}>
-          LAST PRICE{sortMark("price")}
+          PRICE{sortMark("price")}
         </span>
         <span className="num trade-sort" onClick={() => setSort("change")}>
-          24H CHANGE{sortMark("change")}
+          24H %{sortMark("change")}
+        </span>
+        <span className="num trade-sort" onClick={() => setSort("cap")}>
+          MARKET CAP{sortMark("cap")}
         </span>
         <span className="num trade-sort" onClick={() => setSort("volume")}>
-          24H VOLUME{sortMark("volume")}
+          VOLUME (24H){sortMark("volume")}
         </span>
-        <span className="num">BEST BID</span>
-        <span className="num">BEST ASK</span>
-        <span className="num">VENUES</span>
+        <span className="num trade-sort" onClick={() => setSort("supply")}>
+          CIRCULATING SUPPLY{sortMark("supply")}
+        </span>
+        <span className="num">24H PRICE</span>
         <span />
       </div>
       <div className="trade-mkt-list">
@@ -413,23 +462,43 @@ function MarketsView({
                 >
                   {favs.has(key) ? "★" : "☆"}
                 </span>
+                <span className="num trade-mkt-rank">{rank.get(key)}</span>
                 <span className="trade-mkt-id">
                   <AssetGlyph asset={r.asset} size={20} />
-                  <span className="trade-mkt-ticker">{r.ticker}</span>
                   <span className="trade-mkt-name">{assetLabel(r.asset)}</span>
+                  <span className="trade-mkt-ticker">{r.ticker}</span>
                 </span>
-                <span className="num">{priceOrDash(r.last)}</span>
+                <span className="num trade-cell-2l">
+                  {wildUsd !== null && r.last > 0 ? (
+                    <>
+                      <span>{fmtUsd(r.last * wildUsd)}</span>
+                      <span className="trade-cell-sub">{fmtMild(r.last)} MILD</span>
+                    </>
+                  ) : (
+                    <span>{priceOrDash(r.last)}</span>
+                  )}
+                </span>
                 <span className="num" style={{ color: changeColor(r.change_24h_bp) }}>
                   {r.last > 0 ? fmtBp(r.change_24h_bp) : "—"}
                 </span>
-                <span className="num">{fmtCompact(r.volume_24h_wild)} MILD</span>
-                <span className="num" style={{ color: r.best_bid > 0 ? UP : undefined }}>
-                  {priceOrDash(r.best_bid)}
+                <span className="num trade-cell-2l">
+                  <span>{r.market_cap > 0 ? `${fmtCompact(r.market_cap)} WILD` : "—"}</span>
+                  {wildUsd !== null && r.market_cap > 0 && (
+                    <span className="trade-cell-sub">{fmtUsd(r.market_cap * wildUsd)}</span>
+                  )}
                 </span>
-                <span className="num" style={{ color: r.best_ask > 0 ? DOWN : undefined }}>
-                  {priceOrDash(r.best_ask)}
+                <span className="num trade-cell-2l">
+                  <span>{fmtCompact(r.volume_24h_wild)} MILD</span>
+                  {wildUsd !== null && r.volume_24h_wild > 0 && (
+                    <span className="trade-cell-sub">{fmtUsd(r.volume_24h_wild * wildUsd)}</span>
+                  )}
                 </span>
-                <span className="num">{r.venues.length}</span>
+                <span className="num">
+                  {r.supply > 0 ? `${fmtCompact(r.supply)} ${r.ticker}` : "—"}
+                </span>
+                <span className="num trade-spark-cell">
+                  <Spark points={r.spark} changeBp={r.change_24h_bp} />
+                </span>
                 <span
                   className={`trade-chevron${isExpanded ? " open" : ""}`}
                   title="Per-venue breakdown"
@@ -498,6 +567,7 @@ function MarketDetail({
   rows,
   venues,
   prox,
+  wildUsd,
   onBack,
 }: {
   connection: GameConnection;
@@ -506,6 +576,7 @@ function MarketDetail({
   rows: MarketRow[];
   venues: VenueInfo[];
   prox: VenueProximity;
+  wildUsd: number | null;
   onBack: () => void;
 }) {
   const joined = useGame((s) => s.joined);
@@ -589,6 +660,9 @@ function MarketDetail({
             >
               {priceOrDash(book?.last ?? 0)}
             </span>
+            {wildUsd !== null && (book?.last ?? 0) > 0 && (
+              <span className="trade-stat-usd num">{fmtUsd((book?.last ?? 0) * wildUsd)}</span>
+            )}
           </div>
           <div className="trade-stat">
             <span className="trade-stat-label">24H CHANGE</span>

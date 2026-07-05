@@ -162,6 +162,7 @@ function RosterRow({
 
 function DetailPane({ summary, agents }: { summary: AgentSummary; agents: UseAgentsApi }) {
   const factionMeta = useFactionMeta();
+  const startWatch = useGame((s) => s.startWatch);
   const detail = agents.detail?.summary.agent_id === summary.agent_id ? agents.detail : null;
   const [confirmDismiss, setConfirmDismiss] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -189,6 +190,18 @@ function DetailPane({ summary, agents }: { summary: AgentSummary; agents: UseAge
           </div>
         </div>
         <div className="ag-detail-actions">
+          <button
+            type="button"
+            className="ag-watch-btn"
+            onClick={() => startWatch(summary.agent_id)}
+            title="Follow this agent live in the world"
+          >
+            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.8}>
+              <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+              <circle cx="12" cy="12" r="2.6" />
+            </svg>
+            WATCH LIVE
+          </button>
           {confirmDismiss ? (
             <>
               <button

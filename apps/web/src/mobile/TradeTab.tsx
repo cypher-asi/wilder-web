@@ -13,7 +13,7 @@ import { useGame } from "../state/game";
 import { fmtCompact, fmtMild, formatAge } from "../ui/format";
 import { ITEM_INFO } from "../ui/ItemIcon";
 import { TradeChart } from "../ui/TradeChart";
-import { AssetGlyph, assetKey, assetLabel, assetTicker } from "../ui/TradeScreen";
+import { AssetGlyph, assetKey, assetLabel, assetTicker, assetTickColor } from "../ui/TradeScreen";
 
 const UP = "#7be0c2";
 const DOWN = "#ff6a7c";
@@ -328,6 +328,7 @@ function MarketsPage({
       </div>
 
       <div className="m-tr-grid m-tr-head">
+        <span />
         <button type="button" className="m-tr-col" onClick={() => tapSort("rank")}>
           {sortKey === "volume" ? "VOL" : "#"}
           {sortKey === "rank" || sortKey === "volume" ? " ▾" : ""}
@@ -365,6 +366,7 @@ function MarketsPage({
               className="m-tr-grid m-tr-row"
               onClick={() => onOpen(r)}
             >
+              <i className="econ-supply-tick" style={{ background: assetTickColor(r.asset) }} />
               <span className="m-tr-rank num">{rank.get(key)}</span>
               <AssetGlyph asset={r.asset} size={26} />
               <span className="m-tr-id">

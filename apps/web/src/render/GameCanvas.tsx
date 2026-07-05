@@ -74,12 +74,18 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
   // cap, no shadows, no postprocessing.
   const mobile = useIsMobile();
   const mobileTab = useGame((s) => s.mobileTab);
+  // Desktop live-watch: the spectate camera follows an owned agent instead of
+  // the local avatar. Uses the same follow/explore rig as the mobile Watch tab
+  // and, like mobile, replaces the player-driven CameraRig + input sender.
+  const watchActive = useGame((s) => s.watchActive) && !mobile;
+  const spectating = mobile || watchActive;
   // Backgrounded PWA (visibilitychange -> hidden): stop the frameloop too.
   // Only the mobile shell flips this flag; it stays true on desktop.
   const appVisible = useGame((s) => s.appVisible);
   const paused = mobile
     ? mobileTab !== "watch" || !appVisible
-    : mapOpen || menuOpen;
+    : // Desktop keeps rendering while watching (menu is closed then anyway).
+      !watchActive && (mapOpen || menuOpen);
   return (
     <Canvas
       shadows={!mobile}
@@ -120,9 +126,11 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         <CombatFx />
         {/* Mobile joins as a spectator: no local avatar exists, so the
             desktop rig (pointer lock, player follow) and the input sender
-            are replaced by the Watch tab's agent follow camera. */}
-        {mobile ? <FollowCamera /> : <CameraRig />}
-        {!mobile && <PlayerInput connection={connection} />}
+            are replaced by the Watch tab's agent follow camera. Desktop
+            live-watch swaps to the same follow camera on top of the avatar
+            session and suspends the input sender for the duration. */}
+        {spectating ? <FollowCamera /> : <CameraRig />}
+        {!spectating && <PlayerInput connection={connection} />}
         {/* Mobile gets a minimal post stack (bloom + tone mapping): the tron
             look leans on bloom to turn its thin emissive lines into neon —
             without it the whole style reads near-black. */}

@@ -28,10 +28,15 @@ import { FeedIcon, ItemIcon, itemLabel, usedVolume } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 import { TradeScreen } from "./TradeScreen";
+import { useWatchController, WatchView } from "./watch";
 
 export function Hud({ connection }: { connection: GameConnection }) {
   const connected = useGame((s) => s.connected);
   const joined = useGame((s) => s.joined);
+  // Desktop live-watch spectate session (opened from the Agents menu): the
+  // watch overlay takes over the screen and swaps the camera/input in the
+  // canvas, so the normal gameplay HUD is hidden for its duration.
+  const watchActive = useGame((s) => s.watchActive);
 
   // Warm the fullscreen map's assets (geo fetch + worker ground bake) once
   // the world has spawned in, so the first M press is instant. Idle-deferred
@@ -49,7 +54,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
   return (
     <div className="hud">
       {!connected && <div className="disconnect-banner">RECONNECTING…</div>}
-      {joined && (
+      {joined && watchActive && <WatchOverlay connection={connection} />}
+      {joined && !watchActive && (
         <>
           <Crosshair />
           <VitalsPanel />
@@ -79,12 +85,54 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <EconomyDashboard connection={connection} />
           <AgentsScreen connection={connection} />
           <PerfPanel />
-          <DeathScreen />
         </>
       )}
+      {/* Death can land during a watch session too, so keep it outside the
+          watch gate — it also drops us back to the avatar view. */}
+      {joined && <DeathScreen />}
       {/* Outside the joined gate so exit/logout stay reachable mid-reconnect. */}
       <GameMenu />
     </div>
+  );
+}
+
+/** Desktop live-watch overlay: the shared watch view over the live canvas. */
+function WatchOverlay({ connection }: { connection: GameConnection }) {
+  const ctrl = useWatchController(connection);
+  const stopWatch = useGame((s) => s.stopWatch);
+  const openMenu = useGame((s) => s.openMenu);
+  const death = useGame((s) => s.death);
+
+  // A death that lands while watching (the avatar was attacked unattended)
+  // ends the watch session so the BSOD/respawn flow takes over cleanly.
+  useEffect(() => {
+    if (death) stopWatch();
+  }, [death, stopWatch]);
+
+  // Escape leaves the watch session (back to the avatar view).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        stopWatch();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [stopWatch]);
+
+  return (
+    <WatchView
+      ctrl={ctrl}
+      variant="w"
+      wheelZoom
+      onExit={stopWatch}
+      onEmptyCta={() => {
+        stopWatch();
+        openMenu("agents");
+      }}
+      emptyCtaLabel="OPEN AGENTS"
+    />
   );
 }
 

@@ -525,6 +525,9 @@ interface UiState {
   /** Venue the Trade screen should scope to (set when a Market Terminal is
    * interacted with; null = no preference, TradeScreen picks per market). */
   tradeVenue: number | null;
+  /** Item the Trade screen should auto-open on next (set when an item is
+   * clicked in the economy Item Supply list; TradeScreen consumes + clears). */
+  tradeAsset: ItemKind | null;
   /** Persistent points of interest (service buildings), sent once on join. */
   pois: PoiInfo[];
   /** Named resource-bias zones ringing the spawn district. */
@@ -563,6 +566,9 @@ interface UiState {
   agentResult: { ok: boolean; error: string | null; at: number } | null;
   /** Agent the Watch tab should follow ("Watch live" hand-off; Phase 4 reads). */
   watchAgentId: string | null;
+  /** Desktop-only: a live agent-watch session is active (spectate camera over
+   * the normal avatar HUD). Ignored on mobile, where watching is a bottom tab. */
+  watchActive: boolean;
   /** Central full-screen game menu (Escape). Hosts every full-screen section
    * (map, leaderboard, economy, inventory, settings, exit) as a tab. */
   menuOpen: boolean;
@@ -612,10 +618,16 @@ interface UiState {
   toggleMenuTab: (tab: MenuTab) => void;
   /** Switch the mobile shell's bottom tab. */
   setMobileTab: (tab: MobileTab) => void;
+  /** Desktop: enter a live-watch session on `agentId` (closes the menu). */
+  startWatch: (agentId: string) => void;
+  /** Desktop: leave the live-watch session, returning to the avatar view. */
+  stopWatch: () => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
   toggleTrade: () => void;
+  /** Open the Trade screen and auto-drill into `kind`'s market. */
+  openTradeForItem: (kind: ItemKind) => void;
   toggleMenu: () => void;
   /** Close every overlay/panel (used when leaving the game screen). */
   closeOverlays: () => void;
@@ -677,6 +689,7 @@ export const useGame: import("zustand").UseBoundStore<
   myExchange: null,
   nearMarket: false,
   tradeVenue: null,
+  tradeAsset: null,
   pois: [],
   zones: [],
   factions: [],
@@ -691,6 +704,7 @@ export const useGame: import("zustand").UseBoundStore<
   agentHireOffers: null,
   agentResult: null,
   watchAgentId: null,
+  watchActive: false,
   menuOpen: false,
   menuTab: "map",
   mobileTab: "agents",
@@ -731,6 +745,9 @@ export const useGame: import("zustand").UseBoundStore<
         : { menuOpen: true, menuTab: tab },
     ),
   setMobileTab: (tab) => set({ mobileTab: tab }),
+  startWatch: (agentId) =>
+    set({ watchActive: true, watchAgentId: agentId, menuOpen: false }),
+  stopWatch: () => set({ watchActive: false }),
   toggleInventory: () =>
     set((s) =>
       s.menuOpen && s.menuTab === "inventory"
@@ -755,6 +772,8 @@ export const useGame: import("zustand").UseBoundStore<
         ? { menuOpen: false }
         : { menuOpen: true, menuTab: "trade" },
     ),
+  openTradeForItem: (kind) =>
+    set({ menuOpen: true, menuTab: "trade", mobileTab: "trade", tradeAsset: kind }),
   toggleMenu: () =>
     set((s) =>
       s.menuOpen ? { menuOpen: false } : { menuOpen: true, menuTab: "map" },
@@ -765,6 +784,7 @@ export const useGame: import("zustand").UseBoundStore<
       chatOpen: false,
       craftOpen: false,
       vendorOpen: false,
+      watchActive: false,
       death: null,
     }),
   setVisualStyle: (style) => {

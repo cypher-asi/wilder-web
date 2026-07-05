@@ -236,7 +236,7 @@ body,
 
 .m-tr-grid {
   display: grid;
-  grid-template-columns: 18px 26px minmax(0, 1fr) 38px 66px 48px 50px;
+  grid-template-columns: 3px 18px 26px minmax(0, 1fr) 38px 66px 48px 50px;
   gap: 6px;
   align-items: center;
   padding: 0 12px;

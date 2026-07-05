@@ -168,14 +168,19 @@ function SupplyList() {
         ))}
       </div>
       <div className="m-econ-list m-scroll">
-        {/* Rows are inert until Phase 4 wires the drill-in to the Trade tab. */}
+        {/* Tapping a row jumps to its market on the Trade tab. */}
         {rows.map((r) => (
-          <div key={r.kind} className="m-econ-item-row">
+          <div
+            key={r.kind}
+            className="m-econ-item-row"
+            role="button"
+            onClick={() => useGame.getState().openTradeForItem(r.kind)}
+          >
             <i
               className="econ-supply-tick"
               style={{ background: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
             />
-            <ItemIcon kind={r.kind} size={22} />
+            <ItemIcon kind={r.kind} size={22} coin />
             <span className="m-econ-item-name">
               {itemLabel(r.kind)}
               <span className="m-econ-item-ticker">{ITEM_INFO[r.kind].ticker}</span>
@@ -234,7 +239,7 @@ function TxFeedRow({ tx, now }: { tx: EconTx; now: number }) {
           {TX_KIND_LABEL[tx.kind]}
         </span>
         <span className="m-econ-tx-amount">
-          {tx.amount.t === "Item" && <ItemIcon kind={tx.amount.d.kind} size={13} />}
+          {tx.amount.t === "Item" && <ItemIcon kind={tx.amount.d.kind} size={13} coin />}
           {amountText(tx.amount)}
         </span>
         <span className="m-econ-tx-age num">{formatAge(tx.at_ms, now)}</span>

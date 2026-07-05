@@ -110,7 +110,7 @@ function Amount({ amount }: { amount: TxAmount }) {
             className="econ-supply-tick"
             style={{ background: ECON_CAT_COLOR[ITEM_INFO[amount.d.kind].category] }}
           />
-          <ItemIcon kind={amount.d.kind} size={14} />
+          <ItemIcon kind={amount.d.kind} size={14} coin />
           {amount.d.count} {itemLabel(amount.d.kind)}
         </span>
       );
@@ -177,7 +177,6 @@ function SupplyPanel({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
     <div className="econ-panel econ-supply">
       <div className="econ-panel-title">
         ITEM SUPPLY
-        <span className="econ-panel-sub">MARKET DETAIL MOVES TO THE TRADE SCREEN</span>
       </div>
       <div className="econ-tabs">
         {CATEGORY_ORDER.map((c) => (
@@ -210,7 +209,7 @@ function SupplyPanel({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
                 className="econ-supply-tick"
                 style={{ background: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
               />
-              <ItemIcon kind={r.kind} size={18} />
+              <ItemIcon kind={r.kind} size={21} coin />
               {itemLabel(r.kind)}
               <span className="econ-supply-ticker">{ITEM_INFO[r.kind].ticker}</span>
             </span>
@@ -1034,10 +1033,8 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
           ) : (
             <div className="econ-body">
               <TxFeed />
-              {/* The per-item market drill-in moved off the dashboard with
-                  the listing protocol; Phase 4 rebuilds it on exchange data
-                  in the Trade screen. */}
-              <SupplyPanel onSelect={() => {}} />
+              {/* Clicking an item jumps to its market on the Trade screen. */}
+              <SupplyPanel onSelect={(kind) => useGame.getState().openTradeForItem(kind)} />
             </div>
           )}
         </>

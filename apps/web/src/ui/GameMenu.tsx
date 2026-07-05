@@ -80,7 +80,6 @@ export function GameMenu() {
   return (
     <>
       <nav className="menu-nav">
-        <div className="menu-nav-brand">WILDER</div>
         <div className="menu-nav-tabs">
           {TABS.map((t) => (
             <button

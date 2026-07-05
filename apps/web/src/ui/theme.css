@@ -43,9 +43,11 @@
     5px 6px 0 -1px rgba(79, 195, 255, 0.07),
     -3px 9px 0 -2px rgba(233, 245, 255, 0.04),
     0 0 26px rgba(79, 195, 255, 0.07);
-  /* Notched corners (bottom-right cut only; left corners stay square). */
-  --notch: 10px;
-  --notch-sm: 6px;
+  /* Notched corners disabled: boxes render as plain rectangles (the
+     bottom-right corner "ticks" are removed across every menu/panel). Set
+     these back to 10px/6px to restore the sliced-corner look. */
+  --notch: 0px;
+  --notch-sm: 0px;
   --clip-notch: polygon(
     0 0,
     100% 0,
@@ -1935,7 +1937,7 @@ body {
   padding: 7px 14px;
   background: transparent;
   border: none;
-  font: 700 11px/1 var(--font-display);
+  font: 700 12px/1 var(--font-display);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -1959,7 +1961,7 @@ body {
 }
 
 .menu-nav-key {
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.08em;
   color: var(--text-dim);
   border: 1px solid var(--steel-border);
@@ -1980,8 +1982,7 @@ body {
   margin-left: auto;
   padding: 7px 12px;
   background: transparent;
-  border: 1px solid var(--steel-border);
-  clip-path: var(--clip-notch-sm);
+  border: none;
   font: 700 12px/1 var(--font-display);
   color: var(--text-dim);
   cursor: pointer;
@@ -1989,7 +1990,6 @@ body {
 
 .menu-nav-close:hover {
   color: var(--alert);
-  border-color: rgba(255, 77, 94, 0.5);
 }
 
 /* Settings / Exit sections: a centered panel over the frozen backdrop. */
@@ -2581,20 +2581,20 @@ body {
 }
 
 .invx-cap {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--invx-dim);
   font-variant-numeric: tabular-nums;
 }
 
 .invx-search {
   margin-left: auto;
-  width: 110px;
+  width: 120px;
   background: rgba(9, 15, 24, 0.7);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   color: var(--invx-text);
   font-family: var(--font-body);
-  font-size: 11px;
+  font-size: 12.5px;
   letter-spacing: 0.05em;
   padding: 3px 8px;
   outline: none;
@@ -2617,9 +2617,9 @@ body {
 }
 
 .invx-tab {
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 700;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.14em;
   color: var(--invx-dim);
   cursor: pointer;
   padding-bottom: 2px;
@@ -2647,8 +2647,8 @@ body {
 }
 
 .invx-section-label {
-  font-size: 11px;
-  letter-spacing: 0.15em;
+  font-size: 12px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--invx-dim);
   margin-bottom: 8px;
@@ -2676,24 +2676,8 @@ body {
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 
-/* The clip-path removes the border along the notched corner, so redraw the
-   diagonal edge with a thin gradient stripe just inside the clip line. */
-.invx-slot::after,
-.invx-corner-glyph::after,
-.invx-keycap::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  /* Notch cut line sits at 6px/sqrt(2) = 4.24px from the corner. */
-  background: linear-gradient(
-    -45deg,
-    transparent 4.2px,
-    var(--slot-edge, var(--steel-border)) 4.2px,
-    var(--slot-edge, var(--steel-border)) 5.8px,
-    transparent 5.8px
-  );
-}
+/* Notch disabled (square corners), so the diagonal corner-edge redraw that
+   used to trace the cut is intentionally omitted. */
 
 .invx-slot:hover {
   --slot-edge: var(--accent);
@@ -2816,7 +2800,7 @@ body {
 
 .invx-item-actions-label {
   flex: 1;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-dim);
   letter-spacing: 0.06em;
   overflow: hidden;
@@ -2988,6 +2972,18 @@ body {
   display: block;
 }
 
+/* Currency "coin" glyph: colored disc wrapper matching the item coins in the
+   markets/economy tables (the FeedIcon inside inherits currentColor). */
+.asset-coin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  flex: none;
+  background: #0a0e15;
+  border: 1px solid rgba(159, 180, 200, 0.35);
+}
+
 /* ---------------------------------------------------------------------------
  * Economy ledger dashboard (K key): KPI strip + tx feed + item supply.
  * Rides on .map-overlay for the fullscreen backdrop.
@@ -3043,7 +3039,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  background: var(--bg);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch);
   padding: 12px 14px;
@@ -3061,7 +3057,7 @@ body {
 
 .econ-panel-sub {
   float: right;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.2em;
   color: var(--accent);
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
@@ -3074,8 +3070,8 @@ body {
   grid-template-columns: 118px 1.1fr 1.1fr 108px 52px 56px 1.3fr 70px;
   gap: 8px;
   align-items: center;
-  padding: 4px 6px;
-  font-size: 12px;
+  padding: 5px 6px;
+  font-size: 14px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
@@ -3085,8 +3081,8 @@ body {
 }
 
 .econ-head {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--steel-border);
   padding-bottom: 6px;
@@ -3162,7 +3158,7 @@ body {
 }
 
 .econ-kind {
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   white-space: nowrap;
@@ -3172,7 +3168,7 @@ body {
 .econ-age,
 .econ-fee {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .econ-party-player {
@@ -3217,7 +3213,7 @@ body {
 
 .econ-empty {
   padding: 18px 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-dim);
 }
 
@@ -3231,11 +3227,11 @@ body {
 }
 
 .econ-tab {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: var(--text-dim);
   border: 1px solid var(--steel-border);
-  padding: 3px 8px;
+  padding: 4px 9px;
   cursor: pointer;
 }
 
@@ -3255,14 +3251,14 @@ body {
   grid-template-columns: 1fr 62px 62px 62px;
   gap: 8px;
   align-items: center;
-  padding: 4px 6px;
-  font-size: 12px;
+  padding: 5px 6px;
+  font-size: 14px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
 .econ-supply-head {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--steel-border);
   padding-bottom: 6px;
@@ -3316,7 +3312,7 @@ body {
 }
 
 .econ-supply-ticker {
-  font-size: 9px;
+  font-size: 10.5px;
   letter-spacing: 0.1em;
   color: var(--text-dim);
   border: 1px solid var(--steel-border);
@@ -3389,7 +3385,7 @@ body {
 }
 
 .econ-item-cat {
-  font-size: 9px;
+  font-size: 10.5px;
   letter-spacing: 0.18em;
 }
 
@@ -3475,7 +3471,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 
 .econ-tape-row {
@@ -3491,7 +3487,7 @@ body {
 }
 
 .econ-tape-head {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--text-dim);
   border-bottom: 1px solid rgba(159, 180, 200, 0.18);
@@ -3531,14 +3527,14 @@ body {
 }
 
 .econ-item-stat-label {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   white-space: nowrap;
 }
 
 .econ-item-stat-value {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -3558,8 +3554,8 @@ body {
 }
 
 .econ-views .econ-tab {
-  font-size: 10px;
-  padding: 4px 14px;
+  font-size: 11px;
+  padding: 5px 14px;
 }
 
 .econ-lb {
@@ -3597,7 +3593,7 @@ body {
   display: grid;
   grid-template-columns: auto 1fr auto 1fr auto 1fr;
   gap: 4px 10px;
-  font-size: 11px;
+  font-size: 12.5px;
   align-items: baseline;
 }
 
@@ -3607,8 +3603,8 @@ body {
 }
 
 .econ-lb-stat-label {
-  font-size: 8px;
-  letter-spacing: 0.16em;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
 }
 
@@ -3650,8 +3646,8 @@ body {
   grid-template-columns: 28px 1.2fr 1fr 120px;
   gap: 8px;
   align-items: center;
-  padding: 5px 6px;
-  font-size: 12px;
+  padding: 6px 6px;
+  font-size: 14px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
@@ -3660,8 +3656,8 @@ body {
   grid-template-columns: 1.2fr 1fr 70px 60px 110px;
   gap: 8px;
   align-items: center;
-  padding: 5px 6px;
-  font-size: 12px;
+  padding: 6px 6px;
+  font-size: 14px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
@@ -3672,8 +3668,8 @@ body {
 }
 
 .econ-lb-head {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--steel-border);
   padding-bottom: 6px;
@@ -3955,16 +3951,16 @@ body {
   grid-template-columns: 76px 1.4fr 1.4fr 1.1fr 1fr 84px 84px;
   gap: 10px;
   align-items: baseline;
-  padding: 5px 6px;
-  font-size: 10.5px;
+  padding: 6px 6px;
+  font-size: 12.5px;
   line-height: 1.35;
   color: var(--text);
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
 .pmap-cur-head {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
 }
 
@@ -4437,7 +4433,7 @@ body {
 
 .ag-roster-empty-sub {
   margin-top: 8px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--text-dim);
 }
@@ -4457,7 +4453,7 @@ body {
 
 .ag-card-name {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 14.5px;
   font-weight: 800;
   letter-spacing: 0.08em;
   color: var(--accent-bright);
@@ -4465,7 +4461,7 @@ body {
 
 .ag-chip {
   flex: none;
-  font-size: 9px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -4477,7 +4473,7 @@ body {
 }
 
 .ag-card-org {
-  font-size: 10px;
+  font-size: 11.5px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -4488,7 +4484,7 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12.5px;
 }
 
 .ag-card-wild {
@@ -4497,13 +4493,13 @@ body {
 }
 
 .ag-card-banked {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--text-dim);
 }
 
 .ag-card-cur {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--text-dim);
   letter-spacing: 0.1em;
@@ -4511,7 +4507,7 @@ body {
 
 .ag-card-earned {
   color: #7be0c2;
-  font-size: 10px;
+  font-size: 11.5px;
   letter-spacing: 0.06em;
   white-space: nowrap;
 }
@@ -4592,14 +4588,14 @@ body {
 .ag-sec-title {
   margin-top: 6px;
   font-family: var(--font-display);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
-  letter-spacing: 0.26em;
+  letter-spacing: 0.22em;
   color: var(--text-dim);
 }
 
 .ag-goal {
-  font-size: 12px;
+  font-size: 13.5px;
   letter-spacing: 0.06em;
   color: var(--accent);
   text-shadow: 0 0 8px rgba(79, 195, 255, 0.35);
@@ -4613,8 +4609,8 @@ body {
   background: transparent;
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
-  font: 700 9px/1 var(--font-display);
-  letter-spacing: 0.16em;
+  font: 700 10.5px/1 var(--font-display);
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   cursor: pointer;
 }
@@ -4634,8 +4630,30 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 10px;
+  font-size: 11.5px;
   color: var(--alert);
+}
+
+/* "WATCH LIVE" — hand off to the desktop spectate overlay. */
+.ag-watch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  min-height: 30px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 10.5px/1 var(--font-display);
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.ag-watch-btn:hover {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
 }
 
 /* --- Wallet strip ----------------------------------------------------------- */
@@ -4666,8 +4684,8 @@ body {
 }
 
 .ag-wallet-label {
-  font-size: 8px;
-  letter-spacing: 0.2em;
+  font-size: 10px;
+  letter-spacing: 0.18em;
   color: var(--text-dim);
 }
 
@@ -4696,8 +4714,8 @@ body {
 }
 
 .ag-stat-label {
-  font-size: 7px;
-  letter-spacing: 0.18em;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
   color: var(--text-dim);
 }
 
@@ -4711,10 +4729,10 @@ body {
 
 .ag-trait {
   display: grid;
-  grid-template-columns: 62px 1fr 40px;
+  grid-template-columns: 68px 1fr 40px;
   align-items: center;
   gap: 8px;
-  font-size: 10px;
+  font-size: 11.5px;
 }
 
 .ag-trait-name {
@@ -4835,9 +4853,9 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 10px;
-  padding: 5px 2px;
+  padding: 6px 2px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.1);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .ag-feed-text {
@@ -4848,17 +4866,17 @@ body {
 .ag-tx-age {
   flex: none;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .ag-tx-row {
   display: grid;
-  grid-template-columns: 82px 1fr auto 34px;
+  grid-template-columns: 86px 1fr auto 36px;
   align-items: baseline;
   gap: 8px;
-  padding: 5px 2px;
+  padding: 6px 2px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.1);
-  font-size: 10.5px;
+  font-size: 12.5px;
 }
 
 .ag-tx-kind {
@@ -4885,7 +4903,7 @@ body {
 
 .ag-empty-note {
   padding: 8px 2px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-dim);
 }
 
@@ -4904,7 +4922,7 @@ body {
 
 .ag-hire-error {
   padding: 7px 10px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--alert);
   border: 1px solid rgba(255, 106, 124, 0.45);
   background: rgba(255, 106, 124, 0.08);
@@ -4977,6 +4995,8 @@ body {
 /* --- Markets view ---------------------------------------------------------- */
 
 .trade-mkts {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
 }
@@ -4995,8 +5015,8 @@ body {
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch-sm);
   color: var(--text);
-  font: 400 12px/1 var(--font-body);
-  padding: 8px 10px;
+  font: 400 13.5px/1 var(--font-body);
+  padding: 9px 11px;
   outline: none;
 }
 
@@ -5013,17 +5033,17 @@ body {
      volume, circulating supply, sparkline, chevron. */
   display: grid;
   grid-template-columns:
-    24px 30px minmax(150px, 1.6fr) 1.1fr 0.7fr 1.2fr 1.2fr 1.2fr 112px 26px;
-  gap: 8px;
+    26px 34px minmax(160px, 1.6fr) 1.1fr 0.7fr 1.2fr 1.2fr 1.2fr 112px 26px;
+  gap: 10px;
   align-items: center;
-  padding: 6px 6px;
-  font-size: 12px;
+  padding: 10px 8px;
+  font-size: 14px;
   border-bottom: 1px solid rgba(159, 180, 200, 0.08);
 }
 
 .trade-mkt-rank {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 /* Two-line numeric cells (value + dim USD/MILD sub-line). */
@@ -5036,7 +5056,7 @@ body {
 }
 
 .trade-cell-sub {
-  font-size: 10px;
+  font-size: 11.5px;
   color: var(--text-dim);
 }
 
@@ -5059,11 +5079,11 @@ body {
 }
 
 .trade-mkt-head {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--steel-border);
-  padding-bottom: 6px;
+  padding-bottom: 8px;
 }
 
 .trade-sort {
@@ -5095,7 +5115,7 @@ body {
   color: var(--text-dim);
   cursor: pointer;
   text-align: center;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .trade-star:hover {
@@ -5132,13 +5152,13 @@ body {
 
 /* Markets table rows read CMC-style: bold display name, dim ticker after. */
 .trade-mkt-link .trade-mkt-name {
-  font-size: 12px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--text);
 }
 
 .trade-mkt-link .trade-mkt-ticker {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
 }
@@ -5337,7 +5357,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  background: var(--bg);
   border: 1px solid var(--steel-border);
   clip-path: var(--clip-notch);
   padding: 12px 14px;
@@ -5777,5 +5797,342 @@ body {
   border-radius: 2px;
   font-size: 10.5px;
   color: var(--text);
+}
+
+/* ---------------------------------------------------------------------------
+   Live-watch view — shared bits + desktop (w-watch) skin.
+
+   The mobile skin (m-watch-*) lives in mobile/mobile.css; the classes below
+   are either shared by both skins (watch-empty*, watch-zoom-btn) or the
+   desktop overlay skin (w-watch-*), which mirrors the mobile layout but is a
+   fullscreen overlay above the desktop HUD, opened from the Agents menu.
+--------------------------------------------------------------------------- */
+
+/* Shared empty state (rare: roster still deploying the starter agent). */
+.watch-empty-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05060a;
+  pointer-events: auto;
+}
+
+.watch-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+  padding: 24px;
+  text-align: center;
+}
+
+.watch-empty-glyph {
+  font-size: 40px;
+  color: var(--accent);
+  text-shadow: 0 0 18px var(--accent-dim);
+}
+
+.watch-empty-sub {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.watch-cta {
+  margin-top: 4px;
+  padding: 9px 18px;
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+/* Shared zoom +/- buttons (both skins), sit in the modes row. */
+.watch-zoom-btn {
+  min-width: 34px;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* Watch animations — mirrored from mobile.css so the desktop skin (which does
+   not load mobile.css) can use them too. */
+@keyframes m-watch-veil-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes m-watch-ticker-in {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* --- Desktop overlay skin (w-watch-*) ------------------------------------- */
+
+.w-watch {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+}
+
+.w-watch-gesture {
+  position: absolute;
+  inset: 0;
+  /* The .hud root is pointer-events:none; opt this layer back in so drag /
+     wheel reach it (interactive children below opt in on their own). */
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.w-watch-gesture:active {
+  cursor: grabbing;
+}
+
+.w-watch-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 5, 10, 0.4);
+  pointer-events: none;
+}
+
+.w-watch-veil-text {
+  font: 800 18px/1 var(--font-display);
+  letter-spacing: 0.36em;
+  color: var(--accent);
+  text-shadow: 0 0 18px var(--accent-dim);
+  animation: m-watch-veil-pulse 1.4s ease-in-out infinite;
+}
+
+.w-watch-hud {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 22px 22px;
+  pointer-events: none;
+}
+
+.w-watch-top {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.w-watch-card {
+  align-self: flex-start;
+  min-width: 260px;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: rgba(4, 10, 18, 0.8);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.w-watch-card-note {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+.w-watch-card-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.w-watch-mild {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+  white-space: nowrap;
+}
+
+.w-watch-activity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.w-watch-modes {
+  align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.w-watch-mode {
+  padding: 8px 13px;
+  font: 700 10px/1 var(--font-display);
+  letter-spacing: 0.22em;
+  color: var(--text-dim);
+  background: rgba(4, 10, 18, 0.74);
+  border: 1px solid rgba(120, 170, 220, 0.22);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.w-watch-mode:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.w-watch-mode.active {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.18);
+  text-shadow: 0 0 10px var(--accent-dim);
+}
+
+.w-watch-recenter {
+  color: var(--accent-bright, #9ff);
+  border-color: rgba(0, 229, 255, 0.45);
+}
+
+.w-watch-exit {
+  margin-left: auto;
+  color: var(--text-dim);
+  border-color: rgba(255, 106, 124, 0.35);
+}
+
+.w-watch-exit:hover {
+  color: var(--alert);
+  border-color: rgba(255, 106, 124, 0.6);
+}
+
+.w-watch-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.w-watch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 60%;
+  pointer-events: auto;
+}
+
+.w-watch-chip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 110px;
+  padding: 8px 12px;
+  background: rgba(4, 10, 18, 0.8);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+  font-family: var(--font-display);
+  text-align: left;
+  cursor: pointer;
+}
+
+.w-watch-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.w-watch-chip-name {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.w-watch-chip-hp {
+  display: block;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--steel-border);
+  overflow: hidden;
+}
+
+.w-watch-chip-hp-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #1f7fc4, var(--accent));
+  transition: width 0.25s;
+}
+
+.w-watch-chip-hp-fill.low {
+  background: linear-gradient(90deg, #7a2530, var(--alert));
+}
+
+.w-watch-ticker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 460px;
+  pointer-events: none;
+}
+
+.w-watch-ticker-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 11px;
+  background: rgba(4, 10, 18, 0.72);
+  border-left: 2px solid var(--accent-dim);
+  font-size: 12px;
+  animation: m-watch-ticker-in 0.25s ease-out;
+}
+
+.w-watch-ticker-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.w-watch-ticker-age {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--text-dim);
 }
 

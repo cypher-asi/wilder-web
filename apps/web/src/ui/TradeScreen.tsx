@@ -2,13 +2,13 @@
 // the economy dashboard. Two views:
 //  - Markets: searchable/sortable cross-venue ticker table (MarketsSub) with
 //    an expandable per-venue arbitrage breakdown per row.
-//  - Market detail: one (venue, asset) book (BookSub) â€” candle chart, order
+//  - Market detail: one (venue, asset) book (BookSub) — candle chart, order
 //    ladder, trades tape, and a venue-gated order entry panel, plus bottom
 //    tabs for open orders / recent trades / settlement inboxes.
 //
 // Market data is viewable from anywhere; placing/cancelling orders and
 // claiming settlement require standing at the venue's terminal (the server
-// enforces it â€” the client gating is UX).
+// enforces it — the client gating is UX).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
@@ -23,6 +23,7 @@ import {
 } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
+import { ECON_CAT_COLOR } from "./EconomyDashboard";
 import { fmtCompact, fmtMild, formatAge } from "./format";
 import { FeedIcon, ITEM_INFO, ItemIcon, itemLabel } from "./ItemIcon";
 import { TradeChart } from "./TradeChart";
@@ -34,7 +35,7 @@ import { fmtUsd, useWildUsd } from "./useWildUsd";
 
 /** Taker fee (percent, mirror of the server's MARKET_FEE_PCT). */
 const FEE_PCT = 5;
-/** "At the venue terminal" radius (m) â€” mirrors the server interact range,
+/** "At the venue terminal" radius (m) — mirrors the server interact range,
  * with a little slack for the anchor sitting proud of the counter. */
 const AT_VENUE_M = 6;
 
@@ -60,15 +61,16 @@ export function assetTicker(a: AssetMsg): string {
 
 export function AssetGlyph({ asset, size = 18 }: { asset: AssetMsg; size?: number }) {
   if (asset.t === "Item") return <ItemIcon kind={asset.d} size={size} coin />;
-  // Currencies get the same colored-disc "coin" treatment as items.
-  const color = asset.t === "Shards" ? "#b98be0" : "#f4c430";
+  // Currencies get the same black-disc "coin" treatment: a colored glyph on the
+  // near-black disc (matches the item silhouettes).
+  const tint = asset.t === "Shards" ? "#c9a0ef" : "#ffd75e";
   return (
     <span
       className="asset-coin"
-      style={{ width: size, height: size, background: color }}
+      style={{ width: size, height: size, color: tint }}
       aria-label={assetLabel(asset)}
     >
-      <FeedIcon kind={asset.t === "Shards" ? "shards" : "energy"} size={Math.round(size * 0.66)} />
+      <FeedIcon kind={asset.t === "Shards" ? "shards" : "energy"} size={Math.round(size * 0.62)} />
     </span>
   );
 }
@@ -85,6 +87,13 @@ function marketCat(a: AssetMsg): MarketCat {
   return "gear";
 }
 
+/** Category tick color for a market row — mirrors the economy Item Supply
+ * list so tags/types read the same across screens. */
+export function assetTickColor(a: AssetMsg): string {
+  const cat = a.t === "Item" ? ITEM_INFO[a.d]?.category ?? "currency" : "currency";
+  return ECON_CAT_COLOR[cat];
+}
+
 /** Basis points -> signed percent string ("+2.50%"). */
 function fmtBp(bp: number): string {
   const pct = bp / 100;
@@ -99,7 +108,7 @@ function changeColor(bp: number): string | undefined {
 
 /** "1,234 MILD" or an em-dash for empty book sides / never-traded markets. */
 function priceOrDash(p: number): string {
-  return p > 0 ? fmtMild(p) : "â€”";
+  return p > 0 ? fmtMild(p) : "—";
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +176,7 @@ interface VenueProximity {
 
 /**
  * Polls the player's distance to every venue anchor (~2 Hz). Standing "at" a
- * venue means being within interact range of its terminal anchor â€” or inside
+ * venue means being within interact range of its terminal anchor — or inside
  * its walk-in room, which `nearMarket` (ProximityTracker) covers: the anchor
  * sits out on the sidewalk, so the interior check rides that flag as long as
  * this venue is the nearest one.
@@ -225,6 +234,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
   const joined = useGame((s) => s.joined);
   const markets = useGame((s) => s.markets);
   const tradeVenue = useGame((s) => s.tradeVenue);
+  const tradeAsset = useGame((s) => s.tradeAsset);
   const [sel, setSel] = useState<Selection | null>(null);
   const selRef = useRef(sel);
   selRef.current = sel;
@@ -248,6 +258,26 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
       prev && prev.venue !== tradeVenue ? { asset: prev.asset, venue: tradeVenue } : prev,
     );
   }, [open, tradeVenue]);
+
+  // Auto-drill to a market when arriving from the economy Item Supply list.
+  // Waits for the markets index to load, resolves the row, then clears the
+  // pending item so it fires once per hand-off.
+  useEffect(() => {
+    if (!open || tradeAsset === null || markets === null) return;
+    const row = markets.rows.find((r) => r.asset.t === "Item" && r.asset.d === tradeAsset);
+    if (row) {
+      let v: number | null = null;
+      if (tradeVenue !== null && markets.venues.some((x) => x.venue === tradeVenue)) {
+        v = tradeVenue;
+      }
+      if (v === null && row.venues.length > 0) {
+        v = [...row.venues].sort((a, b) => b.volume_24h_wild - a.volume_24h_wild)[0].venue;
+      }
+      if (v === null && markets.venues.length > 0) v = markets.venues[0].venue;
+      if (v !== null) setSel({ asset: row.asset, venue: v });
+    }
+    useGame.getState().set({ tradeAsset: null });
+  }, [open, tradeAsset, markets, tradeVenue]);
 
   // Closing spends the Escape/click: suppress the pointer-lock bounce so it
   // does not read as an "open game menu" Escape (see CameraRig).
@@ -294,7 +324,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
   return (
     <div className="map-overlay trade-overlay">
       {markets === null ? (
-        <div className="econ-empty trade-syncing">SYNCING MARKETSâ€¦</div>
+        <div className="econ-empty trade-syncing">SYNCING MARKETS…</div>
       ) : sel === null ? (
         <MarketsView rows={markets.rows} venues={venues} onOpen={openMarket} wildUsd={wildUsd} />
       ) : (
@@ -320,7 +350,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
 type SortKey = "cap" | "price" | "change" | "volume" | "supply";
 
 const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
-  { id: "fav", label: "â˜… FAVORITES" },
+  { id: "fav", label: "★ FAVORITES" },
   { id: "all", label: "ALL" },
   { id: "resource", label: "RESOURCES" },
   { id: "material", label: "MATERIALS" },
@@ -331,7 +361,7 @@ const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
 /** CMC-style 24h sparkline: pure-SVG close-price polyline colored by the
  * row's 24h direction. */
 function Spark({ points, changeBp }: { points: number[]; changeBp: number }) {
-  if (points.length < 2) return <span className="trade-spark-empty">â€”</span>;
+  if (points.length < 2) return <span className="trade-spark-empty">—</span>;
   const w = 104;
   const h = 30;
   const min = Math.min(...points);
@@ -429,21 +459,14 @@ function MarketsView({
   }, [rows, search, chip, favs, sortKey, sortDesc]);
 
   const sortMark = (key: SortKey) =>
-    sortKey === key ? (sortDesc ? " â–¼" : " â–²") : "";
+    sortKey === key ? (sortDesc ? " ▼" : " ▲") : "";
 
   return (
-    <div className="econ-panel trade-mkts">
-      <div className="econ-panel-title">
-        MARKETS
-        <span className="econ-panel-sub">
-          {rows.length} TICKERS Â· {venues.length} VENUES Â· QUOTED IN MILD
-          {wildUsd !== null && ` Â· WILD ${fmtUsd(wildUsd)}`}
-        </span>
-      </div>
+    <div className="trade-mkts">
       <div className="trade-toolbar">
         <input
           className="trade-search"
-          placeholder="Search ticker or nameâ€¦"
+          placeholder="Search ticker or name…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -501,10 +524,14 @@ function MarketsView({
                     toggleFav(key);
                   }}
                 >
-                  {favs.has(key) ? "â˜…" : "â˜†"}
+                  {favs.has(key) ? "★" : "☆"}
                 </span>
                 <span className="num trade-mkt-rank">{rank.get(key)}</span>
                 <span className="trade-mkt-id">
+                  <i
+                    className="econ-supply-tick"
+                    style={{ background: assetTickColor(r.asset) }}
+                  />
                   <AssetGlyph asset={r.asset} size={23} />
                   <span className="trade-mkt-name">{assetLabel(r.asset)}</span>
                   <span className="trade-mkt-ticker">{r.ticker}</span>
@@ -520,10 +547,10 @@ function MarketsView({
                   )}
                 </span>
                 <span className="num" style={{ color: changeColor(r.change_24h_bp) }}>
-                  {r.last > 0 ? fmtBp(r.change_24h_bp) : "â€”"}
+                  {r.last > 0 ? fmtBp(r.change_24h_bp) : "—"}
                 </span>
                 <span className="num trade-cell-2l">
-                  <span>{r.market_cap > 0 ? `${fmtCompact(r.market_cap)} WILD` : "â€”"}</span>
+                  <span>{r.market_cap > 0 ? `${fmtCompact(r.market_cap)} WILD` : "—"}</span>
                   {wildUsd !== null && r.market_cap > 0 && (
                     <span className="trade-cell-sub">{fmtUsd(r.market_cap * wildUsd)}</span>
                   )}
@@ -535,7 +562,7 @@ function MarketsView({
                   )}
                 </span>
                 <span className="num">
-                  {r.supply > 0 ? `${fmtCompact(r.supply)} ${r.ticker}` : "â€”"}
+                  {r.supply > 0 ? `${fmtCompact(r.supply)} ${r.ticker}` : "—"}
                 </span>
                 <span className="num trade-spark-cell">
                   <Spark points={r.spark} changeBp={r.change_24h_bp} />
@@ -548,7 +575,7 @@ function MarketsView({
                     setExpanded(isExpanded ? null : key);
                   }}
                 >
-                  â–¾
+                  ▾
                 </span>
               </div>
               {isExpanded && (
@@ -584,7 +611,7 @@ function MarketsView({
                         {priceOrDash(v.best_ask)}
                       </span>
                       <span className="num">{fmtCompact(v.volume_24h_wild)} MILD</span>
-                      <span className="trade-venue-go">TRADE â€º</span>
+                      <span className="trade-venue-go">TRADE ›</span>
                     </div>
                   ))}
                 </div>
@@ -674,7 +701,7 @@ function MarketDetail({
     <div className="trade-detail">
       <div className="trade-detail-head">
         <button className="trade-back" onClick={onBack} title="Back to markets (ESC)">
-          â€¹
+          ‹
         </button>
         <span className="trade-mkt-id trade-detail-id">
           <AssetGlyph asset={sel.asset} size={27} />
@@ -692,7 +719,7 @@ function MarketDetail({
                 title={`${v.name}${prox.atId === v.venue ? " (you are here)" : ""}`}
               >
                 <span className="trade-venue-pill-name">
-                  {prox.atId === v.venue ? "â—‰ " : ""}
+                  {prox.atId === v.venue ? "◉ " : ""}
                   {v.name}
                 </span>
                 <span className="trade-venue-pill-last num">{priceOrDash(last)}</span>
@@ -719,7 +746,7 @@ function MarketDetail({
               className="trade-stat-value num"
               style={{ color: changeColor(stats?.change_24h_bp ?? 0) }}
             >
-              {stats ? fmtBp(stats.change_24h_bp) : "â€”"}
+              {stats ? fmtBp(stats.change_24h_bp) : "—"}
             </span>
           </div>
           <div className="trade-stat">
@@ -727,13 +754,13 @@ function MarketDetail({
             <span className="trade-stat-value num">
               {stats && stats.high_24h > 0
                 ? `${fmtMild(stats.high_24h)} / ${fmtMild(stats.low_24h)}`
-                : "â€”"}
+                : "—"}
             </span>
           </div>
           <div className="trade-stat">
             <span className="trade-stat-label">24H VOLUME</span>
             <span className="trade-stat-value num">
-              {stats ? `${fmtCompact(stats.volume_24h_wild)} MILD` : "â€”"}
+              {stats ? `${fmtCompact(stats.volume_24h_wild)} MILD` : "—"}
               {stats && stats.volume_24h_units > 0 && (
                 <span className="trade-stat-sub"> Â· {fmtCompact(stats.volume_24h_units)} u</span>
               )}
@@ -752,7 +779,7 @@ function MarketDetail({
             <span className="trade-stat-value num">
               {spread !== null
                 ? `${fmtMild(spread)} (${((spread / bestAsk) * 100).toFixed(1)}%)`
-                : "â€”"}
+                : "—"}
             </span>
           </div>
         </div>
@@ -762,7 +789,7 @@ function MarketDetail({
         <div className="trade-panel trade-chart-panel">
           <div className="trade-panel-title trade-chart-title">
             <span>
-              PRICE â€” {venueName.toUpperCase()}
+              PRICE — {venueName.toUpperCase()}
               <span className="econ-panel-sub">
                 {" "}
                 {TIMEFRAMES.find((tf) => tf.secs === tfSecs)?.label.toUpperCase() ?? "1M"}{" "}
@@ -857,7 +884,7 @@ function BookLadder({
   book: BookStateMsg | null;
   onPickPrice: (price: number) => void;
 }) {
-  if (!book) return <div className="econ-empty">Loading bookâ€¦</div>;
+  if (!book) return <div className="econ-empty">Loading book…</div>;
 
   // Best-first slices; cumulative size accumulates away from the spread.
   const asks = book.asks.slice(0, LADDER_LEVELS);
@@ -949,7 +976,7 @@ function useNow(): number {
 
 function TapeList({ book }: { book: BookStateMsg | null }) {
   const now = useNow();
-  if (!book) return <div className="econ-empty">Loading tradesâ€¦</div>;
+  if (!book) return <div className="econ-empty">Loading trades…</div>;
   return (
     <div className="trade-tape">
       <div className="trade-book-row trade-book-head">
@@ -1224,7 +1251,7 @@ function OrderPanel({
         </div>
         <div className="trade-summary-row">
           <span>TAKER FEE ({FEE_PCT}%)</span>
-          <span className="num">{marketable ? `${fmtMild(fee)} MILD` : "â€” (maker)"}</span>
+          <span className="num">{marketable ? `${fmtMild(fee)} MILD` : "— (maker)"}</span>
         </div>
         <div className="trade-summary-row trade-summary-total">
           <span>{isBuy ? "TOTAL COST" : "EST. PROCEEDS"}</span>
@@ -1247,7 +1274,7 @@ function OrderPanel({
           <div>
             Travel to <b>{venueName}</b> to trade
             {distToVenue !== undefined && Number.isFinite(distToVenue)
-              ? ` â€” ${Math.round(distToVenue)}m away`
+              ? ` — ${Math.round(distToVenue)}m away`
               : ""}
             .
           </div>
@@ -1400,7 +1427,7 @@ function BottomStrip({
         <div className="trade-bottom-list">
           {inboxes.length === 0 && (
             <div className="econ-empty">
-              Nothing awaiting settlement. Fills credit an inbox at their venue â€”
+              Nothing awaiting settlement. Fills credit an inbox at their venue —
               claim them at that terminal.
             </div>
           )}

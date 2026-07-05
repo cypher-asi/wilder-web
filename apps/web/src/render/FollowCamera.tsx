@@ -58,6 +58,23 @@ if (typeof window !== "undefined" && import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__followCam = followCam;
 }
 
+/**
+ * Multiplicative zoom step for the watch camera, clamped to the active mode's
+ * range (explore may pull much further out than follow orbit). `factor < 1`
+ * zooms in, `factor > 1` zooms out. Shared by the touch pinch, the desktop
+ * mouse wheel, and the on-screen zoom buttons.
+ */
+export function zoomFollowCam(factor: number): void {
+  const max =
+    followCam.mode === "explore"
+      ? followCam.maxDistanceExplore
+      : followCam.maxDistance;
+  followCam.distance = Math.min(
+    max,
+    Math.max(followCam.minDistance, followCam.distance * factor),
+  );
+}
+
 /** Look target height above the ground (agent chest height). */
 const LOOK_HEIGHT = 1.3;
 /** Overhead hover height while the watched agent isn't replicated yet. */

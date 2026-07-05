@@ -113,6 +113,18 @@ const SPAWN: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 /// protected chunks (|chunk| <= SAFE_RADIUS) but well inside the ring, so the
 /// faction war stays visible on the starter playfield around spawn.
 const HUB_FRONT_SPOT: Vec3 = Vec3::new(120.0, 0.0, 120.0);
+/// Hub-cohort patrol destinations are hashed across this many angles on a
+/// ring around spawn (rather than one shared point), so the hub war forms a
+/// perimeter instead of a single statue-mob pile.
+const HUB_FRONT_SLOTS: u32 = 8;
+/// Radius (m) of that patrol ring: outside the protected chunks (which end at
+/// 64 m on an axis, ~91 m at a corner) and well inside the combat ring.
+const HUB_FRONT_RADIUS_M: f32 = 170.0;
+/// Ally-count scale for patrol crowd satiation: the patrol score is divided
+/// by `1 + allies/THIS`, so a front already held by a couple dozen allies
+/// scores below the wander floor and late arrivals peel off to do something
+/// else instead of thickening the pile.
+const PATROL_CROWD_ALLIES: f32 = 8.0;
 /// Hub-cohort staging grounds: opposite corners of the combat ring, outside
 /// the protected 3x3 but a short walk from the hub services and the front.
 /// Rebels take the south-east corner (matching their southern geography),
@@ -846,9 +858,9 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
 }
 
 /// Service entity an agent's goal is queued at, if any. These are the errands
-/// that physically crowd a storefront (vendor sell/buy, craft station) or a
-/// resource deposit, so they feed the congestion counter that spreads agents
-/// across services and nodes.
+/// that physically crowd a storefront (vendor sell/buy, craft station), a
+/// resource deposit or a loot drop, so they feed the congestion counter that
+/// spreads agents across services, nodes and battlefield piles.
 fn goal_service_target(goal: Goal) -> Option<EntityId> {
     match goal {
         Goal::Sell { store, .. }
@@ -857,6 +869,7 @@ fn goal_service_target(goal: Goal) -> Option<EntityId> {
         | Goal::Extract { store, .. } => Some(store),
         Goal::Craft { station, .. } => Some(station),
         Goal::Gather { node, .. } => Some(node),
+        Goal::Loot { container, .. } => Some(container),
         _ => None,
     }
 }
@@ -7404,7 +7417,12 @@ impl World {
         // only chase death drops. A battlefield of drops is worth more than
         // any single crate: each candidate is scored with a share of the
         // rest of the pile in scan range, since taking one crate puts the
-        // agent on top of the others (arrival chains through the pile). ---
+        // agent on top of the others (arrival chains through the pile).
+        // A crate is winner-takes-all, so one already claimed by another
+        // agent is worthless to a second walker — claimed drops are skipped
+        // outright (and excluded from the pile share), which divides a
+        // battlefield among looters instead of sending a mob converging on
+        // the same crate to watch one of them grab it. ---
         if free_volume > 2 {
             let loot_mult = traits.mult(Activity::Haul);
             let mut candidates: Vec<(EntityId, Vec3, u32, f32)> = Vec::new();
@@ -7412,6 +7430,9 @@ impl World {
             for c in self.loot.values() {
                 if c.variant != 0 {
                     continue;
+                }
+                if self.service_load.get(&c.entity).copied().unwrap_or(0) >= 1 {
+                    continue; // someone is already on the way
                 }
                 let dist = (c.position - pos).length();
                 if dist > agents::LOOT_SCAN_RANGE {
@@ -7849,8 +7870,13 @@ impl World {
         // front, where the capture/fight opportunities actually are. ---
         if has_weapon {
             let fight_mult = traits.mult(Activity::Fight).max(traits.mult(Activity::Capture));
-            let to = self.patrol_front(idx);
-            let score = 4.0 * fight_mult;
+            let (to, allies) = self.patrol_front(idx);
+            // Crowd satiation: one more body adds nothing to ground dozens
+            // of allies already hold. Discount by local ally density so a
+            // saturated front eventually scores below the wander floor and
+            // late arrivals peel off instead of thickening the pile.
+            let crowd = 1.0 / (1.0 + allies as f32 / PATROL_CROWD_ALLIES);
+            let score = 4.0 * fight_mult * crowd;
             if score > best.0 {
                 best = (score, Goal::Patrol { to });
             }
@@ -7961,39 +7987,59 @@ impl World {
 
     /// Patrol destination for a fight-leaning agent: a spot near its front,
     /// picked by the agent itself. Hub-cohort agents (fixed `home_spot`
-    /// inside the combat ring) fight over the hub front so the war stays
-    /// visible on the starter playfield. Everyone else hashes their identity
-    /// — NOT home geography — across the shared front list, so Rebel and
-    /// Forum combatants converge on the same contested regions and the cold
-    /// statistical war actually finds both sides in one bucket.
+    /// inside the combat ring) hash across a ring of angles around spawn so
+    /// the hub war forms a perimeter the starter playfield can watch instead
+    /// of one shared point everyone converges on. Everyone else hashes their
+    /// identity — NOT home geography — across the shared front list, so
+    /// Rebel and Forum combatants converge on the same contested regions and
+    /// the cold statistical war actually finds both sides in one bucket.
     ///
     /// The exact spot is chosen among sampled candidates priced by distance
     /// and ally crowding: a body adds nothing to ground ten allies already
     /// hold, so the line spreads out along the front through each agent's
     /// own pick instead of everyone piling onto one scripted point.
-    fn patrol_front(&mut self, idx: usize) -> Vec3 {
+    /// Sanctuary chunks are rejected outright — a patroler standing on
+    /// ground where combat is blocked can never fight, so mixed factions
+    /// would just stand shoulder to shoulder there forever.
+    ///
+    /// Returns the spot plus the ally count observed at it, so the caller
+    /// can price crowd satiation into the patrol score.
+    fn patrol_front(&mut self, idx: usize) -> (Vec3, u32) {
         let hub_local = self.agents[idx]
             .home_spot
             .is_some_and(|h| h.x.hypot(h.z) < districts::HUB_COMBAT_RING_M);
         let front = if hub_local {
-            self.nearest_walkable(HUB_FRONT_SPOT)
+            let slot = (self.agents[idx].agent_id.as_u128() % HUB_FRONT_SLOTS as u128) as f32;
+            let angle = slot / HUB_FRONT_SLOTS as f32 * std::f32::consts::TAU;
+            let spot =
+                Vec3::new(angle.cos() * HUB_FRONT_RADIUS_M, 0.0, angle.sin() * HUB_FRONT_RADIUS_M);
+            self.nearest_walkable(spot)
         } else {
             let fronts = self.patrol_fronts();
             let pick = (self.agents[idx].agent_id.as_u128() % fronts.len() as u128) as usize;
             fronts[pick]
         };
         let (pos, faction) = (self.agents[idx].position, self.agents[idx].faction);
-        let mut best: Option<(f32, Vec3)> = None;
+        let mut best: Option<(f32, Vec3, u32)> = None;
         for _ in 0..5 {
             let spot = self.walkable_spot_near(front, 100.0);
+            if is_safe_chunk(ChunkCoord::from_world(spot)) {
+                continue;
+            }
             let allies = self.local_ally_count(spot, faction, 24.0);
             let dist = (spot - pos).length();
             let score = 1.0 / (1.0 + dist / 200.0) / (1.0 + allies as f32 / 6.0);
-            if best.map(|(s, _)| score > s).unwrap_or(true) {
-                best = Some((score, spot));
+            if best.map(|(s, _, _)| score > s).unwrap_or(true) {
+                best = Some((score, spot, allies));
             }
         }
-        best.map(|(_, s)| s).unwrap_or(front)
+        match best {
+            Some((_, spot, allies)) => (spot, allies),
+            None => {
+                let allies = self.local_ally_count(front, faction, 24.0);
+                (front, allies)
+            }
+        }
     }
 
     /// Short wander destination around the agent's current position.
@@ -8066,9 +8112,16 @@ impl World {
     /// agent chose this errand for extends further and the pack still has
     /// room — chain straight to the next wanted drop instead of dropping to
     /// Idle. Agents clear a battlefield the way a person would: crate by
-    /// crate, not one grab per brain cycle.
+    /// crate, not one grab per brain cycle. Chains respect other agents'
+    /// claims (see the Loot scoring in `decide_agent`) and keep the claim
+    /// counter live, so two looters clearing one pile leapfrog each other
+    /// instead of racing to the same next crate.
     fn agent_loot_pickup(&mut self, idx: usize, container_id: EntityId) {
         self.agents[idx].goal = Goal::Idle;
+        // The claim on the drained crate is spent either way.
+        if let Some(c) = self.service_load.get_mut(&container_id) {
+            *c = c.saturating_sub(1);
+        }
         self.agent_take_loot(idx, container_id);
         let agent = &self.agents[idx];
         if agent.capacity().saturating_sub(agent.used_volume()) == 0 {
@@ -8081,11 +8134,13 @@ impl World {
             .loot
             .values()
             .filter(|c| c.variant == 0 && c.entity != container_id && !c.items.is_empty())
+            .filter(|c| self.service_load.get(&c.entity).copied().unwrap_or(0) == 0)
             .map(|c| (c.entity, c.position, (c.position - pos).length()))
             .filter(|&(.., d)| d <= LOOT_CHAIN_RANGE)
             .min_by(|a, b| a.2.total_cmp(&b.2));
         if let Some((entity, cpos, _)) = next {
             self.agents[idx].goal = Goal::Loot { container: entity, pos: cpos };
+            *self.service_load.entry(entity).or_insert(0) += 1;
         }
     }
 
@@ -12419,7 +12474,7 @@ mod tests {
         for idx in 0..40 {
             let wander = world.wander_target(idx);
             assert!(world.chunks.walkable(wander.x, wander.z), "wander target in water");
-            let front = world.patrol_front(idx);
+            let (front, _) = world.patrol_front(idx);
             assert!(world.chunks.walkable(front.x, front.z), "patrol target in water");
             let sanctuary = world.nearest_sanctuary_spot(world.agents[idx].position);
             assert!(world.chunks.walkable(sanctuary.x, sanctuary.z), "retreat target in water");
@@ -12544,7 +12599,7 @@ mod tests {
             if world.agents[idx].traits.mult(Activity::Fight) < 1.0 {
                 continue;
             }
-            let dest = world.patrol_front(idx);
+            let (dest, _) = world.patrol_front(idx);
             // Bucket the (jittered) destination to its nearest front.
             let fi = fronts
                 .iter()
@@ -12569,6 +12624,116 @@ mod tests {
         assert!(hub[0] > 0 && hub[1] > 0, "hub front not contested: {per_front:?}");
         let shared = per_front.iter().filter(|c| c[0] > 0 && c[1] > 0).count();
         assert!(shared >= 3, "too few shared fronts: {per_front:?}");
+    }
+
+    /// Hub-cohort patrols must form a ring around spawn — spread across
+    /// multiple angles, never inside the protected sanctuary chunks where
+    /// combat is blocked (mixed factions standing in a no-fire zone was the
+    /// core of the spawn-hub statue-mob).
+    #[test]
+    fn hub_patrol_ring_spreads_and_dodges_sanctuary() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.seed_agents(300);
+        let mut octants = std::collections::HashSet::new();
+        for idx in 0..world.agents.len() {
+            let hub_local = world.agents[idx]
+                .home_spot
+                .is_some_and(|h| h.x.hypot(h.z) < districts::HUB_COMBAT_RING_M);
+            if !hub_local {
+                continue;
+            }
+            let (dest, _) = world.patrol_front(idx);
+            assert!(
+                !is_safe_chunk(ChunkCoord::from_world(dest)),
+                "patrol destination inside the protected hub: {dest:?}"
+            );
+            octants
+                .insert((dest.z.atan2(dest.x) / std::f32::consts::TAU * 8.0).rem_euclid(8.0) as u32);
+        }
+        assert!(octants.len() >= 4, "hub patrol ring collapsed to octants {octants:?}");
+    }
+
+    /// Crowd satiation: a front already buried under allies must stop
+    /// drawing more patrols — the score falls below the wander floor and the
+    /// agent does something else instead of thickening the pile.
+    #[test]
+    fn saturated_front_sheds_late_patrols() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        // One armed hub-cohort agent staged inside the combat ring but away
+        // from its hashed patrol slot.
+        let start = world.nearest_walkable(Vec3::new(-400.0, 0.0, 400.0));
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), start);
+        world.agents[idx].home_spot = Some(start);
+        // The agent's deterministic ring slot (mirrors `patrol_front`).
+        let slot = (world.agents[idx].agent_id.as_u128() % HUB_FRONT_SLOTS as u128) as f32;
+        let angle = slot / HUB_FRONT_SLOTS as f32 * std::f32::consts::TAU;
+        let front = world.nearest_walkable(Vec3::new(
+            angle.cos() * HUB_FRONT_RADIUS_M,
+            0.0,
+            angle.sin() * HUB_FRONT_RADIUS_M,
+        ));
+        // Baseline: with the front empty, patrol wins and pulls the agent in.
+        world.decide_agent(idx);
+        let dest = world.agents[idx].goal.destination().expect("goal without destination");
+        assert!(
+            (dest - front).length() < 200.0,
+            "expected a patrol at the empty front, got {:?}",
+            world.agents[idx].goal
+        );
+        // Bury the entire candidate-sampling disc around the front in allies
+        // (golden-angle scatter for even density).
+        for i in 0..350 {
+            let a = i as f32 * 2.399963;
+            let r = 145.0 * ((i as f32 + 0.5) / 350.0).sqrt();
+            let p = front + Vec3::new(a.cos() * r, 0.0, a.sin() * r);
+            spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), p);
+        }
+        // Re-decide: the saturated front must not draw this agent anymore.
+        world.decide_agent(idx);
+        let goal = world.agents[idx].goal;
+        let dest = goal.destination().unwrap_or(start);
+        assert!(
+            (dest - front).length() > 200.0,
+            "saturated front still drew the patrol: {goal:?}"
+        );
+    }
+
+    /// A loot crate is winner-takes-all, so it must never draw more than one
+    /// agent: a cohort deciding around the same battlefield pile divides the
+    /// crates among themselves instead of converging as a mob on the first
+    /// one (the survivors of which would then chase the next crate together,
+    /// forever one grab behind the winner).
+    #[test]
+    fn loot_drops_are_claimed_by_one_agent_each() {
+        let (mut world, _dir) = test_world();
+        // A battlefield pile: a few scattered crates worth walking to.
+        let spot = world.nearest_walkable(Vec3::new(400.0, 0.0, 400.0));
+        for i in 0..4 {
+            let p = spot + Vec3::new(i as f32 * 6.0, 0.0, 0.0);
+            world.spawn_loot(p, vec![ItemStack { kind: ItemKind::Iron, count: 20 }], None, false);
+        }
+        // More haul-leaning agents than crates, all beside the pile.
+        let indices: Vec<usize> = (0..8)
+            .map(|i| {
+                let p = spot + Vec3::new(-8.0 - i as f32 * 2.0, 0.0, 4.0);
+                spawn_test_agent(&mut world, FACTION_REBELS, Traits::hauler(), p)
+            })
+            .collect();
+        for &idx in &indices {
+            world.decide_agent(idx);
+        }
+        let mut per_crate: HashMap<EntityId, u32> = HashMap::new();
+        for &idx in &indices {
+            if let Goal::Loot { container, .. } = world.agents[idx].goal {
+                *per_crate.entry(container).or_insert(0) += 1;
+            }
+        }
+        assert!(per_crate.len() >= 2, "pile not divided among looters: {per_crate:?}");
+        for (c, n) in &per_crate {
+            assert!(*n <= 1, "crate {c:?} drew {n} agents");
+        }
     }
 
     #[test]

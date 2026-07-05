@@ -29,6 +29,36 @@ export const CATEGORY_TICK: Record<ItemCategory, string> = {
   gadget: "#e8879b",
 };
 
+/**
+ * Brand color per item, used for the crypto-style "coin" glyph (a colored
+ * disc behind the item silhouette). Distinct, saturated hues so each ticker
+ * reads at a glance in the markets table — the way real exchange listings do.
+ */
+export const ITEM_COLOR: Record<ItemKind, string> = {
+  Medkit: "#ff5a5f",
+  Flashlight: "#f1c40f",
+  Pipe: "#8a97a8",
+  Knife: "#9fb0bd",
+  Pistol: "#5a7d99",
+  Smg: "#3f5866",
+  JacketArmor: "#5bbf7a",
+  PlateArmor: "#3f86d4",
+  Ammo9mm: "#e0a848",
+  Iron: "#7d8a9c",
+  Copper: "#e07b39",
+  Chemicals: "#17b978",
+  Electronics: "#2f80ed",
+  Biomass: "#7cc576",
+  SteelPlate: "#6b7c93",
+  CopperWire: "#d98e4a",
+  Polymer: "#8e6bd0",
+  CircuitBoard: "#17a2b8",
+  BioGel: "#ff6aa2",
+  BlueprintFragment: "#9b59b6",
+  PowerCell: "#f39c12",
+  Cash: "#2ecc71",
+};
+
 export interface ItemInfo {
   label: string;
   category: ItemCategory;
@@ -367,8 +397,39 @@ export const GLYPHS: Record<ItemKind, JSX.Element> = {
   ),
 };
 
-/** Monochrome item silhouette, sized to fit an inventory slot card. */
-export function ItemIcon({ kind, size = 34 }: { kind: ItemKind; size?: number }) {
+/**
+ * Item silhouette, sized to fit an inventory slot card. With `coin`, renders
+ * the silhouette on a colored disc (crypto-exchange listing style) instead of
+ * a bare glyph — used by the markets/economy tables.
+ */
+export function ItemIcon({
+  kind,
+  size = 34,
+  coin = false,
+}: {
+  kind: ItemKind;
+  size?: number;
+  coin?: boolean;
+}) {
+  const glyph = GLYPHS[kind] ?? <rect x="12" y="12" width="24" height="24" rx="3" fill={FILL} />;
+  if (coin) {
+    // White/steel silhouette on a near-black disc (matches the inventory slot
+    // look): high contrast and reads clearly at small sizes.
+    return (
+      <svg
+        viewBox="0 0 48 48"
+        width={size}
+        height={size}
+        className="item-icon item-coin"
+        aria-label={itemLabel(kind)}
+      >
+        <circle cx="24" cy="24" r="23" fill="#0a0e15" />
+        <circle cx="24" cy="24" r="22.3" fill="none" stroke="rgba(159, 180, 200, 0.35)" strokeWidth="1.3" />
+        {/* Inset the silhouette so it sits comfortably inside the disc. */}
+        <g transform="translate(24 24) scale(0.82) translate(-24 -24)">{glyph}</g>
+      </svg>
+    );
+  }
   return (
     <svg
       viewBox="0 0 48 48"
@@ -377,7 +438,7 @@ export function ItemIcon({ kind, size = 34 }: { kind: ItemKind; size?: number })
       className="item-icon"
       aria-label={itemLabel(kind)}
     >
-      {GLYPHS[kind] ?? <rect x="12" y="12" width="24" height="24" rx="3" fill={FILL} />}
+      {glyph}
     </svg>
   );
 }

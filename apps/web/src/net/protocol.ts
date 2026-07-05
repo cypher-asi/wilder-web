@@ -255,11 +255,49 @@ export type InventoryActionMsg =
   | Tagged<"Deposit", { slot: number }>
   | Tagged<"Withdraw", { stash_slot: number }>;
 
-export type MarketActionMsg =
-  | Tagged<"List", { kind: ItemKind; count: number; price_each: number }>
-  | Tagged<"Buy", { listing_id: number; count: number }>
-  | Tagged<"Cancel", { listing_id: number }>
-  | TaggedUnit<"Refresh">;
+// ---------------------------------------------------------------------------
+// Exchange (order-book spot market)
+// ---------------------------------------------------------------------------
+
+/**
+ * One tradeable exchange asset: every item kind plus the Shards and Energy
+ * currencies. WILD is the quote currency and is never an asset.
+ */
+export type AssetMsg =
+  | Tagged<"Item", ItemKind>
+  | TaggedUnit<"Shards">
+  | TaggedUnit<"Energy">;
+
+/** Order side: Bid buys the asset with MILD, Ask sells it. */
+export type SideMsg = "Bid" | "Ask";
+
+/**
+ * Order pricing: limit orders carry a WILD-per-unit price and may rest on
+ * the book; market orders take whatever the book offers (IOC).
+ */
+export type OrderKindMsg = Tagged<"Limit", { price: number }> | TaggedUnit<"Market">;
+
+/** One (venue, asset) order book — the BookSub target. */
+export interface BookTarget {
+  venue: number;
+  asset: AssetMsg;
+}
+
+export type ExchangeActionMsg =
+  | Tagged<
+      "Place",
+      {
+        venue: number;
+        asset: AssetMsg;
+        side: SideMsg;
+        order: OrderKindMsg;
+        qty: number;
+        /** MILD budget for market bids (required there, ignored elsewhere). */
+        max_spend: number | null;
+      }
+    >
+  | Tagged<"Cancel", { order_id: number }>
+  | Tagged<"Claim", { venue: number }>;
 
 /** A bankable currency (at-risk when carried, safe when banked). */
 export type Currency = "Mild" | "Shards" | "Energy";
@@ -292,10 +330,11 @@ export type C2S =
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
   | Tagged<"CollectProduction", { building: number }>
   | Tagged<"CancelProduction", { building: number; job_id: number }>
-  | Tagged<"Market", MarketActionMsg>
+  | Tagged<"Exchange", ExchangeActionMsg>
+  | Tagged<"MarketsSub", { on: boolean }>
+  | Tagged<"BookSub", { market: BookTarget | null }>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
-  | Tagged<"ItemMarketSub", { kind: ItemKind | null }>
   | Tagged<"MapIntelSub", { on: boolean }>
   | Tagged<"HireAgent", { agent_id: string }>
   | Tagged<"DismissAgent", { agent_id: string }>
@@ -320,12 +359,131 @@ export interface ProductionJob {
   owner?: string;
 }
 
-export interface MarketListing {
+/** One markets-index row: an asset's cross-venue rollup (MarketsState). */
+export interface MarketRow {
+  asset: AssetMsg;
+  /** Short uppercase ticker ("IRON", "SHRD", "NRG", ...). */
+  ticker: string;
+  /** Most recent trade price across every venue (0 = never traded). */
+  last: number;
+  /** 24h change in basis points (+250 = +2.50%); 0 with no reference. */
+  change_24h_bp: number;
+  /** 24h volume summed across venues. */
+  volume_24h_wild: number;
+  volume_24h_units: number;
+  /** Best bid/ask across every venue's book (0 = side empty everywhere). */
+  best_bid: number;
+  best_ask: number;
+  /** Per-venue breakdown (venues with a trade or a live book only). */
+  venues: VenuePrice[];
+}
+
+/** One venue's line in a market row's arbitrage breakdown. */
+export interface VenuePrice {
+  venue: number;
+  /** Last trade price at this venue (0 = never traded here). */
+  last: number;
+  best_bid: number;
+  best_ask: number;
+  volume_24h_wild: number;
+}
+
+/** Venue metadata: names the venue rows, anchors distance computations. */
+export interface VenueInfo {
+  venue: number;
+  name: string;
+  /** World-space anchor of the venue's Market Terminal (meters). */
+  x: number;
+  z: number;
+}
+
+/** Trailing 24h stats for one (venue, asset) book. */
+export interface BookStatsMsg {
+  /** 24h high/low (0 = no trades in the window). */
+  high_24h: number;
+  low_24h: number;
+  volume_24h_wild: number;
+  volume_24h_units: number;
+  /** 24h change in basis points (see MarketRow.change_24h_bp). */
+  change_24h_bp: number;
+}
+
+/** One minute OHLCV candle for the price chart. */
+export interface CandleMsg {
+  /** Bucket start, unix milliseconds. */
+  t: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume_units: number;
+  volume_wild: number;
+}
+
+/** One trade-tape print. */
+export interface TapeMsg {
+  /** Unix milliseconds when the fill executed. */
+  t: number;
+  price: number;
+  qty: number;
+  /** The aggressor's side: Bid prints as a buy, Ask as a sell. */
+  side: SideMsg;
+}
+
+/** One of the receiving player's own exchange orders. */
+export interface OrderMsg {
   id: number;
-  seller: string;
-  kind: ItemKind;
-  count: number;
-  price_each: number;
+  venue: number;
+  asset: AssetMsg;
+  side: SideMsg;
+  /** Limit price; 0 for market orders (which never rest). */
+  price: number;
+  qty: number;
+  filled: number;
+  /** Unix milliseconds when the order was placed. */
+  placed_ms: number;
+}
+
+/** Un-claimed settlement contents at one venue (claim at its terminal). */
+export interface InboxMsg {
+  mild: number;
+  assets: AssetQty[];
+}
+
+/** One asset quantity line in a settlement inbox. */
+export interface AssetQty {
+  asset: AssetMsg;
+  qty: number;
+}
+
+/** A settlement inbox tagged with its venue (MyExchangeState). */
+export interface VenueInbox {
+  venue: number;
+  inbox: InboxMsg;
+}
+
+/** What happened to a resting order (OrderUpdate.kind). */
+export type OrderUpdateKind = "Placed" | "Filled" | "Partial" | "Cancelled";
+
+/** Full snapshot of one (venue, asset) book (S2C BookState payload). */
+export interface BookStateMsg {
+  venue: number;
+  asset: AssetMsg;
+  /** Bid levels as [price, qty], best (highest) first, top ~20. */
+  bids: [number, number][];
+  /** Ask levels as [price, qty], best (lowest) first, top ~20. */
+  asks: [number, number][];
+  /** Most recent trade price here (0 = never traded). */
+  last: number;
+  stats: BookStatsMsg;
+  /** Minute candles, oldest first (bounded chart window, ~3h). */
+  candles: CandleMsg[];
+  /** Recent prints, newest first (last ~30). */
+  tape: TapeMsg[];
+  /** The receiving player's open orders on THIS book only. */
+  my_orders: OrderMsg[];
+  /** The receiving player's settlement inbox at this venue. */
+  my_inbox: InboxMsg;
 }
 
 /** One controlled region: control 1 = player-held, 2 = enemy-held. */
@@ -496,61 +654,6 @@ export interface ItemSupply {
   burned: number;
 }
 
-/**
- * One time bucket of market fill prices (sparse: only minutes with trades).
- * Mirror of wilder-types PriceBucket.
- */
-export interface PriceBucket {
-  /** Bucket start, unix milliseconds. */
-  t: number;
-  /** Volume-weighted average fill price (MILD per unit). */
-  avg: number;
-  min: number;
-  max: number;
-  /** Units traded. */
-  units: number;
-  /** MILD volume (price x units summed). */
-  wild: number;
-  /** Number of fills. */
-  fills: number;
-}
-
-/**
- * One executed market fill for the per-item trade tape.
- * Mirror of wilder-types MarketFill.
- */
-export interface MarketFill {
-  /** Unix milliseconds when the fill executed. */
-  t: number;
-  /** MILD per unit. */
-  price_each: number;
-  count: number;
-  buyer: string;
-  seller: string;
-}
-
-/** Market detail for one item kind (economy dashboard drill-in). */
-export interface ItemMarketState {
-  kind: ItemKind;
-  /** Fill-price buckets, oldest first. */
-  series: PriceBucket[];
-  /** Most recent fill price (0 = never traded). */
-  last_price: number;
-  /** Cheapest live ask on the book (0 = nothing listed). */
-  best_ask: number;
-  /** Units currently listed on the book. */
-  listed_units: number;
-  total_fills: number;
-  total_units: number;
-  total_wild: number;
-  supply: ItemSupply;
-  /** NPC vendor reference prices (0 = untraded that way). */
-  vendor_buy: number;
-  vendor_sell: number;
-  /** Individual recent fills, newest first (the trade tape). */
-  recent_fills: MarketFill[];
-}
-
 /** Aggregate economy snapshot pushed to dashboard subscribers. */
 export interface EconomyStats {
   block: number;
@@ -710,8 +813,20 @@ export type S2C =
         energy_used?: number;
       }
     >
-  | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
-  | Tagged<"MarketResult", { ok: boolean; error: string | null }>
+  | Tagged<"MarketsState", { rows: MarketRow[]; venues: VenueInfo[] }>
+  | Tagged<"BookState", BookStateMsg>
+  | Tagged<"OrderResult", { ok: boolean; error: string | null }>
+  | Tagged<
+      "OrderUpdate",
+      {
+        order_id: number;
+        kind: OrderUpdateKind;
+        /** Execution price/units of the fill that triggered this (fills only). */
+        fill_price: number | null;
+        fill_qty: number | null;
+      }
+    >
+  | Tagged<"MyExchangeState", { orders: OrderMsg[]; inboxes: VenueInbox[] }>
   | Tagged<
       "VendorState",
       {
@@ -740,7 +855,6 @@ export type S2C =
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"EconomyState", { stats: EconomyStats; recent: EconTx[] }>
   | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>
-  | Tagged<"ItemMarketState", ItemMarketState>
   | Tagged<"MapIntel", { blips: AgentBlip[] }>
   | Tagged<"MapCensus", { blips: AgentBlip[] }>
   | Tagged<"AgentDots", { blips: AgentBlip[] }>

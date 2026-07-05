@@ -14,8 +14,6 @@ import {
   FactionId,
   FactionInfo,
   ItemKind,
-  MarketFill,
-  PriceBucket,
   TxAmount,
   TxKind,
   TxParty,
@@ -179,7 +177,7 @@ function SupplyPanel({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
     <div className="econ-panel econ-supply">
       <div className="econ-panel-title">
         ITEM SUPPLY
-        <span className="econ-panel-sub">CLICK AN ITEM FOR ITS MARKET</span>
+        <span className="econ-panel-sub">MARKET DETAIL MOVES TO THE TRADE SCREEN</span>
       </div>
       <div className="econ-tabs">
         {CATEGORY_ORDER.map((c) => (
@@ -422,8 +420,26 @@ function TxFeed() {
 }
 
 // ---------------------------------------------------------------------------
-// Item market drill-in (ItemMarketSub / ItemMarketState)
+// Price chart (kept for Phase 4: the exchange TradeScreen extends this SVG
+// chart, fed from BookState candles instead of the retired item drill-in)
 // ---------------------------------------------------------------------------
+
+/** One chart bucket. Local shape now that the listing-market wire type is
+ * gone; Phase 4 maps exchange `CandleMsg`s onto it. */
+export interface PriceBucket {
+  /** Bucket start, unix milliseconds. */
+  t: number;
+  /** Volume-weighted average price (MILD per unit). */
+  avg: number;
+  min: number;
+  max: number;
+  /** Units traded. */
+  units: number;
+  /** MILD volume (price x units summed). */
+  wild: number;
+  /** Number of fills. */
+  fills: number;
+}
 
 type RangeId = "1h" | "6h" | "24h" | "all";
 
@@ -600,181 +616,9 @@ function PriceChart({ buckets, rangeMs }: { buckets: PriceBucket[]; rangeMs: num
   );
 }
 
-/**
- * Live per-trade tape: each executed fill (time, price, size, seller and
- * buyer), newest first, streamed with ItemMarketState while the page is open.
- */
-function TradeTape({ fills }: { fills: MarketFill[] }) {
-  if (fills.length === 0) {
-    return <div className="econ-empty">No trades recorded yet.</div>;
-  }
-  return (
-    <div className="econ-tape">
-      <div className="econ-tape-row econ-tape-head">
-        <span>TIME</span>
-        <span>PRICE</span>
-        <span>QTY</span>
-        <span>SELLER</span>
-        <span>BUYER</span>
-      </div>
-      <div className="econ-tape-scroll">
-        {fills.map((f, i) => (
-          <div className="econ-tape-row" key={`${f.t}-${i}`}>
-            <span className="econ-tape-time">
-              {new Date(f.t).toLocaleTimeString(undefined, {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </span>
-            <span className="num econ-tape-price">{f.price_each.toLocaleString()} MILD</span>
-            <span className="num">{f.count.toLocaleString()}</span>
-            <span className="econ-tape-name">{f.seller}</span>
-            <span className="econ-tape-name">{f.buyer}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ItemStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="econ-item-stat">
-      <span className="econ-item-stat-label">{label}</span>
-      <span className="num econ-item-stat-value" style={tone ? { color: tone } : undefined}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-/**
- * CoinMarketCap-style drill-in for one item kind: header (icon, name, ticker,
- * description, live price + range change), the price/volume chart and the
- * market detail stats. Data streams via ItemMarketSub while open.
- */
-function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }) {
-  const data = useGame((s) => (s.itemMarket?.kind === kind ? s.itemMarket : null));
-  const [range, setRange] = useState<RangeId>("6h");
-  const info = ITEM_INFO[kind];
-  const rangeMs = RANGES.find((r) => r.id === range)?.ms ?? null;
-
-  const series = data?.series ?? [];
-  const inRange = useMemo(() => {
-    if (rangeMs === null) return series;
-    const t0 = Date.now() - rangeMs;
-    return series.filter((b) => b.t >= t0);
-  }, [series, rangeMs]);
-
-  // Change over the visible window (first vs last bucket average).
-  const change =
-    inRange.length >= 2 && inRange[0].avg > 0
-      ? ((inRange[inRange.length - 1].avg - inRange[0].avg) / inRange[0].avg) * 100
-      : null;
-  const rangeVolume = inRange.reduce((n, b) => n + b.wild, 0);
-  const rangeUnits = inRange.reduce((n, b) => n + b.units, 0);
-  const rangeFills = inRange.reduce((n, b) => n + b.fills, 0);
-
-  const n = (v: number | undefined) => (v ?? 0).toLocaleString();
-  const wildOrDash = (v: number | undefined) => (v ? `${v.toLocaleString()} MILD` : "—");
-  const circulating = (data?.supply.minted ?? 0) - (data?.supply.burned ?? 0);
-
-  return (
-    <div className="econ-item">
-      <div className="econ-item-head">
-        <div className="econ-tab econ-item-back" role="button" onClick={onBack}>
-          ◀ ALL ITEMS
-        </div>
-        <span
-          className="econ-item-glyph"
-          style={{ borderColor: ECON_CAT_COLOR[info.category] }}
-        >
-          <ItemIcon kind={kind} size={40} />
-        </span>
-        <div className="econ-item-id">
-          <div className="econ-item-name">
-            {info.label}
-            <span className="econ-item-ticker">{info.ticker}</span>
-            <span className="econ-item-cat" style={{ color: ECON_CAT_COLOR[info.category] }}>
-              {CATEGORY_LABEL[info.category]}
-            </span>
-          </div>
-          <div className="econ-item-desc">{info.desc}</div>
-        </div>
-        <div className="econ-item-price">
-          <div className="econ-item-price-value">
-            {data && data.last_price > 0 ? `${n(data.last_price)} MILD` : "NO TRADES"}
-          </div>
-          {change !== null && (
-            <div
-              className="econ-item-change"
-              style={{ color: change >= 0 ? CHART_UP : CHART_DOWN }}
-            >
-              {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(1)}% ({RANGES.find((r) => r.id === range)?.label})
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="econ-item-body">
-        <div className="econ-panel econ-item-chart-panel">
-          <div className="econ-panel-title">
-            PRICE
-            <span className="econ-panel-sub">
-              {data === null ? "LOADING…" : `MARKET FILLS · ${n(rangeFills)} IN WINDOW`}
-            </span>
-          </div>
-          <div className="econ-tabs">
-            {RANGES.map((r) => (
-              <div
-                key={r.id}
-                className={`econ-tab ${range === r.id ? "active" : ""}`}
-                onClick={() => setRange(r.id)}
-              >
-                {r.label}
-              </div>
-            ))}
-          </div>
-          <PriceChart buckets={series} rangeMs={rangeMs} />
-        </div>
-
-        <div className="econ-panel econ-item-tape-panel">
-          <div className="econ-panel-title">
-            RECENT TRADES
-            <span className="econ-panel-sub">
-              {data === null ? "LOADING…" : `LAST ${n(data.recent_fills.length)} FILLS`}
-            </span>
-          </div>
-          <TradeTape fills={data?.recent_fills ?? []} />
-        </div>
-
-        <div className="econ-panel econ-item-stats">
-          <div className="econ-panel-title">MARKET DETAILS</div>
-          <ItemStat label="LAST PRICE" value={wildOrDash(data?.last_price)} tone="#8fd6ff" />
-          <ItemStat label="BEST ASK" value={wildOrDash(data?.best_ask)} />
-          <ItemStat label="LISTED ON BOOK" value={`${n(data?.listed_units)} units`} />
-          <ItemStat
-            label={`VOLUME (${RANGES.find((r) => r.id === range)?.label})`}
-            value={`${n(rangeVolume)} MILD`}
-          />
-          <ItemStat label={`UNITS (${RANGES.find((r) => r.id === range)?.label})`} value={n(rangeUnits)} />
-          <div className="econ-item-stat-gap" />
-          <ItemStat label="TRADES (ALL TIME)" value={n(data?.total_fills)} />
-          <ItemStat label="UNITS TRADED" value={n(data?.total_units)} />
-          <ItemStat label="MILD VOLUME" value={`${n(data?.total_wild)} MILD`} />
-          <div className="econ-item-stat-gap" />
-          <ItemStat label="ISSUED" value={n(data?.supply.minted)} />
-          <ItemStat label="BURNED" value={n(data?.supply.burned)} tone="#ff6a7c" />
-          <ItemStat label="CIRCULATING" value={circulating.toLocaleString()} tone="#7be0c2" />
-          <div className="econ-item-stat-gap" />
-          <ItemStat label="VENDOR SELLS AT" value={wildOrDash(data?.vendor_buy)} />
-          <ItemStat label="VENDOR PAYS" value={wildOrDash(data?.vendor_sell)} />
-        </div>
-      </div>
-    </div>
-  );
-}
+// The per-item drill-in (ItemMarketView + TradeTape) rode the retired
+// ItemMarketSub/ItemMarketState messages; Phase 4 rebuilds it on exchange
+// data (MarketsState/BookState) inside the Trade screen.
 
 // ---------------------------------------------------------------------------
 // Leaderboards (LeaderboardState pushes while subscribed)
@@ -1117,10 +961,6 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
   const isLedger = useGame((s) => s.menuTab === "economy");
   // Economy tab sub-view: transaction ledger (default) or the Economy Map.
   const [subTab, setSubTab] = useState<EconSubTab>("ledger");
-  // Item market drill-in: which kind's detail page is showing (ledger tab).
-  const [selected, setSelected] = useState<ItemKind | null>(null);
-  const selectedRef = useRef(selected);
-  selectedRef.current = selected;
   // Economy Map chain selection (lifted so Escape clears it before closing).
   const [mapNode, setMapNode] = useState<string | null>(null);
   const subTabRef = useRef(subTab);
@@ -1159,8 +999,6 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
       if (e.code === "Escape") {
         if (isLedgerRef.current && subTabRef.current === "map" && mapNodeRef.current) {
           setMapNode(null);
-        } else if (isLedgerRef.current && subTabRef.current === "ledger" && selectedRef.current) {
-          setSelected(null);
         } else {
           close();
         }
@@ -1169,17 +1007,6 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
-
-  // Watch the selected item's market while its detail page is up: the server
-  // answers with a full ItemMarketState and re-pushes on new fills.
-  useEffect(() => {
-    if (!open || !joined || !isLedger || !selected) return;
-    connection.send({ t: "ItemMarketSub", d: { kind: selected } });
-    return () => {
-      connection.send({ t: "ItemMarketSub", d: { kind: null } });
-      useGame.getState().set({ itemMarket: null });
-    };
-  }, [open, joined, isLedger, selected, connection]);
 
   if (!open) return null;
 
@@ -1204,12 +1031,13 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
           </div>
           {subTab === "map" ? (
             <ProductionMap selected={mapNode} onSelect={setMapNode} />
-          ) : selected ? (
-            <ItemMarketView kind={selected} onBack={() => setSelected(null)} />
           ) : (
             <div className="econ-body">
               <TxFeed />
-              <SupplyPanel onSelect={setSelected} />
+              {/* The per-item market drill-in moved off the dashboard with
+                  the listing protocol; Phase 4 rebuilds it on exchange data
+                  in the Trade screen. */}
+              <SupplyPanel onSelect={() => {}} />
             </div>
           )}
         </>

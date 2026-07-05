@@ -3,8 +3,8 @@
 //  - GameCanvas ANDs it into its frameloop pause condition (no GPU work while
 //    the PWA is backgrounded),
 //  - the live-subscription effects (AgentSub, AgentDetailSub, WatchAgent,
-//    MapIntelSub, EconomySub, ItemMarketSub) gate on it, so the active tab's
-//    streams are turned off on hide and restored on return.
+//    MapIntelSub, EconomySub) gate on it, so the active tab's streams are
+//    turned off on hide and restored on return.
 // The WebSocket itself stays open; if the OS kills it in the background the
 // existing auto-reconnect + `connected`-keyed effects resubscribe everything.
 

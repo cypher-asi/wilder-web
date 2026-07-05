@@ -1,8 +1,8 @@
 // Mobile Economy tab: phone-first relayout of the desktop economy dashboard.
-// Swipeable KPI cards, the item-supply list with a stacked item drill-in page
-// (price chart + market details + recent fills), and the live transaction
-// feed. Owns the EconomySub lifecycle while mounted; the drill-in page owns
-// its ItemMarketSub, mirroring the desktop dashboard's plumbing.
+// Swipeable KPI cards, the item-supply list and the live transaction feed.
+// Owns the EconomySub lifecycle while mounted. The per-item drill-in page
+// rode the retired ItemMarketSub protocol; Phase 4 rebuilds it on exchange
+// data (MarketsState/BookState) in the mobile Trade tab.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
@@ -39,7 +39,6 @@ export function EconomyTab({ connection }: { connection: GameConnection }) {
   // the app is backgrounded.
   const joined = useGame((s) => s.joined);
   const appVisible = useGame((s) => s.appVisible);
-  const [selected, setSelected] = useState<ItemKind | null>(null);
   const [section, setSection] = useState<Section>("supply");
 
   // Live ledger stream while the tab is up (snapshot + per-tick batches).
@@ -50,20 +49,6 @@ export function EconomyTab({ connection }: { connection: GameConnection }) {
       connection.send({ t: "EconomySub", d: { on: false } });
     };
   }, [joined, appVisible, connection]);
-
-  // Item drill-in stream follows the open detail page.
-  useEffect(() => {
-    if (!selected || !joined || !appVisible) return;
-    connection.send({ t: "ItemMarketSub", d: { kind: selected } });
-    return () => {
-      connection.send({ t: "ItemMarketSub", d: { kind: null } });
-      useGame.getState().set({ itemMarket: null });
-    };
-  }, [selected, joined, appVisible, connection]);
-
-  if (selected) {
-    return <ItemDetailPage kind={selected} onBack={() => setSelected(null)} />;
-  }
 
   return (
     <div className="m-econ">
@@ -87,7 +72,7 @@ export function EconomyTab({ connection }: { connection: GameConnection }) {
           ACTIVITY
         </button>
       </div>
-      {section === "supply" ? <SupplyList onSelect={setSelected} /> : <MobileTxFeed />}
+      {section === "supply" ? <SupplyList /> : <MobileTxFeed />}
     </div>
   );
 }
@@ -152,7 +137,7 @@ function KpiRow() {
 
 const ALL_KINDS = Object.keys(ITEM_INFO) as ItemKind[];
 
-function SupplyList({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
+function SupplyList() {
   const economy = useGame((s) => s.economy);
   const [category, setCategory] = useState<ItemCategory | "all">("all");
 
@@ -183,13 +168,9 @@ function SupplyList({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
         ))}
       </div>
       <div className="m-econ-list m-scroll">
+        {/* Rows are inert until Phase 4 wires the drill-in to the Trade tab. */}
         {rows.map((r) => (
-          <button
-            key={r.kind}
-            type="button"
-            className="m-econ-item-row"
-            onClick={() => onSelect(r.kind)}
-          >
+          <div key={r.kind} className="m-econ-item-row">
             <i
               className="econ-supply-tick"
               style={{ background: ECON_CAT_COLOR[ITEM_INFO[r.kind].category] }}
@@ -205,8 +186,7 @@ function SupplyList({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
                 {fmtMild(r.minted)} issued · {fmtMild(r.burned)} burned
               </span>
             </span>
-            <span className="m-econ-item-chev">›</span>
-          </button>
+          </div>
         ))}
       </div>
     </>
@@ -292,173 +272,6 @@ function MobileTxFeed() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Item drill-in page (stacked navigation, like the Agents tab detail)
-// ---------------------------------------------------------------------------
-
-/** Simple inline-SVG price chart: avg-price polyline with an area fill.
- * Deliberately lighter than the desktop PriceChart (no hover/crosshair). */
-function MiniPriceChart({ series }: { series: { t: number; avg: number }[] }) {
-  if (series.length === 0) {
-    return <div className="m-ag-note">No trades recorded yet.</div>;
-  }
-  const W = 320;
-  const H = 120;
-  const PAD = 6;
-  let yMin = Infinity;
-  let yMax = -Infinity;
-  for (const b of series) {
-    yMin = Math.min(yMin, b.avg);
-    yMax = Math.max(yMax, b.avg);
-  }
-  const spread = Math.max(yMax - yMin, Math.max(1, yMax * 0.05));
-  yMin = Math.max(0, yMin - spread * 0.1);
-  yMax = yMax + spread * 0.1;
-  const t0 = series[0].t;
-  const t1 = series[series.length - 1].t;
-  const x = (t: number) =>
-    PAD + ((t - t0) / Math.max(1, t1 - t0)) * (W - PAD * 2);
-  const y = (v: number) =>
-    PAD + (1 - (v - yMin) / Math.max(1e-6, yMax - yMin)) * (H - PAD * 2);
-  const points = series.map((b) => `${x(b.t).toFixed(1)},${y(b.avg).toFixed(1)}`).join(" ");
-  const rising = series[series.length - 1].avg >= series[0].avg;
-  const color = series.length > 1 ? (rising ? "#7be0c2" : "#ff6a7c") : "#4fc3ff";
-  const area = `${points} ${x(t1).toFixed(1)},${H - PAD} ${x(t0).toFixed(1)},${H - PAD}`;
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="m-econ-chart">
-      <polygon points={area} fill={color} opacity="0.12" />
-      <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
-      {series.length === 1 && (
-        <circle cx={x(series[0].t)} cy={y(series[0].avg)} r="3" fill={color} />
-      )}
-      <text x={W - PAD} y={y(yMax) + 10} textAnchor="end" fill="#7f8ea0" fontSize="10">
-        {fmtMild(Math.round(yMax))}
-      </text>
-      <text x={W - PAD} y={H - PAD - 3} textAnchor="end" fill="#7f8ea0" fontSize="10">
-        {fmtMild(Math.round(yMin))}
-      </text>
-    </svg>
-  );
-}
-
-function DetailStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="m-econ-stat">
-      <span className="m-econ-stat-label">{label}</span>
-      <span className="m-econ-stat-value num" style={tone ? { color: tone } : undefined}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function ItemDetailPage({ kind, onBack }: { kind: ItemKind; onBack: () => void }) {
-  const data = useGame((s) => (s.itemMarket?.kind === kind ? s.itemMarket : null));
-  const info = ITEM_INFO[kind];
-  const wildOrDash = (v: number | undefined) => (v ? `${fmtMild(v)} MILD` : "—");
-  const n = (v: number | undefined) => fmtMild(v ?? 0);
-  const series = data?.series ?? [];
-  const change =
-    series.length >= 2 && series[0].avg > 0
-      ? ((series[series.length - 1].avg - series[0].avg) / series[0].avg) * 100
-      : null;
-  const circulating = (data?.supply.minted ?? 0) - (data?.supply.burned ?? 0);
-
-  return (
-    <div className="m-econ m-econ-detail m-scroll">
-      <div className="m-ag-detail-nav">
-        <button type="button" className="m-ag-back" onClick={onBack}>
-          ‹ ECONOMY
-        </button>
-      </div>
-
-      <div className="m-econ-detail-head">
-        <span
-          className="m-econ-detail-glyph"
-          style={{ borderColor: ECON_CAT_COLOR[info.category] }}
-        >
-          <ItemIcon kind={kind} size={34} />
-        </span>
-        <div className="m-econ-detail-id">
-          <div className="m-econ-detail-name">
-            {info.label}
-            <span className="m-econ-item-ticker">{info.ticker}</span>
-          </div>
-          <div className="m-econ-detail-cat" style={{ color: ECON_CAT_COLOR[info.category] }}>
-            {CATEGORY_LABEL[info.category]}
-          </div>
-        </div>
-        <div className="m-econ-detail-price">
-          <div className="m-econ-detail-price-value">
-            {data === null ? "…" : data.last_price > 0 ? `${fmtMild(data.last_price)}` : "NO TRADES"}
-          </div>
-          {data !== null && data.last_price > 0 && (
-            <div className="m-econ-detail-price-cur">MILD</div>
-          )}
-          {change !== null && (
-            <div
-              className="m-econ-detail-change"
-              style={{ color: change >= 0 ? "#7be0c2" : "#ff6a7c" }}
-            >
-              {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(1)}%
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="m-econ-detail-desc">{info.desc}</div>
-
-      <div className="m-ag-sec">
-        <div className="ag-sec-title">PRICE · MARKET FILLS</div>
-        {data === null ? <div className="m-ag-note">LOADING MARKET…</div> : <MiniPriceChart series={series} />}
-      </div>
-
-      <div className="m-ag-sec">
-        <div className="ag-sec-title">MARKET DETAILS</div>
-        <div className="m-econ-stats">
-          <DetailStat label="LAST PRICE" value={wildOrDash(data?.last_price)} tone="#8fd6ff" />
-          <DetailStat label="BEST ASK" value={wildOrDash(data?.best_ask)} />
-          <DetailStat label="LISTED ON BOOK" value={`${n(data?.listed_units)} units`} />
-          <DetailStat label="TRADES (ALL TIME)" value={n(data?.total_fills)} />
-          <DetailStat label="UNITS TRADED" value={n(data?.total_units)} />
-          <DetailStat label="MILD VOLUME" value={`${n(data?.total_wild)} MILD`} />
-          <DetailStat label="ISSUED" value={n(data?.supply.minted)} />
-          <DetailStat label="BURNED" value={n(data?.supply.burned)} tone="#ff6a7c" />
-          <DetailStat label="CIRCULATING" value={fmtMild(circulating)} tone="#7be0c2" />
-          <DetailStat label="VENDOR SELLS AT" value={wildOrDash(data?.vendor_buy)} />
-          <DetailStat label="VENDOR PAYS" value={wildOrDash(data?.vendor_sell)} />
-        </div>
-      </div>
-
-      <div className="m-ag-sec">
-        <div className="ag-sec-title">RECENT FILLS</div>
-        <RecentFills fills={data?.recent_fills ?? []} />
-      </div>
-    </div>
-  );
-}
-
-function RecentFills({ fills }: { fills: { t: number; price_each: number; count: number; buyer: string; seller: string }[] }) {
-  if (fills.length === 0) {
-    return <div className="m-ag-note">No fills yet.</div>;
-  }
-  return (
-    <div className="m-econ-fills">
-      {fills.map((f, i) => (
-        <div key={`${f.t}-${i}`} className="m-econ-fill">
-          <span className="m-econ-fill-time num">
-            {new Date(f.t).toLocaleTimeString(undefined, {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
-          <span className="m-econ-fill-price num">{fmtMild(f.price_each)} MILD</span>
-          <span className="m-econ-fill-qty num">×{fmtMild(f.count)}</span>
-          <span className="m-econ-fill-names">
-            {f.seller} → {f.buyer}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+// The stacked item drill-in page (MiniPriceChart / ItemDetailPage /
+// RecentFills) was deleted with the ItemMarketSub protocol; Phase 4 rebuilds
+// the per-asset view on exchange BookState data.

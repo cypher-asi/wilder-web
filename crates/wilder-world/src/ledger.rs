@@ -260,6 +260,8 @@ impl Ledger {
     }
 
     /// Supply counters for one kind (zeroes when it never saw activity).
+    /// Only tests read single kinds; the dashboard ships the full list.
+    #[cfg(test)]
     pub fn item_supply(&self, kind: ItemKind) -> ItemSupply {
         let (minted, burned) = self.items.get(&kind).copied().unwrap_or((0, 0));
         ItemSupply { kind, minted, burned }

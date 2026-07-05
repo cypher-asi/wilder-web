@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { playGlitch } from "../assets/audio";
 import { ROLL_COOLDOWN } from "../game/collision";
 import { interiorRegistry } from "../game/interiors";
@@ -69,7 +69,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <BackpackBar />
           <InventoryScreen connection={connection} />
           <CraftingPanel connection={connection} />
-          <MarketPanel connection={connection} />
+          <MarketPanel />
           <VendorPanel connection={connection} />
           <DoorPrompt />
           <HoloMap connection={connection} />
@@ -937,179 +937,28 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
   );
 }
 
-function MarketPanel({ connection }: { connection: GameConnection }) {
+/** The listing-based market panel is retired with its wire protocol; Phase 4
+ * rebuilds trading as the exchange TradeScreen on MarketsState/BookState.
+ * Until then the terminal only shows a hint. */
+function MarketPanel() {
   const nearMarket = useGame((s) => s.nearMarket);
-  const marketOpen = useGame((s) => s.marketOpen);
-  const market = useGame((s) => s.market);
-  const inventory = useGame((s) => s.inventory);
-  const characterName = useGame((s) => s.characterName);
-  const set = useGame((s) => s.set);
-  const [listKind, setListKind] = useState<string>("");
-  const [listCount, setListCount] = useState("1");
-  const [listPrice, setListPrice] = useState("10");
-
   if (!nearMarket) return null;
-  if (!marketOpen) {
-    return (
-      <div
-        style={{
-          position: "absolute",
-          top: 120,
-          left: "50%",
-          transform: "translateX(-50%)",
-          fontSize: 12,
-          letterSpacing: "0.15em",
-          color: "var(--accent)",
-          textShadow: "0 0 10px rgba(79,195,255,0.5)",
-          cursor: "pointer",
-          pointerEvents: "auto",
-          background: "rgba(9,15,24,0.7)",
-          border: "1px solid var(--accent-dim)",
-          padding: "6px 14px",
-        }}
-        onClick={() => {
-          set({ marketOpen: true });
-          connection.send({ t: "Market", d: { t: "Refresh" } });
-        }}
-      >
-        MARKET — [E] TRADE
-      </div>
-    );
-  }
-
-  // Distinct sellable kinds currently in the inventory.
-  const kinds = [
-    ...new Set(
-      (inventory?.slots ?? []).filter((s) => s !== null).map((s) => s!.kind),
-    ),
-  ];
-  const selectedKind = kinds.includes(listKind as ItemKind) ? listKind : (kinds[0] ?? "");
-  const have = invCount(inventory, selectedKind);
-
-  function submitListing(event: FormEvent) {
-    event.preventDefault();
-    const count = Math.max(1, parseInt(listCount, 10) || 1);
-    const price = Math.max(1, parseInt(listPrice, 10) || 1);
-    if (!selectedKind) return;
-    connection.send({
-      t: "Market",
-      d: {
-        t: "List",
-        d: { kind: selectedKind as ItemKind, count, price_each: price },
-      },
-    });
-  }
-
   return (
-    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 420, bottom: 16, top: "auto" }}>
-      <h3>
-        Market
-        <span style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }} onClick={() => set({ marketOpen: false })}>
-          ✕
-        </span>
-      </h3>
-      <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 10 }}>
-        Wallet: {market?.wallet ?? 0} MILD
-      </div>
-
-      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>LISTINGS</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-        {(market?.listings ?? []).length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>No listings.</div>
-        )}
-        {(market?.listings ?? []).map((l) => {
-          const mine = l.seller === characterName;
-          const cost = l.price_each * l.count;
-          const canBuy = (market?.wallet ?? 0) >= cost;
-          return (
-            <div
-              key={l.id}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 8px",
-                border: "1px solid var(--steel-border)",
-                fontSize: 11,
-              }}
-            >
-              <span style={{ color: "var(--text)" }}>
-                {shortName(l.kind)} x{l.count}
-              </span>
-              <span style={{ color: "var(--text-dim)" }}>
-                {l.price_each} ea · {mine ? "you" : l.seller}
-              </span>
-              <span style={{ display: "flex", gap: 8 }}>
-                <span
-                  style={{
-                    color: canBuy ? "var(--accent)" : "var(--text-dim)",
-                    cursor: canBuy ? "pointer" : "default",
-                  }}
-                  onClick={() => {
-                    if (!canBuy) return;
-                    connection.send({
-                      t: "Market",
-                      d: { t: "Buy", d: { listing_id: l.id, count: l.count } },
-                    });
-                  }}
-                >
-                  BUY {cost}
-                </span>
-                {mine && (
-                  <span
-                    style={{ color: "var(--alert)", cursor: "pointer" }}
-                    onClick={() =>
-                      connection.send({
-                        t: "Market",
-                        d: { t: "Cancel", d: { listing_id: l.id } },
-                      })
-                    }
-                  >
-                    CANCEL
-                  </span>
-                )}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
-        SELL AN ITEM {selectedKind ? `(${have} held)` : ""}
-      </div>
-      <form onSubmit={submitListing} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <select
-          value={selectedKind}
-          onChange={(e) => setListKind(e.target.value)}
-          style={{ background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px", flex: 1 }}
-        >
-          {kinds.map((k) => (
-            <option key={k} value={k}>
-              {shortName(k)}
-            </option>
-          ))}
-        </select>
-        <input
-          value={listCount}
-          onChange={(e) => setListCount(e.target.value)}
-          style={{ width: 40, background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px" }}
-          title="Count"
-        />
-        <input
-          value={listPrice}
-          onChange={(e) => setListPrice(e.target.value)}
-          style={{ width: 50, background: "#0b121c", color: "var(--text)", border: "1px solid var(--steel-border)", fontSize: 11, padding: "3px 4px" }}
-          title="Price each (MILD)"
-        />
-        <button
-          type="submit"
-          disabled={!selectedKind}
-          style={{ background: "var(--accent-faint)", color: "var(--accent)", border: "1px solid var(--accent-dim)", fontSize: 11, padding: "3px 10px", cursor: "pointer" }}
-        >
-          LIST
-        </button>
-      </form>
+    <div
+      style={{
+        position: "absolute",
+        top: 120,
+        left: "50%",
+        transform: "translateX(-50%)",
+        fontSize: 12,
+        letterSpacing: "0.15em",
+        color: "var(--text-dim)",
+        background: "rgba(9,15,24,0.7)",
+        border: "1px solid var(--steel-border)",
+        padding: "6px 14px",
+      }}
+    >
+      MARKET TERMINAL — TRADE SCREEN COMING ONLINE
     </div>
   );
 }

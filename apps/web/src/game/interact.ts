@@ -24,7 +24,9 @@ export function openServicePanel(kind: EntityKind, entityId: number): void {
   if (kind === "MarketTerminal") {
     if (ui.marketOpen) return void ui.set({ marketOpen: false });
     ui.set({ marketOpen: true });
-    game.send?.({ t: "Market", d: { t: "Refresh" } });
+    // The server answers a terminal Interact with MyExchangeState (open
+    // orders + settlement inboxes); Phase 4's TradeScreen builds on it.
+    game.send?.({ t: "Interact", d: { entity_id: entityId } });
     return;
   }
   if (STATION_KINDS.has(kind)) {

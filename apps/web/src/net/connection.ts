@@ -596,22 +596,45 @@ export class GameConnection {
         ui.set({ production });
         break;
       }
-      case "MarketState": {
-        const prevWallet = useGame.getState().market?.wallet;
-        ui.set({ market: { listings: msg.d.listings, wallet: msg.d.wallet } });
-        if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
-          playCoin();
-          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} MILD`);
-        }
+      case "MarketsState": {
+        ui.set({ markets: { rows: msg.d.rows, venues: msg.d.venues } });
         break;
       }
-      case "MarketResult": {
+      case "BookState": {
+        ui.set({ book: msg.d });
+        break;
+      }
+      case "MyExchangeState": {
+        ui.set({ myExchange: { orders: msg.d.orders, inboxes: msg.d.inboxes } });
+        break;
+      }
+      case "OrderResult": {
         if (msg.d.ok) {
           playPurchase();
         } else {
           ui.pushChat({
             from: "system",
-            text: `Market: ${msg.d.error ?? "action failed"}`,
+            text: `Exchange: ${msg.d.error ?? "action failed"}`,
+            system: true,
+          });
+        }
+        break;
+      }
+      case "OrderUpdate": {
+        // A resting order changed while the player was away from the flow
+        // (maker fill, typically): coin SFX + a system-chat toast. Full
+        // state arrives via the MyExchangeState push that follows.
+        if (msg.d.kind === "Filled" || msg.d.kind === "Partial") {
+          playCoin();
+          const at =
+            msg.d.fill_qty !== null && msg.d.fill_price !== null
+              ? `: ${msg.d.fill_qty} @ ${msg.d.fill_price} MILD`
+              : "";
+          ui.pushChat({
+            from: "system",
+            text: `Order #${msg.d.order_id} ${
+              msg.d.kind === "Filled" ? "filled" : "partially filled"
+            }${at}. Settlement waits at the venue terminal.`,
             system: true,
           });
         }
@@ -796,10 +819,6 @@ export class GameConnection {
         ui.set({
           economy: { stats: msg.d.stats, feed: [...msg.d.recent].reverse() },
         });
-        break;
-      }
-      case "ItemMarketState": {
-        ui.set({ itemMarket: msg.d });
         break;
       }
       case "EconomyTxs": {

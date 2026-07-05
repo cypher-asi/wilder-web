@@ -60,17 +60,24 @@ pub enum C2S {
     /// Cancel one of the sender's own queued jobs at a building. Uncompleted
     /// units' inputs and Energy are refunded; the server validates ownership.
     CancelProduction { building: EntityId, job_id: u64 },
-    /// Market actions. Phase 3.
-    Market(MarketAction),
+    /// Order-book exchange action (place/cancel/claim). Every action
+    /// requires standing at the venue's Market Terminal (5 m / interior)
+    /// and is answered with `OrderResult`.
+    Exchange(ExchangeAction),
+    /// Subscribe/unsubscribe to the markets index: one ticker row per
+    /// asset, rolled up across venues. Subscribing answers immediately
+    /// with `MarketsState` + `MyExchangeState`, then re-pushes (throttled)
+    /// while trades land anywhere on the exchange.
+    MarketsSub { on: bool },
+    /// Watch one (venue, asset) order book. `Some` answers immediately
+    /// with a full `BookState` and re-pushes while that book changes;
+    /// `None` unsubscribes. Each connection watches at most one book.
+    BookSub { market: Option<BookTarget> },
     /// NPC vendor actions (Armory, Bodega, Bank...). Requires being in reach
     /// of the vendor building.
     Vendor { vendor: EntityId, action: VendorAction },
     /// Subscribe/unsubscribe to live economy ledger updates (K dashboard).
     EconomySub { on: bool },
-    /// Watch one item's market detail (price history, book, supply). `Some`
-    /// answers immediately with `ItemMarketState` and re-pushes on new fills;
-    /// `None` unsubscribes. Each connection watches at most one kind.
-    ItemMarketSub { kind: Option<ItemKind> },
     /// Subscribe/unsubscribe to whole-map agent blips (map filters). While
     /// on, the server streams `MapIntel` at ~1 Hz.
     MapIntelSub { on: bool },
@@ -146,13 +153,69 @@ pub enum Currency {
     Energy,
 }
 
+// ---------------------------------------------------------------------------
+// Exchange (order-book spot market)
+// ---------------------------------------------------------------------------
+
+/// One tradeable exchange asset on the wire: every item kind plus the
+/// Shards and Energy currencies. WILD is the quote currency and is never
+/// an asset. Mirrors `wilder_exchange::Asset` (protocol-owned so the
+/// exchange crates stay off the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d")]
+pub enum AssetMsg {
+    Item(ItemKind),
+    /// Salvage currency earned by destroying items.
+    Shards,
+    /// Charge currency earned from extractions and ammo caches.
+    Energy,
+}
+
+/// Order side: `Bid` buys the asset with MILD, `Ask` sells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SideMsg {
+    Bid,
+    Ask,
+}
+
+/// Order pricing: limit orders carry a WILD-per-unit price and may rest on
+/// the book; market orders take whatever the book offers (IOC — the
+/// unfilled remainder cancels and its escrow refunds immediately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d")]
+pub enum OrderKindMsg {
+    Limit { price: u32 },
+    Market,
+}
+
+/// One (venue, asset) order book — the `BookSub` target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookTarget {
+    pub venue: u16,
+    pub asset: AssetMsg,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
-pub enum MarketAction {
-    List { kind: ItemKind, count: u32, price_each: u32 },
-    Buy { listing_id: u64, count: u32 },
-    Cancel { listing_id: u64 },
-    Refresh,
+pub enum ExchangeAction {
+    /// Place an order at a venue. Escrow leaves the sender's holdings on
+    /// placement: limit bids lock `price * qty` MILD, market bids lock the
+    /// `max_spend` MILD budget (required for them, ignored elsewhere), and
+    /// asks lock `qty` units of the asset.
+    Place {
+        venue: u16,
+        asset: AssetMsg,
+        side: SideMsg,
+        order: OrderKindMsg,
+        qty: u32,
+        max_spend: Option<u64>,
+    },
+    /// Cancel one of the sender's resting orders (at its venue's
+    /// terminal). The unfilled remainder's escrow refunds immediately.
+    Cancel { order_id: u64 },
+    /// Drain the sender's settlement inbox at a venue into purse and pack.
+    /// Items that don't fit go straight back into the inbox.
+    Claim { venue: u16 },
 }
 
 /// Server -> Client messages.
@@ -221,8 +284,34 @@ pub enum S2C {
         #[serde(default)]
         energy_used: u32,
     },
-    MarketState { listings: Vec<MarketListing>, wallet: u32 },
-    MarketResult { ok: bool, error: Option<String> },
+    /// The markets index for `MarketsSub` subscribers: one ticker row per
+    /// asset (cross-venue rollup) plus venue metadata so the client can
+    /// name venues and compute terminal distances. Sent on subscribe,
+    /// re-pushed (throttled) while trades land.
+    MarketsState { rows: Vec<MarketRow>, venues: Vec<VenueInfo> },
+    /// Snapshot of the watched (venue, asset) book for the `BookSub`
+    /// subscriber: depth, 24 h stats, candles, tape, plus the receiving
+    /// player's own open orders and settlement inbox there.
+    BookState(BookStateMsg),
+    /// Outcome of an `ExchangeAction` (place/cancel/claim).
+    OrderResult { ok: bool, error: Option<String> },
+    /// Toast-level event for the OWNING player when one of their resting
+    /// orders changes while they're away from the flow that caused it
+    /// (a maker fill, typically). Full state arrives separately via
+    /// `MyExchangeState`/`BookState` pushes.
+    OrderUpdate {
+        order_id: u64,
+        kind: OrderUpdateKind,
+        /// Execution price of the fill that triggered this (fills only).
+        fill_price: Option<u32>,
+        /// Units executed in the fill that triggered this (fills only).
+        fill_qty: Option<u32>,
+    },
+    /// The receiving player's exchange-wide view: every open order plus
+    /// every non-empty settlement inbox across all venues. Sent on join,
+    /// on `MarketsSub`, and after any order event touching the player —
+    /// drives the Trade screen's global Open Orders / Settlement tabs.
+    MyExchangeState { orders: Vec<OrderMsg>, inboxes: Vec<VenueInbox> },
     /// A vendor's stock/prices plus the receiving player's wallet (sent on
     /// interact, refresh and after every vendor transaction).
     VendorState {
@@ -271,9 +360,6 @@ pub enum S2C {
     EconomyState { stats: EconomyStats, recent: Vec<EconTx> },
     /// Per-tick batch of new ledger transactions for subscribers.
     EconomyTxs { txs: Vec<EconTx>, stats: EconomyStats },
-    /// One item's market detail: sent on `ItemMarketSub` and re-pushed
-    /// (throttled) while new fills land for the watched kind.
-    ItemMarketState(ItemMarketState),
     /// Whole-map actor blips, streamed ~1 Hz to `MapIntelSub` subscribers.
     /// Only players and wild Wapes; faction agents ship once as `MapCensus`.
     MapIntel { blips: Vec<AgentBlip> },
@@ -337,40 +423,153 @@ pub struct ProductionJob {
     pub owner: String,
 }
 
+/// One markets-index row: an asset's cross-venue rollup for the Trade
+/// screen's markets table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketListing {
-    pub id: u64,
-    pub seller: String,
-    pub kind: ItemKind,
-    pub count: u32,
-    pub price_each: u32,
+pub struct MarketRow {
+    pub asset: AssetMsg,
+    /// Short uppercase ticker ("IRON", "SHRD", "NRG", ...).
+    pub ticker: String,
+    /// Most recent trade price across every venue (0 = never traded).
+    pub last: u32,
+    /// 24 h change in basis points (+250 = +2.50%); 0 with no reference
+    /// price. Basis points keep the wire integer-only.
+    pub change_24h_bp: i32,
+    /// 24 h volume summed across venues.
+    pub volume_24h_wild: u64,
+    pub volume_24h_units: u32,
+    /// Best bid/ask across every venue's book (0 = side empty everywhere).
+    pub best_bid: u32,
+    pub best_ask: u32,
+    /// Per-venue breakdown (only venues with a trade or a live book) —
+    /// the arbitrage row. Venue names live in `MarketsState.venues`.
+    pub venues: Vec<VenuePrice>,
 }
 
-/// Market detail for one item kind: the fill-price time series plus live
-/// order-book, supply and vendor-reference stats (economy dashboard drill-in).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemMarketState {
-    pub kind: ItemKind,
-    /// Fill-price buckets, oldest first (sparse: only minutes with trades).
-    pub series: Vec<PriceBucket>,
-    /// Most recent fill price (0 = never traded).
-    pub last_price: u32,
-    /// Cheapest live ask on the book (0 = nothing listed).
+/// One venue's line in a market row's arbitrage breakdown.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VenuePrice {
+    pub venue: u16,
+    /// Last trade price at this venue (0 = never traded here).
+    pub last: u32,
+    pub best_bid: u32,
     pub best_ask: u32,
-    /// Units currently listed on the book.
-    pub listed_units: u32,
-    /// Lifetime market fills / units / MILD volume for this kind.
-    pub total_fills: u64,
-    pub total_units: u64,
-    pub total_wild: u64,
-    /// Ledger supply counters (minted / burned).
-    pub supply: ItemSupply,
-    /// NPC vendor reference prices (0 = vendors don't trade it that way).
-    pub vendor_buy: u32,
-    pub vendor_sell: u32,
-    /// Individual recent fills, newest first (the trade tape).
-    #[serde(default)]
-    pub recent_fills: Vec<MarketFill>,
+    pub volume_24h_wild: u64,
+}
+
+/// Venue metadata: names the per-venue rows and lets the client compute
+/// the distance to each terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VenueInfo {
+    pub venue: u16,
+    pub name: String,
+    /// World-space anchor of the venue's Market Terminal (meters).
+    pub x: f32,
+    pub z: f32,
+}
+
+/// Trailing 24 h stats for one (venue, asset) book.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct BookStatsMsg {
+    /// 24 h high/low (0 = no trades in the window).
+    pub high_24h: u32,
+    pub low_24h: u32,
+    pub volume_24h_wild: u64,
+    pub volume_24h_units: u32,
+    /// 24 h change in basis points (see `MarketRow::change_24h_bp`).
+    pub change_24h_bp: i32,
+}
+
+/// One minute OHLCV candle for the price chart.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CandleMsg {
+    /// Bucket start, unix milliseconds.
+    pub t: u64,
+    pub open: u32,
+    pub high: u32,
+    pub low: u32,
+    pub close: u32,
+    pub volume_units: u32,
+    pub volume_wild: u64,
+}
+
+/// One trade-tape print.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TapeMsg {
+    /// Unix milliseconds when the fill executed.
+    pub t: u64,
+    pub price: u32,
+    pub qty: u32,
+    /// The aggressor's side: `Bid` prints as a buy, `Ask` as a sell.
+    pub side: SideMsg,
+}
+
+/// One of the receiving player's own exchange orders.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OrderMsg {
+    pub id: u64,
+    pub venue: u16,
+    pub asset: AssetMsg,
+    pub side: SideMsg,
+    /// Limit price; 0 for market orders (which never rest).
+    pub price: u32,
+    pub qty: u32,
+    pub filled: u32,
+    /// Unix milliseconds when the order was placed.
+    pub placed_ms: u64,
+}
+
+/// Un-claimed settlement contents at one venue: MILD proceeds plus asset
+/// units, claimable by interacting at that venue's terminal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InboxMsg {
+    pub mild: u64,
+    pub assets: Vec<AssetQty>,
+}
+
+/// One asset quantity line in a settlement inbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AssetQty {
+    pub asset: AssetMsg,
+    pub qty: u32,
+}
+
+/// A settlement inbox tagged with its venue (`MyExchangeState`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VenueInbox {
+    pub venue: u16,
+    pub inbox: InboxMsg,
+}
+
+/// What happened to a resting order (`OrderUpdate::kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderUpdateKind {
+    Placed,
+    Filled,
+    Partial,
+    Cancelled,
+}
+
+/// Full snapshot of one (venue, asset) book (`S2C::BookState` payload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookStateMsg {
+    pub venue: u16,
+    pub asset: AssetMsg,
+    /// Bid levels as (price, qty), best (highest) first, top ~20.
+    pub bids: Vec<(u32, u32)>,
+    /// Ask levels as (price, qty), best (lowest) first, top ~20.
+    pub asks: Vec<(u32, u32)>,
+    /// Most recent trade price here (0 = never traded).
+    pub last: u32,
+    pub stats: BookStatsMsg,
+    /// Minute candles, oldest first (bounded chart window, ~3 h).
+    pub candles: Vec<CandleMsg>,
+    /// Recent prints, newest first (last ~30).
+    pub tape: Vec<TapeMsg>,
+    /// The receiving player's open orders on THIS book only.
+    pub my_orders: Vec<OrderMsg>,
+    /// The receiving player's settlement inbox at this venue.
+    pub my_inbox: InboxMsg,
 }
 
 /// A vendor's price line for one item kind. `buy` is what the player pays per
@@ -874,6 +1073,70 @@ mod tests {
         let text = encode(&msg);
         let back: S2C = decode(&text).unwrap();
         matches!(back, S2C::Snapshot { .. });
+    }
+
+    /// Pins the exact JSON the TypeScript mirror produces/consumes for the
+    /// exchange messages (tag/content layout, tuple levels, Option fields).
+    #[test]
+    fn exchange_wire_shapes() {
+        // Place: unit-variant asset + tagged order kind + optional budget.
+        let place = C2S::Exchange(ExchangeAction::Place {
+            venue: 2,
+            asset: AssetMsg::Item(ItemKind::Iron),
+            side: SideMsg::Bid,
+            order: OrderKindMsg::Limit { price: 7 },
+            qty: 3,
+            max_spend: None,
+        });
+        assert_eq!(
+            encode(&place),
+            r#"{"t":"Exchange","d":{"t":"Place","d":{"venue":2,"asset":{"t":"Item","d":"Iron"},"side":"Bid","order":{"t":"Limit","d":{"price":7}},"qty":3,"max_spend":null}}}"#
+        );
+        assert!(matches!(
+            decode::<C2S>(&encode(&place)).unwrap(),
+            C2S::Exchange(ExchangeAction::Place { venue: 2, qty: 3, .. })
+        ));
+
+        // BookSub: Some renders the target struct, None renders null.
+        let sub = C2S::BookSub {
+            market: Some(BookTarget { venue: 1, asset: AssetMsg::Shards }),
+        };
+        assert_eq!(
+            encode(&sub),
+            r#"{"t":"BookSub","d":{"market":{"venue":1,"asset":{"t":"Shards"}}}}"#
+        );
+        assert_eq!(
+            encode(&C2S::BookSub { market: None }),
+            r#"{"t":"BookSub","d":{"market":null}}"#
+        );
+
+        // Depth tuples render as [price, qty] arrays; unit enums as strings.
+        let book = S2C::BookState(BookStateMsg {
+            venue: 0,
+            asset: AssetMsg::Energy,
+            bids: vec![(5, 10)],
+            asks: vec![],
+            last: 5,
+            stats: BookStatsMsg::default(),
+            candles: vec![],
+            tape: vec![TapeMsg { t: 1, price: 5, qty: 2, side: SideMsg::Ask }],
+            my_orders: vec![],
+            my_inbox: InboxMsg { mild: 9, assets: vec![AssetQty { asset: AssetMsg::Energy, qty: 4 }] },
+        });
+        let json = encode(&book);
+        assert!(json.contains(r#""bids":[[5,10]]"#), "{json}");
+        assert!(json.contains(r#""side":"Ask""#), "{json}");
+        assert!(json.contains(r#""assets":[{"asset":{"t":"Energy"},"qty":4}]"#), "{json}");
+        assert!(matches!(decode::<S2C>(&json).unwrap(), S2C::BookState(b) if b.bids == vec![(5, 10)]));
+
+        // OrderUpdate kind is a bare string.
+        let update = S2C::OrderUpdate {
+            order_id: 4,
+            kind: OrderUpdateKind::Partial,
+            fill_price: Some(5),
+            fill_qty: Some(2),
+        };
+        assert!(encode(&update).contains(r#""kind":"Partial""#));
     }
 
     #[test]

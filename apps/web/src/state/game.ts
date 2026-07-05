@@ -21,13 +21,16 @@ import {
   EntityKind,
   EntitySpawnData,
   FactionInfo,
+  BookStateMsg,
   Inventory,
   ItemKind,
-  ItemMarketState,
   ItemStack,
   LeaderboardData,
-  MarketListing,
+  MarketRow,
+  OrderMsg,
   PoiInfo,
+  VenueInbox,
+  VenueInfo,
   ProductionJob,
   Vec3,
   VendorOffer,
@@ -497,9 +500,13 @@ interface UiState {
       at: number;
     }
   >;
-  /** Market snapshot (listings + wallet), refreshed by the server. */
-  market: { listings: MarketListing[]; wallet: number } | null;
-  /** Near the market terminal (enables the market panel). */
+  /** Markets index (ticker rows + venue metadata), MarketsSub stream. */
+  markets: { rows: MarketRow[]; venues: VenueInfo[] } | null;
+  /** Watched (venue, asset) book snapshot, BookSub stream. */
+  book: BookStateMsg | null;
+  /** The player's exchange-wide open orders + settlement inboxes. */
+  myExchange: { orders: OrderMsg[]; inboxes: VenueInbox[] } | null;
+  /** Near the market terminal (enables the trade UI's order entry). */
   nearMarket: boolean;
   /** Market panel visibility (auto-closes when leaving the terminal). */
   marketOpen: boolean;
@@ -531,8 +538,6 @@ interface UiState {
   vendorOpen: boolean;
   /** Live ledger snapshot: aggregate stats + tx feed (newest first). */
   economy: { stats: EconomyStats; feed: EconTx[] } | null;
-  /** Watched item's market detail (economy dashboard drill-in). */
-  itemMarket: ItemMarketState | null;
   /** Owned-agent roster (AgentSub stream; re-sent ~2 s while subscribed). */
   agentRoster: AgentSummary[] | null;
   /** Watched owned agent's full detail (AgentDetailSub stream, ~1 Hz). */
@@ -651,7 +656,9 @@ export const useGame: import("zustand").UseBoundStore<
   craftOpen: false,
   blueprints: [],
   production: {},
-  market: null,
+  markets: null,
+  book: null,
+  myExchange: null,
   nearMarket: false,
   marketOpen: false,
   pois: [],
@@ -663,7 +670,6 @@ export const useGame: import("zustand").UseBoundStore<
   nearVendor: null,
   vendorOpen: false,
   economy: null,
-  itemMarket: null,
   agentRoster: null,
   agentDetail: null,
   agentHireOffers: null,

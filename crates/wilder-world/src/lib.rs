@@ -257,8 +257,17 @@ const ZONE_BUCKET_SECS: f64 = 60.0;
 const ZONE_BUCKETS: usize = (ZONE_WINDOW_SECS / ZONE_BUCKET_SECS) as usize;
 /// Refresh leaderboards for economy subscribers every N ticks (~5 s).
 const LEADERBOARD_TICK_INTERVAL: u64 = 100;
-/// Re-push watched item market detail (on new fills) every N ticks (~1 s).
-const ITEM_MARKET_TICK_INTERVAL: u64 = 20;
+/// Re-push watched exchange books whose depth changed every N ticks (~1 s).
+const BOOK_TICK_INTERVAL: u64 = 20;
+/// Re-push the markets index to subscribers (when anything traded or any
+/// book changed) every N ticks (~2 s).
+const MARKETS_TICK_INTERVAL: u64 = 40;
+/// Depth levels per side shipped in a `BookState`.
+const BOOK_DEPTH_LEVELS: usize = 20;
+/// Minute candles shipped in a `BookState` (~3 h chart window).
+const BOOK_CANDLES_MAX: usize = 180;
+/// Tape prints shipped in a `BookState`.
+const BOOK_TAPE_MAX: usize = 30;
 /// Stream whole-map intel blips to map subscribers every N ticks (~5 Hz) so
 /// actor motion on the open map reads as smooth, live movement.
 const MAP_INTEL_TICK_INTERVAL: u64 = 4;
@@ -631,6 +640,84 @@ fn static_party(s: &StaticEntity) -> TxParty {
 /// district seeds in a fixed order before any player joins).
 fn static_agent_id(seed: u64, entity: EntityId) -> AgentId {
     uuid::Uuid::from_u64_pair(seed ^ 0xA6E7_7A6E_7A6E_77AA, entity)
+}
+
+// ---------------------------------------------------------------------------
+// Exchange <-> protocol conversions
+// ---------------------------------------------------------------------------
+//
+// The wire uses protocol-owned mirror types (`AssetMsg` & co.) so the
+// exchange crates never leak across it; these adapters are the only place
+// the two shapes meet.
+
+fn asset_to_msg(asset: Asset) -> AssetMsg {
+    match asset {
+        Asset::Item(kind) => AssetMsg::Item(kind),
+        Asset::Shards => AssetMsg::Shards,
+        Asset::Energy => AssetMsg::Energy,
+    }
+}
+
+fn asset_from_msg(msg: AssetMsg) -> Asset {
+    match msg {
+        AssetMsg::Item(kind) => Asset::Item(kind),
+        AssetMsg::Shards => Asset::Shards,
+        AssetMsg::Energy => Asset::Energy,
+    }
+}
+
+fn side_to_msg(side: Side) -> SideMsg {
+    match side {
+        Side::Bid => SideMsg::Bid,
+        Side::Ask => SideMsg::Ask,
+    }
+}
+
+fn side_from_msg(msg: SideMsg) -> Side {
+    match msg {
+        SideMsg::Bid => Side::Bid,
+        SideMsg::Ask => Side::Ask,
+    }
+}
+
+fn order_kind_from_msg(msg: OrderKindMsg) -> OrderKind {
+    match msg {
+        OrderKindMsg::Limit { price } => OrderKind::Limit { price },
+        OrderKindMsg::Market => OrderKind::Market,
+    }
+}
+
+fn order_msg(order: &wilder_exchange::Order) -> OrderMsg {
+    OrderMsg {
+        id: order.id,
+        venue: order.venue.0,
+        asset: asset_to_msg(order.asset),
+        side: side_to_msg(order.side),
+        price: order.limit_price().unwrap_or(0),
+        qty: order.qty,
+        filled: order.filled,
+        placed_ms: order.placed_ms,
+    }
+}
+
+fn inbox_msg(inbox: &Inbox) -> InboxMsg {
+    InboxMsg {
+        mild: inbox.mild,
+        assets: inbox
+            .assets
+            .iter()
+            .map(|&(asset, qty)| AssetQty { asset: asset_to_msg(asset), qty })
+            .collect(),
+    }
+}
+
+/// 24 h change in basis points: `(last - reference) / reference`. 0 without
+/// a reference price (young/never-traded market).
+fn change_bp(last: Option<u32>, reference: Option<u32>) -> i32 {
+    match (last, reference) {
+        (Some(l), Some(r)) if r > 0 => (((l as i64 - r as i64) * 10_000) / r as i64) as i32,
+        _ => 0,
+    }
 }
 
 /// Street Cash a seeded/respawned Wape carries, zone-scaled off the retired
@@ -1412,8 +1499,11 @@ pub struct World {
     /// Venue lookup, sorted by venue id: (venue, terminal entity, terminal
     /// position). Derived deterministically at boot by `init_exchange`.
     venue_terminals: Vec<(VenueId, EntityId, Vec3)>,
-    /// Item kinds whose books traded since the last item-market broadcast.
-    item_market_dirty: HashSet<ItemKind>,
+    /// Books whose depth changed (order placed/filled/cancelled) since the
+    /// last book broadcast — wakes `BookSub` watchers.
+    book_dirty: HashSet<(VenueId, Asset)>,
+    /// Any book changed since the last markets-index broadcast.
+    markets_dirty: bool,
     /// Stock-backed vendor shelves keyed by vendor static (Armory/Bodega).
     /// A vendor only sells what it holds; sold-in items land here. Seeded
     /// once per vendor (`ensure_vendor_stock`), persisted in world meta
@@ -1454,8 +1544,11 @@ pub struct World {
     stats: StatsBook,
     /// Players subscribed to live ledger updates.
     econ_subs: HashSet<EntityId>,
-    /// Players watching one item's market detail (dashboard drill-in).
-    item_subs: HashMap<EntityId, ItemKind>,
+    /// Players subscribed to the markets index (`MarketsSub`).
+    markets_subs: HashSet<EntityId>,
+    /// Players watching one (venue, asset) order book (`BookSub`); at most
+    /// one active book per connection.
+    book_subs: HashMap<EntityId, (VenueId, Asset)>,
     /// Autonomous faction agents (index-stable; identity swaps on respawn).
     agents: Vec<FactionAgent>,
     /// Live entity id -> agents index, for combat/target lookups.
@@ -1571,7 +1664,8 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
         exchange: Exchange::default(),
         venue_terminals: Vec::new(),
-        item_market_dirty: HashSet::new(),
+        book_dirty: HashSet::new(),
+        markets_dirty: false,
         vendor_stock,
         vendor_stock_dirty: false,
         next_job_id,
@@ -1603,7 +1697,8 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         ledger: Ledger::new(ledger_save),
         stats,
         econ_subs: HashSet::new(),
-        item_subs: HashMap::new(),
+        markets_subs: HashSet::new(),
+        book_subs: HashMap::new(),
         agents: Vec::new(),
         agent_by_entity: HashMap::new(),
         agent_grid: HashMap::new(),
@@ -1849,6 +1944,9 @@ impl World {
         }
 
         self.players.insert(entity, player);
+        // Exchange-wide view (open orders + settlement inboxes) so the
+        // Trade screen's global tabs work from the first frame.
+        self.push_my_exchange_state(entity);
         tracing::info!(entity, spectate, "player joined");
         Ok(entity)
     }
@@ -1859,7 +1957,8 @@ impl World {
             // offline (queues live on the building, keyed by character id);
             // no disconnect refund needed anymore.
             self.econ_subs.remove(&entity);
-            self.item_subs.remove(&entity);
+            self.markets_subs.remove(&entity);
+            self.book_subs.remove(&entity);
             self.persist_player(&player);
             tracing::info!(entity, name = %player.character.name, "player left");
         }
@@ -1968,10 +2067,11 @@ impl World {
             C2S::CancelProduction { building, job_id } => {
                 self.cancel_production(EconActor::Player(entity), building, job_id);
             }
-            C2S::Market(action) => self.market_action(entity, action),
+            C2S::Exchange(action) => self.exchange_action(entity, action),
+            C2S::MarketsSub { on } => self.markets_sub(entity, on),
+            C2S::BookSub { market } => self.book_sub(entity, market),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::EconomySub { on } => self.economy_sub(entity, on),
-            C2S::ItemMarketSub { kind } => self.item_market_sub(entity, kind),
             C2S::HireAgent { agent_id } => self.hire_agent(entity, agent_id),
             C2S::DismissAgent { agent_id } => self.dismiss_agent(entity, agent_id),
             C2S::AgentHireList => self.agent_hire_list(entity),
@@ -2872,7 +2972,10 @@ impl World {
                 self.send_production_state(entity, target);
             }
             EntityKind::MarketTerminal => {
-                self.send_market_state(entity);
+                // Opening the terminal refreshes the player's exchange-wide
+                // view (open orders + settlement inboxes). Phase 4 opens the
+                // venue-scoped Trade screen on top of this.
+                self.push_my_exchange_state(entity);
             }
             EntityKind::Armory | EntityKind::Bodega | EntityKind::Bank | EntityKind::Dealership => {
                 self.send_vendor_state(entity, target);
@@ -4095,10 +4198,35 @@ impl World {
             }
             self.ledger.trades += 1;
         }
-        if !outcome.fills.is_empty() {
-            if let Asset::Item(kind) = asset {
-                self.item_market_dirty.insert(kind);
+        // The book changed (fills, resting remainder or IOC cleanup): wake
+        // this book's watchers and the markets index on their next cadence.
+        self.book_dirty.insert((venue, asset));
+        self.markets_dirty = true;
+
+        // Maker fill notifications: resting orders that just executed
+        // belong to actors who may be far away. Online player makers get a
+        // toast-level `OrderUpdate` per fill plus their refreshed global
+        // exchange state; agents ignore (they poll their books at venues).
+        let maker_events: Vec<(EntityId, OrderOwner, u64, u32, u32)> = outcome
+            .fills
+            .iter()
+            .filter_map(|(fill, _)| {
+                let OrderOwner::Player(char_id) = fill.maker else { return None };
+                let player = self.players.values().find(|p| p.character.id == char_id)?;
+                Some((player.entity, fill.maker, fill.maker_order, fill.price, fill.qty))
+            })
+            .collect();
+        for (maker_entity, maker, order_id, price, qty) in maker_events {
+            let partial = self.exchange.open_orders(maker).iter().any(|o| o.id == order_id);
+            if let Some(player) = self.players.get(&maker_entity) {
+                let _ = player.tx.send(S2C::OrderUpdate {
+                    order_id,
+                    kind: if partial { OrderUpdateKind::Partial } else { OrderUpdateKind::Filled },
+                    fill_price: Some(price),
+                    fill_qty: Some(qty),
+                });
             }
+            self.push_my_exchange_state(maker_entity);
         }
 
         // IOC remainder / unspent budget / price improvement comes right back.
@@ -4125,6 +4253,9 @@ impl World {
             return Err("not at this market terminal".into());
         }
         let refund = self.exchange.cancel(owner, order_id).map_err(|e| e.to_string())?;
+        // Depth changed: wake this book's watchers and the markets index.
+        self.book_dirty.insert((order.venue, order.asset));
+        self.markets_dirty = true;
         self.credit_escrow(actor, &refund);
         let amount = match refund {
             Escrow::Mild(m) => TxAmount::Wild { amount: m.min(u32::MAX as u64) as u32 },
@@ -4202,26 +4333,268 @@ impl World {
         Ok(())
     }
 
-    /// Old listing-market UI hook: the panel still opens (Phase 3 replaces
-    /// it with the exchange protocol), but the book it showed is gone.
-    fn send_market_state(&self, entity: EntityId) {
-        let Some(player) = self.players.get(&entity) else { return };
-        let _ = player.tx.send(S2C::MarketState {
-            listings: Vec::new(),
-            wallet: player.purse.carried(Currency::Wild),
-        });
+    /// One `C2S::Exchange` action from a player: route it through the
+    /// shared trading path, answer with `OrderResult`, and on success push
+    /// the fresh views the client needs (inventory, global exchange state,
+    /// the watched book if any). Wallet deltas flow on the next replicate
+    /// pass via the `wallet_sent` check.
+    fn exchange_action(&mut self, entity: EntityId, action: ExchangeAction) {
+        let actor = EconActor::Player(entity);
+        let result = match action {
+            ExchangeAction::Place { venue, asset, side, order, qty, max_spend } => self
+                .exchange_place(
+                    actor,
+                    VenueId(venue),
+                    asset_from_msg(asset),
+                    side_from_msg(side),
+                    order_kind_from_msg(order),
+                    qty,
+                    max_spend,
+                )
+                .map(|_| ()),
+            ExchangeAction::Cancel { order_id } => self.exchange_cancel(actor, order_id),
+            ExchangeAction::Claim { venue } => self.exchange_claim(actor, VenueId(venue)),
+        };
+        let ok = result.is_ok();
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::OrderResult { ok, error: result.err() });
+            if ok {
+                // Escrow/claims move real items in and out of the pack.
+                let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+            }
+        }
+        if ok {
+            self.push_my_exchange_state(entity);
+            // The watched book gets its fresh depth immediately instead of
+            // waiting out the broadcast cadence.
+            self.push_book_state(entity);
+        }
     }
 
-    /// Old listing-market actions no longer exist; every request is refused
-    /// until the Phase 3 exchange protocol lands client-side.
-    fn market_action(&mut self, entity: EntityId, _action: MarketAction) {
-        if let Some(player) = self.players.get(&entity) {
-            let _ = player.tx.send(S2C::MarketResult {
-                ok: false,
-                error: Some("market migrated to exchange".into()),
-            });
+    /// Subscribe/unsubscribe to the markets index. Subscribing answers
+    /// immediately with `MarketsState` plus the player's global exchange
+    /// state (the Trade screen opens on both).
+    fn markets_sub(&mut self, entity: EntityId, on: bool) {
+        if !on {
+            self.markets_subs.remove(&entity);
+            return;
         }
-        self.send_market_state(entity);
+        if self.players.contains_key(&entity) {
+            self.markets_subs.insert(entity);
+            self.send_markets_state(entity);
+            self.push_my_exchange_state(entity);
+        }
+    }
+
+    /// Watch (or stop watching) one (venue, asset) book. Subscribing
+    /// answers immediately with a full `BookState`; re-pushes follow from
+    /// `broadcast_books` while the book stays dirty.
+    fn book_sub(&mut self, entity: EntityId, market: Option<BookTarget>) {
+        let Some(target) = market else {
+            self.book_subs.remove(&entity);
+            return;
+        };
+        let venue = VenueId(target.venue);
+        if self.venue_terminal(venue).is_none() || !self.players.contains_key(&entity) {
+            return;
+        }
+        self.book_subs.insert(entity, (venue, asset_from_msg(target.asset)));
+        self.push_book_state(entity);
+    }
+
+    /// Build the markets index message: one row per listable asset with its
+    /// cross-venue rollup and per-venue breakdown, plus venue metadata.
+    fn markets_state(&self) -> S2C {
+        let now_ms = ledger::unix_ms();
+        let rows = self
+            .exchange
+            .markets_index(now_ms)
+            .into_iter()
+            .map(|row| {
+                let asset = row.asset;
+                let summary = row.summary;
+                let venue_last: HashMap<VenueId, u32> =
+                    summary.venue_prices.iter().copied().collect();
+                let mut venues = Vec::new();
+                let (mut best_bid, mut best_ask) = (0u32, 0u32);
+                for &(venue, ..) in &self.venue_terminals {
+                    let last = venue_last.get(&venue).copied().unwrap_or(0);
+                    let bid = self.exchange.best_bid(venue, asset).unwrap_or(0);
+                    let ask = self.exchange.best_ask(venue, asset).unwrap_or(0);
+                    if last == 0 && bid == 0 && ask == 0 {
+                        continue; // never traded here, book empty: no row
+                    }
+                    best_bid = best_bid.max(bid);
+                    if ask > 0 && (best_ask == 0 || ask < best_ask) {
+                        best_ask = ask;
+                    }
+                    venues.push(VenuePrice {
+                        venue: venue.0,
+                        last,
+                        best_bid: bid,
+                        best_ask: ask,
+                        volume_24h_wild: self.exchange.stats(venue, asset, now_ms).volume_24h_wild,
+                    });
+                }
+                MarketRow {
+                    asset: asset_to_msg(asset),
+                    ticker: asset.ticker().to_string(),
+                    last: summary.last_price.unwrap_or(0),
+                    change_24h_bp: change_bp(summary.last_price, summary.price_24h_ago),
+                    volume_24h_wild: summary.volume_24h_wild,
+                    volume_24h_units: summary.volume_24h_units.min(u32::MAX as u64) as u32,
+                    best_bid,
+                    best_ask,
+                    venues,
+                }
+            })
+            .collect();
+        let venues = self
+            .exchange
+            .venues()
+            .iter()
+            .map(|v| VenueInfo { venue: v.id.0, name: v.name.clone(), x: v.x, z: v.z })
+            .collect();
+        S2C::MarketsState { rows, venues }
+    }
+
+    fn send_markets_state(&self, entity: EntityId) {
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(self.markets_state());
+        }
+    }
+
+    /// Build one (venue, asset) book snapshot for a player: bounded depth,
+    /// 24 h stats, candles, tape, plus the player's own orders and inbox.
+    fn book_state(&self, entity: EntityId, venue: VenueId, asset: Asset) -> Option<BookStateMsg> {
+        let player = self.players.get(&entity)?;
+        let owner = OrderOwner::Player(player.character.id);
+        let now_ms = ledger::unix_ms();
+        let (bids, asks) = self.exchange.depth(venue, asset, BOOK_DEPTH_LEVELS);
+        let stats = self.exchange.stats(venue, asset, now_ms);
+        let all_candles = self.exchange.candles(venue, asset);
+        let candles = all_candles[all_candles.len().saturating_sub(BOOK_CANDLES_MAX)..]
+            .iter()
+            .map(|c| CandleMsg {
+                t: c.minute * 60_000,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume_units: c.volume_units,
+                volume_wild: c.volume_wild,
+            })
+            .collect();
+        // Tape ships newest first: that's the render order.
+        let tape = self
+            .exchange
+            .tape(venue, asset)
+            .iter()
+            .rev()
+            .take(BOOK_TAPE_MAX)
+            .map(|t| TapeMsg {
+                t: t.at_ms,
+                price: t.price,
+                qty: t.qty,
+                side: side_to_msg(t.taker_side),
+            })
+            .collect();
+        let my_orders = self
+            .exchange
+            .open_orders(owner)
+            .iter()
+            .filter(|o| o.venue == venue && o.asset == asset)
+            .map(order_msg)
+            .collect();
+        let my_inbox = self.exchange.inbox(owner, venue).map(inbox_msg).unwrap_or_default();
+        Some(BookStateMsg {
+            venue: venue.0,
+            asset: asset_to_msg(asset),
+            bids,
+            asks,
+            last: stats.last_price.unwrap_or(0),
+            stats: BookStatsMsg {
+                high_24h: stats.high_24h.unwrap_or(0),
+                low_24h: stats.low_24h.unwrap_or(0),
+                volume_24h_wild: stats.volume_24h_wild,
+                volume_24h_units: stats.volume_24h_units.min(u32::MAX as u64) as u32,
+                change_24h_bp: change_bp(stats.last_price, stats.price_24h_ago),
+            },
+            candles,
+            tape,
+            my_orders,
+            my_inbox,
+        })
+    }
+
+    /// Push the player's watched book, if they watch one.
+    fn push_book_state(&self, entity: EntityId) {
+        let Some(&(venue, asset)) = self.book_subs.get(&entity) else { return };
+        let Some(state) = self.book_state(entity, venue, asset) else { return };
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::BookState(state));
+        }
+    }
+
+    /// Push the player's exchange-wide view: every open order plus every
+    /// non-empty settlement inbox across venues (join, `MarketsSub`, and
+    /// after any order event touching the player).
+    fn push_my_exchange_state(&self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let owner = OrderOwner::Player(player.character.id);
+        let orders = self.exchange.open_orders(owner).iter().map(order_msg).collect();
+        let inboxes = self
+            .venue_terminals
+            .iter()
+            .filter_map(|&(venue, ..)| {
+                let inbox = self.exchange.inbox(owner, venue)?;
+                (!inbox.is_empty())
+                    .then(|| VenueInbox { venue: venue.0, inbox: inbox_msg(inbox) })
+            })
+            .collect();
+        let _ = player.tx.send(S2C::MyExchangeState { orders, inboxes });
+    }
+
+    /// Re-push dirty books to their watchers (`BOOK_TICK_INTERVAL` cadence).
+    fn broadcast_books(&mut self) {
+        if self.book_subs.is_empty() {
+            // Nobody watching: drop the dirty set so it can't grow unbounded.
+            self.book_dirty.clear();
+            return;
+        }
+        let dirty = std::mem::take(&mut self.book_dirty);
+        if dirty.is_empty() {
+            return;
+        }
+        self.book_subs.retain(|id, _| self.players.contains_key(id));
+        let watchers: Vec<EntityId> = self
+            .book_subs
+            .iter()
+            .filter(|(_, key)| dirty.contains(key))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in watchers {
+            self.push_book_state(id);
+        }
+    }
+
+    /// Re-push the markets index to subscribers when any book changed
+    /// since the last broadcast (`MARKETS_TICK_INTERVAL` cadence).
+    fn broadcast_markets(&mut self) {
+        if !self.markets_dirty {
+            return;
+        }
+        self.markets_dirty = false;
+        self.markets_subs.retain(|id| self.players.contains_key(id));
+        if self.markets_subs.is_empty() {
+            return;
+        }
+        let msg = self.markets_state();
+        for id in &self.markets_subs {
+            if let Some(player) = self.players.get(id) {
+                let _ = player.tx.send(msg.clone());
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4953,9 +5326,13 @@ impl World {
             if w.tick % MAP_INTEL_TICK_INTERVAL == 0 {
                 w.broadcast_agent_dots();
             }
-            // Item market drill-in: re-push watched kinds that traded, ~1 Hz.
-            if w.tick % ITEM_MARKET_TICK_INTERVAL == 0 {
-                w.broadcast_item_markets();
+            // Exchange: dirty books to their watchers (~1 s) and the
+            // markets index to subscribers when anything traded (~2 s).
+            if w.tick % BOOK_TICK_INTERVAL == 0 {
+                w.broadcast_books();
+            }
+            if w.tick % MARKETS_TICK_INTERVAL == 0 {
+                w.broadcast_markets();
             }
             // Owned-agent roster (~2 s) and drill-in detail (~1 Hz).
             if w.tick % AGENT_ROSTER_TICK_INTERVAL == 0 {
@@ -8510,135 +8887,6 @@ impl World {
         }
     }
 
-    /// Watch (or stop watching) one item's market detail. Subscribing answers
-    /// immediately with a full `ItemMarketState`; while watched, new fills
-    /// re-push the state (throttled by `broadcast_item_markets`).
-    fn item_market_sub(&mut self, entity: EntityId, kind: Option<ItemKind>) {
-        let Some(kind) = kind else {
-            self.item_subs.remove(&entity);
-            return;
-        };
-        let state = self.item_market_state(kind);
-        if let Some(player) = self.players.get(&entity) {
-            let _ = player.tx.send(S2C::ItemMarketState(state));
-            self.item_subs.insert(entity, kind);
-        }
-    }
-
-    /// Build the market detail snapshot for one item kind, fed from the
-    /// exchange until the Phase 3 protocol replaces this message: cross-venue
-    /// rollup for last price and volumes, best ask / listed units summed over
-    /// every venue's book, and the busiest venue's candles mapped onto the
-    /// old bucket series. The tape carries prices/sizes but no counterparty
-    /// names (inboxes decouple fills from identities); names return with the
-    /// exchange-native protocol.
-    fn item_market_state(&self, kind: ItemKind) -> ItemMarketState {
-        let asset = Asset::Item(kind);
-        let now_ms = ledger::unix_ms();
-        let summary = self.exchange.asset_summary(asset, now_ms);
-        let mut best_ask = 0u32;
-        let mut listed_units = 0u32;
-        for &(venue, ..) in &self.venue_terminals {
-            if let Some(ask) = self.exchange.best_ask(venue, asset) {
-                if best_ask == 0 || ask < best_ask {
-                    best_ask = ask;
-                }
-            }
-            listed_units += self
-                .exchange
-                .depth(venue, asset, usize::MAX)
-                .1
-                .iter()
-                .map(|&(_, qty)| qty)
-                .sum::<u32>();
-        }
-        // Series/tape from the venue that traded most recently.
-        let newest_venue = self
-            .venue_terminals
-            .iter()
-            .filter_map(|&(venue, ..)| {
-                let stats = self.exchange.stats(venue, asset, now_ms);
-                stats.last_trade_ms.map(|at| (venue, at))
-            })
-            .max_by_key(|&(_, at)| at)
-            .map(|(venue, _)| venue);
-        let (series, recent_fills) = match newest_venue {
-            Some(venue) => (
-                self.exchange
-                    .candles(venue, asset)
-                    .iter()
-                    .map(|c| PriceBucket {
-                        t: c.minute * 60_000,
-                        avg: (c.volume_wild / c.volume_units.max(1) as u64) as u32,
-                        min: c.low,
-                        max: c.high,
-                        units: c.volume_units,
-                        wild: c.volume_wild,
-                        fills: 0,
-                    })
-                    .collect(),
-                // Tape goes out newest-first: that's the render order.
-                self.exchange
-                    .tape(venue, asset)
-                    .iter()
-                    .rev()
-                    .map(|t| MarketFill {
-                        t: t.at_ms,
-                        price_each: t.price,
-                        count: t.qty,
-                        buyer: String::new(),
-                        seller: String::new(),
-                    })
-                    .collect(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        };
-        let (vendor_buy, vendor_sell) = wilder_economy::reference_prices(kind);
-        ItemMarketState {
-            kind,
-            series,
-            last_price: summary.last_price.unwrap_or(0),
-            best_ask,
-            listed_units,
-            // Lifetime totals retired with the listing market; the trailing
-            // 24 h window stands in until Phase 3 reshapes the message.
-            total_fills: 0,
-            total_units: summary.volume_24h_units,
-            total_wild: summary.volume_24h_wild,
-            supply: self.ledger.item_supply(kind),
-            vendor_buy,
-            vendor_sell,
-            recent_fills,
-        }
-    }
-
-    /// Re-push item market detail to watchers whose kind saw new fills since
-    /// the last broadcast (called on a ~1 s cadence from the tick loop).
-    fn broadcast_item_markets(&mut self) {
-        if self.item_subs.is_empty() {
-            // Nobody watching: drop the dirty set so it can't grow unbounded.
-            self.item_market_dirty.clear();
-            return;
-        }
-        let dirty = std::mem::take(&mut self.item_market_dirty);
-        if dirty.is_empty() {
-            return;
-        }
-        self.item_subs.retain(|id, _| self.players.contains_key(id));
-        let watchers: Vec<(EntityId, ItemKind)> = self
-            .item_subs
-            .iter()
-            .filter(|(_, kind)| dirty.contains(kind))
-            .map(|(&id, &kind)| (id, kind))
-            .collect();
-        for (id, kind) in watchers {
-            let state = self.item_market_state(kind);
-            if let Some(player) = self.players.get(&id) {
-                let _ = player.tx.send(S2C::ItemMarketState(state));
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Owned agents: hire / dismiss / roster + detail subscriptions
     // -----------------------------------------------------------------------
@@ -10250,7 +10498,8 @@ mod tests {
             chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
             exchange: Exchange::default(),
             venue_terminals: Vec::new(),
-            item_market_dirty: HashSet::new(),
+            book_dirty: HashSet::new(),
+            markets_dirty: false,
             vendor_stock: HashMap::new(),
             vendor_stock_dirty: false,
             next_job_id: 1,
@@ -10282,7 +10531,8 @@ mod tests {
             ledger: Ledger::new(LedgerSave::default()),
             stats: StatsBook::default(),
             econ_subs: HashSet::new(),
-            item_subs: HashMap::new(),
+            markets_subs: HashSet::new(),
+            book_subs: HashMap::new(),
             agents: Vec::new(),
             agent_by_entity: HashMap::new(),
             agent_grid: HashMap::new(),
@@ -11530,9 +11780,19 @@ mod tests {
 
     /// A connected player standing at `position` (throwaway channel).
     fn spawn_test_player(world: &mut World, position: Vec3) -> EntityId {
+        let (entity, rx) = spawn_test_player_with_rx(world, position);
+        std::mem::forget(rx); // keep sends alive without a runtime
+        entity
+    }
+
+    /// Like `spawn_test_player` but hands back the S2C receiver so tests
+    /// can assert on what the server pushed.
+    fn spawn_test_player_with_rx(
+        world: &mut World,
+        position: Vec3,
+    ) -> (EntityId, mpsc::UnboundedReceiver<S2C>) {
         let entity = world.alloc_entity();
         let (tx, rx) = mpsc::unbounded_channel();
-        std::mem::forget(rx); // keep sends alive without a runtime
         let character = Character {
             id: uuid::Uuid::new_v4(),
             account_id: uuid::Uuid::new_v4(),
@@ -11588,7 +11848,7 @@ mod tests {
                 dirty: true,
             },
         );
-        entity
+        (entity, rx)
     }
 
     /// A fresh, gatherable node at `position` (bypasses chunk placement).
@@ -11825,19 +12085,19 @@ mod tests {
         assert_eq!(world.exchange.inbox(owner, venue).expect("inbox").mild, (cost - fee) as u64);
         world.exchange_claim(EconActor::Agent(seller), venue).unwrap();
         assert_eq!(world.agents[seller].wallet(), seller_wallet + cost - fee);
-        // The drill-in snapshot reflects book + exchange history + vendor refs.
-        let state = world.item_market_state(ItemKind::Iron);
-        assert_eq!(state.last_price, listing_price);
-        assert_eq!(state.listed_units, 20);
-        assert_eq!(state.best_ask, listing_price);
-        assert_eq!(state.vendor_sell, 2); // Bodega floor
-        assert_eq!(state.series.len(), 1);
-        // The trade tape carries the fill (names return with the Phase 3
-        // exchange protocol; inboxes decouple fills from identities).
-        assert_eq!(state.recent_fills.len(), 1);
-        let tape = &state.recent_fills[0];
-        assert_eq!(tape.price_each, listing_price);
-        assert_eq!(tape.count, 10);
+        // The book snapshot reflects the trade: last price, remaining ask
+        // depth, one candle, one buy print on the tape.
+        let watcher = spawn_test_player(&mut world, terminal_pos);
+        let state = world
+            .book_state(watcher, venue, Asset::Item(ItemKind::Iron))
+            .expect("book snapshot");
+        assert_eq!(state.last, listing_price);
+        assert_eq!(state.asks.iter().map(|&(_, qty)| qty).sum::<u32>(), 20);
+        assert_eq!(state.asks[0].0, listing_price);
+        assert_eq!(state.candles.len(), 1);
+        assert_eq!(state.tape.len(), 1);
+        assert_eq!((state.tape[0].price, state.tape[0].qty), (listing_price, 10));
+        assert_eq!(state.tape[0].side, SideMsg::Bid);
     }
 
     #[test]
@@ -12147,6 +12407,135 @@ mod tests {
             10
         );
         assert_eq!(world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)), None);
+    }
+
+    /// Drain every S2C a test player's channel buffered.
+    fn drain_s2c(rx: &mut mpsc::UnboundedReceiver<S2C>) -> Vec<S2C> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// The `C2S::Exchange` handler end to end: a player at a terminal
+    /// places an ask through `handle_msg` and gets `OrderResult` +
+    /// `InventoryUpdate` + a refreshed `MyExchangeState` pushed; a taker's
+    /// market buy then pushes `OrderUpdate` + inbox state to the maker; a
+    /// refused action answers with an error `OrderResult` and no pushes.
+    #[test]
+    fn exchange_handler_round_trips_order_flow() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        world.init_exchange();
+        let contested = district_anchor("NEXUS");
+        let (_, terminal_pos) =
+            world.nearest_service(contested, EntityKind::MarketTerminal).unwrap();
+        let (seller, mut seller_rx) = spawn_test_player_with_rx(&mut world, terminal_pos);
+        let venue = world.venue_at(EconActor::Player(seller)).expect("at a venue");
+        inv::add_items(
+            &mut world.players.get_mut(&seller).unwrap().inventory.slots,
+            ItemKind::Iron,
+            10,
+        );
+
+        // Ask for 10 Iron at 4 via the wire-facing handler.
+        world.handle_msg(
+            seller,
+            C2S::Exchange(ExchangeAction::Place {
+                venue: venue.0,
+                asset: AssetMsg::Item(ItemKind::Iron),
+                side: SideMsg::Ask,
+                order: OrderKindMsg::Limit { price: 4 },
+                qty: 10,
+                max_spend: None,
+            }),
+        );
+        let msgs = drain_s2c(&mut seller_rx);
+        assert!(
+            msgs.iter().any(|m| matches!(m, S2C::OrderResult { ok: true, .. })),
+            "placement must answer with an ok OrderResult"
+        );
+        assert!(
+            msgs.iter().any(|m| matches!(m, S2C::InventoryUpdate(_))),
+            "escrow left the pack: an InventoryUpdate must follow"
+        );
+        let (orders, inboxes) = msgs
+            .iter()
+            .find_map(|m| match m {
+                S2C::MyExchangeState { orders, inboxes } => Some((orders.clone(), inboxes.clone())),
+                _ => None,
+            })
+            .expect("MyExchangeState pushed after the order event");
+        assert_eq!(orders.len(), 1);
+        assert_eq!((orders[0].venue, orders[0].price, orders[0].qty), (venue.0, 4, 10));
+        assert_eq!(orders[0].asset, AssetMsg::Item(ItemKind::Iron));
+        assert!(inboxes.is_empty());
+        let order_id = orders[0].id;
+
+        // A second player market-buys 4 units: the taker gets an ok
+        // OrderResult, the resting maker gets a Partial OrderUpdate plus a
+        // MyExchangeState whose inbox now holds the proceeds.
+        let (buyer, mut buyer_rx) = spawn_test_player_with_rx(&mut world, terminal_pos);
+        world.players.get_mut(&buyer).unwrap().purse.credit(Currency::Wild, 100);
+        world.handle_msg(
+            buyer,
+            C2S::Exchange(ExchangeAction::Place {
+                venue: venue.0,
+                asset: AssetMsg::Item(ItemKind::Iron),
+                side: SideMsg::Bid,
+                order: OrderKindMsg::Market,
+                qty: 4,
+                max_spend: Some(50),
+            }),
+        );
+        let buyer_msgs = drain_s2c(&mut buyer_rx);
+        assert!(buyer_msgs.iter().any(|m| matches!(m, S2C::OrderResult { ok: true, .. })));
+        let maker_msgs = drain_s2c(&mut seller_rx);
+        assert!(
+            maker_msgs.iter().any(|m| matches!(
+                m,
+                S2C::OrderUpdate {
+                    order_id: id,
+                    kind: OrderUpdateKind::Partial,
+                    fill_price: Some(4),
+                    fill_qty: Some(4),
+                } if *id == order_id
+            )),
+            "maker must get a Partial OrderUpdate for the fill"
+        );
+        let (orders, inboxes) = maker_msgs
+            .iter()
+            .find_map(|m| match m {
+                S2C::MyExchangeState { orders, inboxes } => Some((orders.clone(), inboxes.clone())),
+                _ => None,
+            })
+            .expect("maker's MyExchangeState refreshed on the fill");
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].filled, 4);
+        let fee = 16 * MARKET_FEE_PCT as u64 / 100;
+        assert_eq!(inboxes.len(), 1);
+        assert_eq!((inboxes[0].venue, inboxes[0].inbox.mild), (venue.0, 16 - fee));
+
+        // Away from the terminal a cancel is refused: error OrderResult,
+        // nothing else pushed, order still resting.
+        world.players.get_mut(&seller).unwrap().character.position =
+            terminal_pos + Vec3::new(50.0, 0.0, 0.0);
+        world.handle_msg(seller, C2S::Exchange(ExchangeAction::Cancel { order_id }));
+        let msgs = drain_s2c(&mut seller_rx);
+        assert!(msgs.iter().any(|m| matches!(m, S2C::OrderResult { ok: false, error: Some(_) })));
+        assert!(!msgs.iter().any(|m| matches!(m, S2C::MyExchangeState { .. })));
+        assert_eq!(world.exchange.best_ask(venue, Asset::Item(ItemKind::Iron)), Some(4));
+
+        // Back at the terminal: Claim drains the inbox into the purse.
+        world.players.get_mut(&seller).unwrap().character.position = terminal_pos;
+        world.handle_msg(seller, C2S::Exchange(ExchangeAction::Claim { venue: venue.0 }));
+        let msgs = drain_s2c(&mut seller_rx);
+        assert!(msgs.iter().any(|m| matches!(m, S2C::OrderResult { ok: true, .. })));
+        assert_eq!(
+            world.players[&seller].purse.carried(Currency::Wild) as u64,
+            16 - fee
+        );
     }
 
     #[test]

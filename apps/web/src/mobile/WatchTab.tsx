@@ -207,6 +207,15 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
             >
               ✥ EXPLORE
             </button>
+            {camMode === "explore" && (
+              <button
+                type="button"
+                className="m-watch-mode m-watch-recenter"
+                onClick={() => setMode("follow")}
+              >
+                ⌖ RECENTER
+              </button>
+            )}
           </div>
         </div>
         <div className="m-watch-bottom">

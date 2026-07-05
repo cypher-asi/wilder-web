@@ -748,6 +748,13 @@ body,
   text-shadow: 0 0 10px var(--accent-dim);
 }
 
+/* Explore-only snap-back-to-agent chip. */
+.m-watch-recenter {
+  color: var(--accent-bright, #9ff);
+  border-color: rgba(0, 229, 255, 0.45);
+  animation: m-sheet-fade 0.18s ease-out;
+}
+
 .m-watch-bottom {
   display: flex;
   flex-direction: column;

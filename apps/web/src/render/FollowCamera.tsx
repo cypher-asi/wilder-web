@@ -39,8 +39,11 @@ export const followCam = {
   distance: 10,
   minDistance: 4,
   maxDistance: 25,
-  /** Explore mode may pull much further out to survey the map. */
-  maxDistanceExplore: 90,
+  /** Explore mode may pull much further out to survey the map (past the
+   * desktop rig's 140 m — the CityProxy far-field and the fog thinning keep
+   * the wider view readable, and pan is unclamped because SpectateAt walks
+   * the server's streaming anchor along with the camera). */
+  maxDistanceExplore: 180,
   minPitch: THREE.MathUtils.degToRad(4),
   maxPitch: THREE.MathUtils.degToRad(72),
   /** EXPLORE look target (world XZ), panned by the gesture layer. */
@@ -49,6 +52,11 @@ export const followCam = {
    * to seed `explore` when detaching from the agent. */
   target: { x: 0, z: 0 },
 };
+
+// Debug handle for development tooling (mirrors window.__cameraState).
+if (typeof window !== "undefined" && import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__followCam = followCam;
+}
 
 /** Look target height above the ground (agent chest height). */
 const LOOK_HEIGHT = 1.3;
@@ -105,11 +113,24 @@ export function FollowCamera() {
 
     let lookY: number;
     if (entity || explore) {
-      const pitch = THREE.MathUtils.clamp(
+      let pitch = THREE.MathUtils.clamp(
         followCam.pitch,
         followCam.minPitch,
         followCam.maxPitch,
       );
+      if (explore) {
+        // Survey tilt: past follow-orbit range the camera eases toward
+        // top-down as the pinch pulls out, so a zoomed-out explore reads as
+        // a map instead of a wall of far geometry. One-finger drag doesn't
+        // steer pitch in explore, so this is the only pitch control there.
+        const t = THREE.MathUtils.clamp(
+          (followCam.distance - followCam.maxDistance) /
+            (followCam.maxDistanceExplore - followCam.maxDistance),
+          0,
+          1,
+        );
+        pitch = THREE.MathUtils.lerp(pitch, followCam.maxPitch, t);
+      }
       const horiz = Math.cos(pitch) * followCam.distance;
       lookY = t.y + LOOK_HEIGHT;
       desiredPosScratch.set(

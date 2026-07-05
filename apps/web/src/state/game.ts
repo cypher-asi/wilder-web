@@ -441,6 +441,7 @@ export type MenuTab =
   | "agents"
   | "leaderboard"
   | "economy"
+  | "trade"
   | "inventory"
   | "profile"
   | "settings"
@@ -506,10 +507,11 @@ interface UiState {
   book: BookStateMsg | null;
   /** The player's exchange-wide open orders + settlement inboxes. */
   myExchange: { orders: OrderMsg[]; inboxes: VenueInbox[] } | null;
-  /** Near the market terminal (enables the trade UI's order entry). */
+  /** Near a market terminal (drives the "[E] Trade" prompt). */
   nearMarket: boolean;
-  /** Market panel visibility (auto-closes when leaving the terminal). */
-  marketOpen: boolean;
+  /** Venue the Trade screen should scope to (set when a Market Terminal is
+   * interacted with; null = no preference, TradeScreen picks per market). */
+  tradeVenue: number | null;
   /** Persistent points of interest (service buildings), sent once on join. */
   pois: PoiInfo[];
   /** Named resource-bias zones ringing the spawn district. */
@@ -600,6 +602,7 @@ interface UiState {
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
+  toggleTrade: () => void;
   toggleMenu: () => void;
   /** Close every overlay/panel (used when leaving the game screen). */
   closeOverlays: () => void;
@@ -660,7 +663,7 @@ export const useGame: import("zustand").UseBoundStore<
   book: null,
   myExchange: null,
   nearMarket: false,
-  marketOpen: false,
+  tradeVenue: null,
   pois: [],
   zones: [],
   factions: [],
@@ -733,6 +736,12 @@ export const useGame: import("zustand").UseBoundStore<
         ? { menuOpen: false }
         : { menuOpen: true, menuTab: "economy" },
     ),
+  toggleTrade: () =>
+    set((s) =>
+      s.menuOpen && s.menuTab === "trade"
+        ? { menuOpen: false }
+        : { menuOpen: true, menuTab: "trade" },
+    ),
   toggleMenu: () =>
     set((s) =>
       s.menuOpen ? { menuOpen: false } : { menuOpen: true, menuTab: "map" },
@@ -742,7 +751,6 @@ export const useGame: import("zustand").UseBoundStore<
       menuOpen: false,
       chatOpen: false,
       craftOpen: false,
-      marketOpen: false,
       vendorOpen: false,
       death: null,
     }),

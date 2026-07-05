@@ -251,7 +251,8 @@ export function HoloMapView({
         cameraState.suppressMenuUntil = performance.now() + 1500;
         useGame.getState().closeMenu();
       }
-      if (e.code === "KeyT") {
+      // V toggles the view pitch (T now belongs to the global Trade tab).
+      if (e.code === "KeyV") {
         setTopDown((t) => {
           view.current.topDown = !t;
           return !t;
@@ -428,7 +429,7 @@ export function HoloMapView({
         onPointerDown={(e) => e.stopPropagation()}
       >
         {topDown ? "VIEW: TOP-DOWN" : "VIEW: 3D"}
-        {!standalone && <span className="action-key">T</span>}
+        {!standalone && <span className="action-key">V</span>}
       </button>
     </div>
   );

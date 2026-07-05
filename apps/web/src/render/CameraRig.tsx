@@ -244,7 +244,6 @@ function uiBlocksPointerLock(s: UiState): boolean {
     s.menuOpen ||
     s.chatOpen ||
     s.craftOpen ||
-    s.marketOpen ||
     s.vendorOpen
   );
 }

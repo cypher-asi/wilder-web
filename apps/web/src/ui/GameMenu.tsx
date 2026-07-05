@@ -30,12 +30,14 @@ function factionOf(id: number | undefined) {
 }
 
 // Sections with their own Escape listener: HoloMap closes the menu itself,
-// and EconomyDashboard (economy + leaderboard) backs out of an item detail
-// page before closing. Every other tab relies on GameMenu's handler below.
+// EconomyDashboard (economy + leaderboard) backs out of an item detail page
+// before closing, and TradeScreen backs out of a market detail page. Every
+// other tab relies on GameMenu's handler below.
 const SELF_HANDLED_ESCAPE: ReadonlySet<MenuTab> = new Set([
   "map",
   "economy",
   "leaderboard",
+  "trade",
 ]);
 
 const TABS: { id: MenuTab; label: string; keycap?: string }[] = [
@@ -43,6 +45,7 @@ const TABS: { id: MenuTab; label: string; keycap?: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "leaderboard", label: "Leaderboard" },
   { id: "economy", label: "Economy", keycap: "K" },
+  { id: "trade", label: "Trade", keycap: "T" },
   { id: "inventory", label: "Inventory", keycap: "B" },
   { id: "profile", label: "Profile" },
   { id: "settings", label: "Settings" },

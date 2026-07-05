@@ -28,7 +28,7 @@ export function MobileShell({ connection }: { connection: GameConnection }) {
         {tab === "watch" && <WatchTab connection={connection} />}
         {tab === "map" && <MapTab connection={connection} />}
         {tab === "economy" && <EconomyTab connection={connection} />}
-        {tab === "trade" && <TradeTab />}
+        {tab === "trade" && <TradeTab connection={connection} />}
       </div>
       <TabBar />
     </div>

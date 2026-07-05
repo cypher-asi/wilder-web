@@ -130,6 +130,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         } else if (event.code === "KeyK") {
           event.preventDefault();
           useGame.getState().toggleEconomy();
+        } else if (event.code === "KeyT") {
+          event.preventDefault();
+          useGame.getState().toggleTrade();
         } else if (
           event.code === "KeyB" ||
           event.code === "KeyI" ||
@@ -149,7 +152,6 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         const ui = useGame.getState();
         const panelVisible =
           (ui.craftOpen && ui.nearStation !== null) ||
-          (ui.marketOpen && ui.nearMarket) ||
           (ui.vendorOpen && ui.nearVendor !== null);
         if (panelVisible) {
           // This Escape is spent closing the panel. Closing it re-acquires
@@ -159,7 +161,6 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
           cameraState.suppressMenuUntil = performance.now() + 1500;
           ui.set({
             craftOpen: false,
-            marketOpen: false,
             vendorOpen: false,
           });
         } else {
@@ -179,6 +180,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "KeyK") {
         event.preventDefault();
         useGame.getState().toggleEconomy();
+      }
+      if (event.code === "KeyT") {
+        event.preventDefault();
+        useGame.getState().toggleTrade();
       }
       if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
         running.current = true;

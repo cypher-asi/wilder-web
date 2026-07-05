@@ -22,10 +22,26 @@ export const INTERACT_KINDS = new Set<EntityKind>([
 export function openServicePanel(kind: EntityKind, entityId: number): void {
   const ui = useGame.getState();
   if (kind === "MarketTerminal") {
-    if (ui.marketOpen) return void ui.set({ marketOpen: false });
-    ui.set({ marketOpen: true });
+    if (ui.menuOpen && ui.menuTab === "trade") return void ui.closeMenu();
+    // Scope the Trade screen to the venue this terminal belongs to: the
+    // nearest venue anchor to the terminal's position. Venue metadata rides
+    // MarketsState; before the first snapshot the screen opens unscoped.
+    const terminal = game.entities.get(entityId);
+    const venues = ui.markets?.venues ?? [];
+    let venue: number | null = null;
+    if (terminal) {
+      let bestD = Infinity;
+      for (const v of venues) {
+        const d = (v.x - terminal.x) ** 2 + (v.z - terminal.z) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          venue = v.venue;
+        }
+      }
+    }
+    ui.set({ menuOpen: true, menuTab: "trade", tradeVenue: venue });
     // The server answers a terminal Interact with MyExchangeState (open
-    // orders + settlement inboxes); Phase 4's TradeScreen builds on it.
+    // orders + settlement inboxes); the TradeScreen builds on it.
     game.send?.({ t: "Interact", d: { entity_id: entityId } });
     return;
   }

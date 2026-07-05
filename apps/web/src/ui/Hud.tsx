@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { playGlitch } from "../assets/audio";
 import { ROLL_COOLDOWN } from "../game/collision";
+import { openServicePanel } from "../game/interact";
 import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { nearestDoor } from "../render/Interior";
@@ -26,6 +27,7 @@ import { InventoryScreen } from "./InventoryScreen";
 import { FeedIcon, ItemIcon, itemLabel, usedVolume } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
+import { TradeScreen } from "./TradeScreen";
 
 export function Hud({ connection }: { connection: GameConnection }) {
   const connected = useGame((s) => s.connected);
@@ -69,8 +71,9 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <BackpackBar />
           <InventoryScreen connection={connection} />
           <CraftingPanel connection={connection} />
-          <MarketPanel />
+          <MarketPrompt />
           <VendorPanel connection={connection} />
+          <TradeScreen connection={connection} />
           <DoorPrompt />
           <HoloMap connection={connection} />
           <EconomyDashboard connection={connection} />
@@ -937,28 +940,31 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
   );
 }
 
-/** The listing-based market panel is retired with its wire protocol; Phase 4
- * rebuilds trading as the exchange TradeScreen on MarketsState/BookState.
- * Until then the terminal only shows a hint. */
-function MarketPanel() {
+/** "[E] TRADE" chip near a Market Terminal: opens the exchange Trade screen
+ * scoped to this terminal's venue (same path as pressing E on it). */
+function MarketPrompt() {
   const nearMarket = useGame((s) => s.nearMarket);
-  if (!nearMarket) return null;
+  const menuOpen = useGame((s) => s.menuOpen);
+  if (!nearMarket || menuOpen) return null;
   return (
     <div
-      style={{
-        position: "absolute",
-        top: 120,
-        left: "50%",
-        transform: "translateX(-50%)",
-        fontSize: 12,
-        letterSpacing: "0.15em",
-        color: "var(--text-dim)",
-        background: "rgba(9,15,24,0.7)",
-        border: "1px solid var(--steel-border)",
-        padding: "6px 14px",
+      className="station-prompt"
+      onClick={() => {
+        // Same resolution as the E key: nearest terminal in interact range.
+        let best: number | null = null;
+        let bestD = Infinity;
+        for (const e of game.entities.values()) {
+          if (e.kind !== "MarketTerminal") continue;
+          const d = Math.hypot(e.x - game.predicted.x, e.z - game.predicted.z);
+          if (d < bestD) {
+            bestD = d;
+            best = e.id;
+          }
+        }
+        if (best !== null) openServicePanel("MarketTerminal", best);
       }}
     >
-      MARKET TERMINAL — TRADE SCREEN COMING ONLINE
+      MARKET TERMINAL — [E] TRADE
     </div>
   );
 }
@@ -1782,11 +1788,7 @@ function ProximityTracker() {
         state.set({ nearStash: near });
       }
       if (nearMarket !== state.nearMarket) {
-        state.set({
-          nearMarket,
-          // Leaving the terminal closes the panel.
-          ...(nearMarket ? {} : { marketOpen: false }),
-        });
+        state.set({ nearMarket });
       }
       if ((station?.id ?? null) !== (state.nearStation?.id ?? null)) {
         state.set({

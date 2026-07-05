@@ -49,10 +49,13 @@ export function Game() {
   const character = useSession((s) => s.activeCharacter);
   const mobile = useIsMobile();
 
+  // `mobile` is a dep on purpose: the join mode (spectator vs avatar) is fixed
+  // at JoinWorld time, so crossing the mobile threshold rebuilds the
+  // connection and rejoins in the right mode.
   const connection = useMemo(() => {
     if (!token || !character) return null;
     return new GameConnection(token, character.id);
-  }, [token, character]);
+  }, [token, character, mobile]);
 
   useEffect(() => {
     // Usually already warm from CharacterSelect; the cache dedupes.

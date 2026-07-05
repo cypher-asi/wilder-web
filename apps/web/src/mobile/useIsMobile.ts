@@ -1,10 +1,10 @@
 // Mobile detection for the agent-management shell: a coarse pointer (touch)
-// on a narrow viewport. Desktop with a mouse never matches, so the classic
-// HUD path is untouched even on small windows.
+// on a narrow viewport, OR any phone-width window (comma = OR in media query
+// lists) so a narrow desktop browser previews the mobile experience too.
 
 import { useSyncExternalStore } from "react";
 
-const QUERY = "(pointer: coarse) and (max-width: 900px)";
+const QUERY = "(pointer: coarse) and (max-width: 900px), (max-width: 520px)";
 
 /** One-shot check (for non-React call sites). */
 export function isMobile(): boolean {

@@ -555,6 +555,32 @@ export function Effects() {
   );
 }
 
+/**
+ * Minimal mobile post stack: bloom (360p-capped pyramid) + tone mapping,
+ * nothing else — no AO, no SMAA, no vignette. The tron style's look depends
+ * on bloom (its emissive hairlines are authored thin, expecting the glow to
+ * come from post), so skipping post entirely left the mobile Watch tab
+ * reading near-black. The composer disables the renderer's built-in tone
+ * mapping, so the display mapping must be re-added here as an effect.
+ */
+export function MobileEffects() {
+  const style = useVisualStyle();
+  const post = style.post;
+  return (
+    <EffectComposer key={style.id} multisampling={0}>
+      <CappedBloom
+        intensity={post?.bloom ?? 0.25}
+        luminanceThreshold={post?.bloomThreshold ?? 0.9}
+        luminanceSmoothing={0.3}
+        mipmapBlur
+      />
+      <ToneMapping
+        mode={style.physicalSky ? ToneMappingMode.AGX : ToneMappingMode.NEUTRAL}
+      />
+    </EffectComposer>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Scene setup: environment map, fog, tone mapping
 // ---------------------------------------------------------------------------

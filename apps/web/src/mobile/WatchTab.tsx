@@ -1,10 +1,15 @@
-// Watch tab: 3D follow-cam on one owned agent. The tab itself is a
-// transparent overlay — the game canvas (paused on every other tab) shows
+// Watch tab: 3D camera on one owned agent, with two modes. The tab itself is
+// a transparent overlay — the game canvas (paused on every other tab) shows
 // through behind it. While active it:
 //  - sends C2S WatchAgent so the server re-anchors chunk streaming + entity
 //    replication on the agent (and pins it Hot); cleared on leave,
 //  - subscribes AgentDetailSub for the live action ticker (1 Hz log),
-//  - drives the FollowCamera orbit from one-finger drag + pinch gestures.
+//  - FOLLOW: drives the FollowCamera orbit from one-finger drag + pinch,
+//  - EXPLORE: detaches the camera; one-finger drag pans across the map,
+//    pinch zooms, and the panned position streams to the server as C2S
+//    SpectateAt (throttled) so chunk/entity interest follows the camera.
+//    A recenter button snaps back to FOLLOW (WatchAgent re-anchors and
+//    clears the server's free anchor).
 
 import {
   useCallback,
@@ -29,6 +34,14 @@ import { AgentHpBar, fmtMild, formatAge, useAgents } from "../ui/useAgents";
 const YAW_SENS = 0.008;
 /** Radians of pitch per pixel of vertical drag. */
 const PITCH_SENS = 0.005;
+/** Explore pan: world meters per pixel per meter of orbit distance. */
+const PAN_SENS = 0.0022;
+/** Explore anchor updates: send at most every this many ms... */
+const SPECTATE_SEND_MS = 500;
+/** ...and only when the camera moved this far since the last send (m). */
+const SPECTATE_MIN_MOVE = 8;
+
+type CamMode = "follow" | "explore";
 
 export function WatchTab({ connection }: { connection: GameConnection }) {
   // Keeps AgentSub alive while the tab shows (roster refresh ~2 s).
@@ -51,6 +64,40 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
     }
   }, [roster, watchAgentId, set]);
 
+  // Camera mode. Entering the tab / switching agents resets to FOLLOW.
+  const [camMode, setCamMode] = useState<CamMode>("follow");
+  useEffect(() => {
+    followCam.mode = "follow";
+    setCamMode("follow");
+  }, [watchAgentId]);
+  useEffect(
+    () => () => {
+      followCam.mode = "follow";
+    },
+    [],
+  );
+
+  const setMode = useCallback(
+    (mode: CamMode) => {
+      if (mode === "explore") {
+        // Detach in place: explore starts from wherever the camera is looking.
+        followCam.explore.x = followCam.target.x;
+        followCam.explore.z = followCam.target.z;
+      } else {
+        // Recenter: pull the wider explore zoom back into orbit range, and
+        // re-send WatchAgent so the server re-anchors interest to the agent
+        // and clears the free SpectateAt anchor.
+        followCam.distance = Math.min(followCam.distance, followCam.maxDistance);
+        if (joined && watchAgentId) {
+          connection.send({ t: "WatchAgent", d: { agent_id: watchAgentId } });
+        }
+      }
+      followCam.mode = mode;
+      setCamMode(mode);
+    },
+    [joined, watchAgentId, connection],
+  );
+
   // Server-side watch anchor while this tab is active. Re-sent when the
   // watched agent switches or after a reconnect (joined flips).
   useEffect(() => {
@@ -60,6 +107,22 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
       connection.send({ t: "WatchAgent", d: { agent_id: null } });
     };
   }, [joined, appVisible, watchAgentId, connection]);
+
+  // Explore: stream the panned position to the server (throttled) so chunk
+  // streaming + entity replication follow the free camera.
+  useEffect(() => {
+    if (camMode !== "explore" || !joined || !appVisible) return;
+    const last = { x: followCam.explore.x, z: followCam.explore.z };
+    connection.send({ t: "SpectateAt", d: { x: last.x, z: last.z } });
+    const timer = setInterval(() => {
+      const { x, z } = followCam.explore;
+      if (Math.hypot(x - last.x, z - last.z) < SPECTATE_MIN_MOVE) return;
+      last.x = x;
+      last.z = z;
+      connection.send({ t: "SpectateAt", d: { x, z } });
+    }, SPECTATE_SEND_MS);
+    return () => clearInterval(timer);
+  }, [camMode, joined, appVisible, connection]);
 
   // Detail stream (1 Hz activity log) feeds the live action ticker.
   useEffect(() => {
@@ -82,12 +145,14 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
   );
 
   if (roster !== null && roster.length === 0) {
+    // Rare/transient: the server auto-assigns a starter agent on join, so an
+    // empty roster only shows for a beat while that grant replicates.
     return (
       <div className="m-watch m-watch-solid">
         <div className="m-ag-empty">
           <div className="m-ag-empty-glyph">◎</div>
-          <div className="ag-empty-title">NOTHING TO WATCH</div>
-          <div className="m-ag-empty-sub">Hire an agent to start watching.</div>
+          <div className="ag-empty-title">DEPLOYING AGENT</div>
+          <div className="m-ag-empty-sub">Assigning your first agent…</div>
           <button
             type="button"
             className="m-ag-cta"
@@ -102,13 +167,14 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
 
   return (
     <div className="m-watch">
-      <GestureLayer />
-      {!tracked && (
+      <GestureLayer mode={camMode} />
+      {!tracked && camMode === "follow" && (
         <div className="m-watch-veil">
           <span className="m-watch-veil-text">TRACKING…</span>
         </div>
       )}
       <div className="m-watch-hud">
+        <div className="m-watch-top">
         {summary ? (
           <div className="m-watch-card">
             <div className="ag-card-top">
@@ -126,6 +192,23 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
         ) : (
           <div className="m-watch-card m-watch-card-note">SYNCING ROSTER…</div>
         )}
+          <div className="m-watch-modes">
+            <button
+              type="button"
+              className={`m-watch-mode${camMode === "follow" ? " active" : ""}`}
+              onClick={() => setMode("follow")}
+            >
+              ◎ FOLLOW
+            </button>
+            <button
+              type="button"
+              className={`m-watch-mode${camMode === "explore" ? " active" : ""}`}
+              onClick={() => setMode("explore")}
+            >
+              ✥ EXPLORE
+            </button>
+          </div>
+        </div>
         <div className="m-watch-bottom">
           {roster !== null && roster.length > 1 && (
             <AgentSwitcher
@@ -148,12 +231,17 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
 }
 
 /**
- * Full-surface touch layer driving the FollowCamera orbit: one-finger drag
- * steers yaw (horizontal) and pitch (vertical), two-finger pinch zooms.
+ * Full-surface touch layer driving the camera.
+ * FOLLOW: one-finger drag steers yaw/pitch, pinch zooms.
+ * EXPLORE: one-finger drag pans the look target across the map (screen-space,
+ * scaled by orbit distance so panning feels constant at any zoom), pinch
+ * zooms out to a wider survey range.
  */
-function GestureLayer() {
+function GestureLayer({ mode }: { mode: CamMode }) {
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const pinchDist = useRef(0);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -171,19 +259,36 @@ function GestureLayer() {
     const dy = e.clientY - prev.y;
     prev.x = e.clientX;
     prev.y = e.clientY;
+    const explore = modeRef.current === "explore";
 
     if (pointers.current.size === 1) {
-      followCam.yaw += dx * YAW_SENS;
-      followCam.pitch = Math.min(
-        followCam.maxPitch,
-        Math.max(followCam.minPitch, followCam.pitch + dy * PITCH_SENS),
-      );
+      if (explore) {
+        // Screen-space pan on the ground plane, content follows the finger.
+        // Camera forward on XZ points from camera toward target.
+        const fx = -Math.cos(followCam.yaw);
+        const fz = -Math.sin(followCam.yaw);
+        // right = forward × up
+        const rx = -fz;
+        const rz = fx;
+        const scale = PAN_SENS * followCam.distance;
+        followCam.explore.x += (-rx * dx + fx * dy) * scale;
+        followCam.explore.z += (-rz * dx + fz * dy) * scale;
+      } else {
+        followCam.yaw += dx * YAW_SENS;
+        followCam.pitch = Math.min(
+          followCam.maxPitch,
+          Math.max(followCam.minPitch, followCam.pitch + dy * PITCH_SENS),
+        );
+      }
     } else if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y);
       if (pinchDist.current > 0 && dist > 0) {
+        const max = explore
+          ? followCam.maxDistanceExplore
+          : followCam.maxDistance;
         followCam.distance = Math.min(
-          followCam.maxDistance,
+          max,
           Math.max(
             followCam.minDistance,
             followCam.distance * (pinchDist.current / dist),

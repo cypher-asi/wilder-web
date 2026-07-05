@@ -1,13 +1,26 @@
-// Mobile Watch-tab camera: orbits the watched owned agent's replicated
-// entity (agentRoster carries the agent's live entity_id, so the entity is
-// looked up straight out of game.entities). One-finger drag on the Watch
-// tab's gesture layer steers yaw/pitch and pinch zooms by mutating the
-// exported `followCam` state; this component only reads it per frame.
+// Mobile Watch-tab camera. Two modes, driven by the Watch tab's gesture
+// layer mutating the exported `followCam` state:
 //
-// While the agent isn't replicated yet (cold→hot promotion, chunks still
-// streaming after a WatchAgent re-anchor) the camera hovers over the
-// agent's last roster position looking down — the WatchTab shows its
-// "TRACKING…" veil until the entity appears.
+//  FOLLOW  — orbits the watched owned agent's replicated entity (agentRoster
+//            carries the agent's live entity_id, so the entity is looked up
+//            straight out of game.entities). One-finger drag steers
+//            yaw/pitch, pinch zooms. While the agent isn't replicated yet
+//            (cold→hot promotion, chunks still streaming after a WatchAgent
+//            re-anchor) the camera hovers over the agent's last roster
+//            position looking down — the WatchTab shows its "TRACKING…"
+//            veil until the entity appears.
+//
+//  EXPLORE — detached free camera: the orbit target is `followCam.explore`
+//            (panned across the map by one-finger drag, pinch zooms), keeping
+//            the same angled pitch as the sim view. The Watch tab streams the
+//            position to the server (C2S SpectateAt) so chunk/entity interest
+//            follows the exploration.
+//
+// Spectators have no local avatar, so nothing else writes game.predicted /
+// game.rendered. Every world-anchored system reads them — the tron ground
+// grid's proximity glow, the CityProxy occupancy + tile windows, chunk build
+// ordering, the light rigs — so this camera also anchors them to its target
+// each frame.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useRef } from "react";
@@ -18,14 +31,23 @@ import { styleRuntime } from "./styles";
 
 /** Orbit state mutated by the Watch tab's touch gestures. */
 export const followCam = {
+  /** FOLLOW orbits the watched agent; EXPLORE orbits the free target. */
+  mode: "follow" as "follow" | "explore",
   yaw: Math.PI / 4,
   /** Elevation angle (rad); ~0.4 puts the camera ≈4 m up at 10 m out. */
   pitch: 0.42,
   distance: 10,
   minDistance: 4,
   maxDistance: 25,
+  /** Explore mode may pull much further out to survey the map. */
+  maxDistanceExplore: 90,
   minPitch: THREE.MathUtils.degToRad(4),
   maxPitch: THREE.MathUtils.degToRad(72),
+  /** EXPLORE look target (world XZ), panned by the gesture layer. */
+  explore: { x: 0, z: 0 },
+  /** Live look target (world XZ), written per frame; read by the Watch tab
+   * to seed `explore` when detaching from the agent. */
+  target: { x: 0, z: 0 },
 };
 
 /** Look target height above the ground (agent chest height). */
@@ -54,11 +76,13 @@ export function FollowCamera() {
 
   useFrame((_, dt) => {
     const s = summaryRef.current;
+    const explore = followCam.mode === "explore";
     const entity = s ? game.entities.get(s.entity_id) : undefined;
-    // Follow the interpolated entity; fall back to the ~2 s roster position
-    // (agent not replicated yet), then to the character's join position.
-    const tx = entity ? entity.x : (s?.x ?? game.predicted.x);
-    const tz = entity ? entity.z : (s?.z ?? game.predicted.z);
+    // Explore: free target. Follow: the interpolated entity, falling back to
+    // the ~2 s roster position (agent not replicated yet), then to the
+    // character's join position.
+    const tx = explore ? followCam.explore.x : entity ? entity.x : (s?.x ?? game.predicted.x);
+    const tz = explore ? followCam.explore.z : entity ? entity.z : (s?.z ?? game.predicted.z);
     const ty = groundHeightAt(tx, tz);
 
     // Smooth follow; snap on long-range jumps (agent switch, respawn).
@@ -69,9 +93,18 @@ export function FollowCamera() {
       target.current.lerp(next, Math.min(1, dt * 6));
     }
     const t = target.current;
+    followCam.target.x = t.x;
+    followCam.target.z = t.z;
+
+    // Anchor the "player position" the rest of the renderer keys off (grid
+    // glow, proxy windows, chunk build order); spectators never write it.
+    game.predicted.x = t.x;
+    game.predicted.z = t.z;
+    game.rendered.x = t.x;
+    game.rendered.z = t.z;
 
     let lookY: number;
-    if (entity) {
+    if (entity || explore) {
       const pitch = THREE.MathUtils.clamp(
         followCam.pitch,
         followCam.minPitch,

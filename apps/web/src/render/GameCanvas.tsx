@@ -1,11 +1,19 @@
-import { Canvas, events } from "@react-three/fiber";
+import { Canvas, events, useThree } from "@react-three/fiber";
+import { useEffect } from "react";
 import { useIsMobile } from "../mobile/useIsMobile";
 import { GameConnection } from "../net/connection";
 import { AdaptiveQuality } from "../perf/AdaptiveQuality";
 import { PerfTracker } from "../perf/PerfTracker";
 import { DESKTOP_DPR_MAX, MOBILE_DPR_MAX } from "../perf/quality";
 import { useGame } from "../state/game";
-import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
+import {
+  Effects,
+  Lighting,
+  MobileEffects,
+  SceneSetup,
+  SkyBackdrop,
+  SunsetAtmosphere,
+} from "./Atmosphere";
 import { CAMERA_FAR, CameraRig, cameraState } from "./CameraRig";
 import { Chunks } from "./Chunks";
 import { CityProxy } from "./CityProxy";
@@ -15,6 +23,23 @@ import { FollowCamera } from "./FollowCamera";
 import { Interiors } from "./Interior";
 import { Ocean } from "./Ocean";
 import { PlayerInput } from "./PlayerInput";
+
+/**
+ * R3F stops its global render loop while frameloop="never" and does NOT
+ * restart it when the prop flips back to "always": setFrameloop only stores
+ * the value, and invalidate() calls that arrived while paused were swallowed
+ * by the frameloop === "never" guard. Without this kick the mobile Watch tab
+ * (the only unpaused tab) stays frozen on whatever frame the pause left
+ * behind. One invalidate per unpause restarts the loop; with frameloop back
+ * on "always" it then self-sustains.
+ */
+function ResumeFrameloop({ paused }: { paused: boolean }) {
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => {
+    if (!paused) invalidate();
+  }, [paused, invalidate]);
+  return null;
+}
 
 /**
  * While the canvas holds pointer lock the OS cursor is gone and mouse events
@@ -80,6 +105,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
         }
       }}
     >
+      <ResumeFrameloop paused={paused} />
       <PerfTracker />
       <AdaptiveQuality maxDpr={mobile ? MOBILE_DPR_MAX : DESKTOP_DPR_MAX} />
       <SunsetAtmosphere>
@@ -97,7 +123,10 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
             are replaced by the Watch tab's agent follow camera. */}
         {mobile ? <FollowCamera /> : <CameraRig />}
         {!mobile && <PlayerInput connection={connection} />}
-        {!mobile && <Effects />}
+        {/* Mobile gets a minimal post stack (bloom + tone mapping): the tron
+            look leans on bloom to turn its thin emissive lines into neon —
+            without it the whole style reads near-black. */}
+        {mobile ? <MobileEffects /> : <Effects />}
       </SunsetAtmosphere>
     </Canvas>
   );

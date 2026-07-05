@@ -137,14 +137,17 @@ function AgentListPage({
   );
 }
 
+// Rare/transient: the server auto-assigns a starter agent on join, so an
+// empty roster only shows for a beat while that grant replicates (or when
+// the whole faction is hired out).
 function EmptyState({ onHire }: { onHire: () => void }) {
   return (
     <div className="m-ag-empty">
       <div className="m-ag-empty-glyph">◈</div>
-      <div className="ag-empty-title">NO AGENTS YET</div>
+      <div className="ag-empty-title">DEPLOYING AGENT</div>
       <div className="m-ag-empty-sub">
-        Agents roam the city and earn for you around the clock. Your first hire
-        is free.
+        Assigning your first agent… Agents roam the city and earn for you
+        around the clock.
       </div>
       <button type="button" className="m-ag-cta" onClick={onHire}>
         HIRE AGENT

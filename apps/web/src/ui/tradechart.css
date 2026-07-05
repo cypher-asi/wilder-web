@@ -1,0 +1,40 @@
+/* TradeChart (lightweight-charts) + the timeframe selector row. Kept out of
+   theme.css so the chart component stays self-contained. */
+
+.trade-chart-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.trade-tf-row {
+  margin-bottom: 0;
+}
+
+.trade-tf-row .econ-tab {
+  min-width: 24px;
+  text-align: center;
+  user-select: none;
+}
+
+.trade-chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 220px;
+}
+
+.trade-chart-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.trade-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}

@@ -267,8 +267,11 @@ const BOOK_TICK_INTERVAL: u64 = 20;
 const MARKETS_TICK_INTERVAL: u64 = 40;
 /// Depth levels per side shipped in a `BookState`.
 const BOOK_DEPTH_LEVELS: usize = 20;
-/// Minute candles shipped in a `BookState` (~3 h chart window).
+/// Candles shipped in a `BookState` (~3 h at the default 1 m frame).
 const BOOK_CANDLES_MAX: usize = 180;
+/// Candle timeframes (seconds) a `BookSub` may ask for: 1s..1d.
+const BOOK_TIMEFRAMES: [u32; 10] =
+    [1, 5, 15, 30, 60, 300, 900, 3600, 14_400, 86_400];
 /// Tape prints shipped in a `BookState`.
 const BOOK_TAPE_MAX: usize = 30;
 /// Stream whole-map intel blips to map subscribers every N ticks (~5 Hz) so
@@ -733,6 +736,8 @@ fn spark_points(candles: &[wilder_exchange::Candle], now_ms: u64) -> Vec<u32> {
     if candles.is_empty() {
         return Vec::new();
     }
+    // Minute-series candles: slot boundaries walk whole minutes, compared
+    // against each candle's bucket-start minute.
     let now_min = now_ms / 60_000;
     let start_min = now_min.saturating_sub(DAY_MS / 60_000);
     let step = (now_min - start_min).max(SPARK_POINTS) / SPARK_POINTS;
@@ -741,7 +746,7 @@ fn spark_points(candles: &[wilder_exchange::Candle], now_ms: u64) -> Vec<u32> {
     let mut close: Option<u32> = None;
     for slot in 1..=SPARK_POINTS {
         let slot_end = start_min + slot * step;
-        while idx < candles.len() && candles[idx].minute <= slot_end {
+        while idx < candles.len() && candles[idx].start_secs / 60 <= slot_end {
             close = Some(candles[idx].close);
             idx += 1;
         }
@@ -1150,6 +1155,11 @@ struct Player {
     /// chunk streaming + entity replication center on the agent's position
     /// and the agent is pinned to the Hot tier.
     watch_anchor: Option<usize>,
+    /// Spectator free-explore anchor (`C2S::SpectateAt`): a raw world
+    /// position that chunk streaming + entity replication center on while
+    /// the mobile Watch tab's EXPLORE camera roams. Takes precedence over
+    /// `watch_anchor`; any `WatchAgent` (set or clear) clears it.
+    spectate_anchor: Option<Vec3>,
     /// World-clock seconds of the last "backpack full" deny sent for
     /// auto-pickup. Rate-limits the toast so standing on loot with a full
     /// pack doesn't spam it every tick.
@@ -1371,13 +1381,17 @@ impl Player {
     }
 }
 
-/// Where a player's interest centers: the watched agent's position while a
-/// `WatchAgent` anchor is set (dead or alive — the slot's position is where
-/// the body fell until respawn relocates it), otherwise the avatar/character
-/// position. Chunk streaming, entity replication, hot-tier classification
-/// and the agent-dot feed all read this. A free function (not a method) so
-/// it can be called while `self.players` is mutably borrowed.
+/// Where a player's interest centers: the free-explore `SpectateAt` position
+/// while one is set, else the watched agent's position while a `WatchAgent`
+/// anchor is set (dead or alive — the slot's position is where the body fell
+/// until respawn relocates it), otherwise the avatar/character position.
+/// Chunk streaming, entity replication, hot-tier classification and the
+/// agent-dot feed all read this. A free function (not a method) so it can be
+/// called while `self.players` is mutably borrowed.
 fn interest_center(agents: &[FactionAgent], player: &Player) -> Vec3 {
+    if let Some(pos) = player.spectate_anchor {
+        return pos;
+    }
     player
         .watch_anchor
         .and_then(|idx| agents.get(idx))
@@ -1585,9 +1599,9 @@ pub struct World {
     econ_subs: HashSet<EntityId>,
     /// Players subscribed to the markets index (`MarketsSub`).
     markets_subs: HashSet<EntityId>,
-    /// Players watching one (venue, asset) order book (`BookSub`); at most
-    /// one active book per connection.
-    book_subs: HashMap<EntityId, (VenueId, Asset)>,
+    /// Players watching one (venue, asset) order book (`BookSub`) at a
+    /// candle timeframe (seconds); at most one active book per connection.
+    book_subs: HashMap<EntityId, (VenueId, Asset, u32)>,
     /// Autonomous faction agents (index-stable; identity swaps on respawn).
     agents: Vec<FactionAgent>,
     /// Live entity id -> agents index, for combat/target lookups.
@@ -1951,6 +1965,7 @@ impl World {
             agent_detail: None,
             spectator: spectate,
             watch_anchor: None,
+            spectate_anchor: None,
             last_full_deny: f64::NEG_INFINITY,
             dirty: true,
         };
@@ -1990,6 +2005,12 @@ impl World {
         }
 
         self.players.insert(entity, player);
+        // Every character manages at least one agent: joining with an empty
+        // roster auto-assigns a starter. Done here, during join handling, so
+        // it is already owned by the time the client's AgentSub arrives
+        // (messages on a connection are processed in order) and the first
+        // roster push includes it.
+        self.grant_starter_agent(entity);
         // Exchange-wide view (open orders + settlement inboxes) so the
         // Trade screen's global tabs work from the first frame.
         self.push_my_exchange_state(entity);
@@ -2115,7 +2136,7 @@ impl World {
             }
             C2S::Exchange(action) => self.exchange_action(entity, action),
             C2S::MarketsSub { on } => self.markets_sub(entity, on),
-            C2S::BookSub { market } => self.book_sub(entity, market),
+            C2S::BookSub { market, tf_secs } => self.book_sub(entity, market, tf_secs),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::EconomySub { on } => self.economy_sub(entity, on),
             C2S::HireAgent { agent_id } => self.hire_agent(entity, agent_id),
@@ -2124,6 +2145,7 @@ impl World {
             C2S::AgentSub { on } => self.agent_sub(entity, on),
             C2S::AgentDetailSub { agent_id } => self.agent_detail_sub(entity, agent_id),
             C2S::WatchAgent { agent_id } => self.watch_agent(entity, agent_id),
+            C2S::SpectateAt { x, z } => self.spectate_at(entity, x, z),
             C2S::MapIntelSub { on } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.map_intel = on;
@@ -4435,7 +4457,7 @@ impl World {
     /// Watch (or stop watching) one (venue, asset) book. Subscribing
     /// answers immediately with a full `BookState`; re-pushes follow from
     /// `broadcast_books` while the book stays dirty.
-    fn book_sub(&mut self, entity: EntityId, market: Option<BookTarget>) {
+    fn book_sub(&mut self, entity: EntityId, market: Option<BookTarget>, tf_secs: u32) {
         let Some(target) = market else {
             self.book_subs.remove(&entity);
             return;
@@ -4444,7 +4466,9 @@ impl World {
         if self.venue_terminal(venue).is_none() || !self.players.contains_key(&entity) {
             return;
         }
-        self.book_subs.insert(entity, (venue, asset_from_msg(target.asset)));
+        // Unknown timeframes fall back to 1-minute candles.
+        let tf_secs = if BOOK_TIMEFRAMES.contains(&tf_secs) { tf_secs } else { 60 };
+        self.book_subs.insert(entity, (venue, asset_from_msg(target.asset), tf_secs));
         self.push_book_state(entity);
     }
 
@@ -4530,18 +4554,25 @@ impl World {
     }
 
     /// Build one (venue, asset) book snapshot for a player: bounded depth,
-    /// 24 h stats, candles, tape, plus the player's own orders and inbox.
-    fn book_state(&self, entity: EntityId, venue: VenueId, asset: Asset) -> Option<BookStateMsg> {
+    /// 24 h stats, candles at `tf_secs`, tape, plus the player's own orders
+    /// and inbox.
+    fn book_state(
+        &self,
+        entity: EntityId,
+        venue: VenueId,
+        asset: Asset,
+        tf_secs: u32,
+    ) -> Option<BookStateMsg> {
         let player = self.players.get(&entity)?;
         let owner = OrderOwner::Player(player.character.id);
         let now_ms = ledger::unix_ms();
         let (bids, asks) = self.exchange.depth(venue, asset, BOOK_DEPTH_LEVELS);
         let stats = self.exchange.stats(venue, asset, now_ms);
-        let all_candles = self.exchange.candles(venue, asset);
+        let all_candles = self.exchange.candles_tf(venue, asset, tf_secs, now_ms);
         let candles = all_candles[all_candles.len().saturating_sub(BOOK_CANDLES_MAX)..]
             .iter()
             .map(|c| CandleMsg {
-                t: c.minute * 60_000,
+                t: c.start_secs * 1_000,
                 open: c.open,
                 high: c.high,
                 low: c.low,
@@ -4585,6 +4616,7 @@ impl World {
                 volume_24h_units: stats.volume_24h_units.min(u32::MAX as u64) as u32,
                 change_24h_bp: change_bp(stats.last_price, stats.price_24h_ago),
             },
+            tf_secs,
             candles,
             tape,
             my_orders,
@@ -4594,8 +4626,8 @@ impl World {
 
     /// Push the player's watched book, if they watch one.
     fn push_book_state(&self, entity: EntityId) {
-        let Some(&(venue, asset)) = self.book_subs.get(&entity) else { return };
-        let Some(state) = self.book_state(entity, venue, asset) else { return };
+        let Some(&(venue, asset, tf_secs)) = self.book_subs.get(&entity) else { return };
+        let Some(state) = self.book_state(entity, venue, asset, tf_secs) else { return };
         if let Some(player) = self.players.get(&entity) {
             let _ = player.tx.send(S2C::BookState(state));
         }
@@ -4635,7 +4667,7 @@ impl World {
         let watchers: Vec<EntityId> = self
             .book_subs
             .iter()
-            .filter(|(_, key)| dirty.contains(key))
+            .filter(|(_, &(venue, asset, _))| dirty.contains(&(venue, asset)))
             .map(|(&id, _)| id)
             .collect();
         for id in watchers {
@@ -9223,6 +9255,57 @@ impl World {
         }
     }
 
+    /// Auto-assign a starter agent to a player who owns none (called during
+    /// join). Picks the cheapest unowned, living, same-faction agent —
+    /// hire-cost ranks by wealth + proven skill, so "cheapest" is the
+    /// natural rookie — tie-breaking toward spawn so the first Watch anchor
+    /// lands somewhere near the action. Free, and deliberately idempotent
+    /// per join rather than per character: dismiss everything and you get a
+    /// fresh starter next join.
+    fn grant_starter_agent(&mut self, entity: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let char_id = player.character.id;
+        let char_name = player.character.name.clone();
+        let faction = player.character.faction;
+        if self.owned_agents.get(&char_id).is_some_and(|v| !v.is_empty()) {
+            return;
+        }
+        let Some(idx) = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.owner.is_none() && a.alive() && a.faction == faction)
+            .map(|(i, a)| {
+                (self.agent_hire_cost(i), (a.position - SPAWN).length_squared() as i64, i)
+            })
+            .min()
+            .map(|(_, _, i)| i)
+        else {
+            // Faction fully hired out (or dead): the player can still hire
+            // later through the normal flow when someone frees up.
+            return;
+        };
+        let agent_id = self.agents[idx].agent_id;
+        self.agents[idx].owner = Some(char_id);
+        self.owned_agents.entry(char_id).or_default().push(idx);
+        let mut log = VecDeque::with_capacity(AGENT_LOG_CAP);
+        log.push_back(AgentLogEntry {
+            at_ms: ledger::unix_ms(),
+            text: format!("Assigned to {char_name} (starter grant — free)"),
+        });
+        self.agent_logs.insert(agent_id, log);
+        self.agent_txs.insert(agent_id, VecDeque::with_capacity(AGENT_TX_CAP));
+        tracing::info!(
+            entity,
+            agent = %self.agents[idx].name,
+            owner = %char_name,
+            "starter agent auto-assigned"
+        );
+        // No-op unless already subscribed (join grants happen before the
+        // client's AgentSub can arrive); harmless to call for re-grants.
+        self.refresh_agent_roster(entity);
+    }
+
     /// `C2S::HireAgent`: take ownership of an unowned, living, same-faction
     /// agent. The first hire per character is free (starter grant); later
     /// hires charge `agent_hire_cost` MILD from the carried wallet and burn
@@ -9403,6 +9486,7 @@ impl World {
         let Some(agent_id) = agent_id else {
             if let Some(player) = self.players.get_mut(&entity) {
                 player.watch_anchor = None;
+                player.spectate_anchor = None;
             }
             return;
         };
@@ -9418,7 +9502,25 @@ impl World {
         }
         if let Some(player) = self.players.get_mut(&entity) {
             player.watch_anchor = Some(idx);
+            // Re-anchoring to the agent ends any free-explore session.
+            player.spectate_anchor = None;
         }
+    }
+
+    /// `C2S::SpectateAt`: free-explore interest anchor for spectators (the
+    /// mobile Watch tab's EXPLORE camera). Overrides the `WatchAgent` anchor
+    /// while set; the next `WatchAgent` clears it. Embodied players are
+    /// refused — moving your interest without moving your avatar would be a
+    /// wallhack-adjacent scouting tool.
+    fn spectate_at(&mut self, entity: EntityId, x: f32, z: f32) {
+        if !x.is_finite() || !z.is_finite() {
+            return;
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        if !player.spectator {
+            return;
+        }
+        player.spectate_anchor = Some(Vec3::new(x, 0.0, z));
     }
 
     /// Full `AgentDetail` payload for one agent: summary + goal prose +
@@ -11383,6 +11485,133 @@ mod tests {
     }
 
     #[test]
+    fn spectate_at_overrides_watch_anchor_until_rewatched() {
+        let (mut world, _dir) = test_world();
+        let account = world.store.create_account("roamer", "pw").unwrap();
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: account.id,
+            name: "ROAMER".into(),
+            appearance: Appearance::default(),
+            position: SPAWN,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.store.create_character(&character).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        std::mem::forget(_rx);
+        let spec = world.join(account.id, character.id, tx, true).unwrap();
+
+        // Watch an owned agent parked far east.
+        let agent_pos = SPAWN + Vec3::new(800.0, 0.0, 0.0);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), agent_pos);
+        let agent_id = world.agents[idx].agent_id;
+        world.agents[idx].owner = Some(character.id);
+        world.owned_agents.entry(character.id).or_default().push(idx);
+        world.handle_msg(spec, C2S::WatchAgent { agent_id: Some(agent_id) });
+        assert_eq!(interest_center(&world.agents, &world.players[&spec]), agent_pos);
+
+        // Free explore: SpectateAt wins over the watch anchor.
+        let roam = SPAWN + Vec3::new(-600.0, 0.0, 400.0);
+        world.handle_msg(spec, C2S::SpectateAt { x: roam.x, z: roam.z });
+        assert_eq!(interest_center(&world.agents, &world.players[&spec]), roam);
+        world.update_interest();
+        assert!(world.players[&spec].view.contains(&ChunkCoord::from_world(roam)));
+        assert!(!world.players[&spec].view.contains(&ChunkCoord::from_world(agent_pos)));
+
+        // Recentering on the agent clears the free anchor.
+        world.handle_msg(spec, C2S::WatchAgent { agent_id: Some(agent_id) });
+        assert_eq!(world.players[&spec].spectate_anchor, None);
+        assert_eq!(interest_center(&world.agents, &world.players[&spec]), agent_pos);
+
+        // Embodied players can't relocate their interest for free scouting.
+        let embodied = insert_test_player(&mut world, SPAWN);
+        world.handle_msg(embodied, C2S::SpectateAt { x: roam.x, z: roam.z });
+        assert_eq!(world.players[&embodied].spectate_anchor, None);
+    }
+
+    #[test]
+    fn join_auto_assigns_starter_agent_when_roster_empty() {
+        let (mut world, _dir) = test_world();
+        // Candidate pool: a cheap same-faction rookie (should win), a wealthy
+        // veteran, a wrong-faction agent and a dead one (both ineligible).
+        let rookie = spawn_test_agent(
+            &mut world,
+            FACTION_REBELS,
+            Traits::fighter(),
+            SPAWN + Vec3::new(40.0, 0.0, 0.0),
+        );
+        let veteran = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), SPAWN);
+        world.agents[veteran].purse.credit(Currency::Wild, 100_000);
+        spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), SPAWN);
+        let dead = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), SPAWN);
+        world.agents[dead].health = 0.0;
+
+        let account = world.store.create_account("fresh", "pw").unwrap();
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: account.id,
+            name: "FRESH".into(),
+            appearance: Appearance::default(),
+            position: SPAWN,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.store.create_character(&character).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let spec = world.join(account.id, character.id, tx, true).unwrap();
+
+        // The starter was granted during join: the cheap living rookie.
+        assert_eq!(world.owned_agents.get(&character.id), Some(&vec![rookie]));
+        assert_eq!(world.agents[rookie].owner, Some(character.id));
+        let log = &world.agent_logs[&world.agents[rookie].agent_id];
+        assert!(
+            log.iter().any(|e| e.text.starts_with("Assigned to FRESH")),
+            "assignment missing from the activity ring: {log:?}"
+        );
+
+        // The AgentSub sent right after join already sees the grant.
+        world.handle_msg(spec, C2S::AgentSub { on: true });
+        let mut roster = None;
+        while let Ok(msg) = rx.try_recv() {
+            if let S2C::AgentRoster { agents } = msg {
+                roster = Some(agents);
+            }
+        }
+        let roster = roster.expect("AgentSub answers with a roster");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].agent_id, world.agents[rookie].agent_id);
+
+        // Rejoin while still owning the rookie: no second grant.
+        world.leave(spec);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        std::mem::forget(_rx);
+        let spec = world.join(account.id, character.id, tx, true).unwrap();
+        assert_eq!(world.owned_agents.get(&character.id), Some(&vec![rookie]));
+
+        // Dismiss everything, rejoin: a fresh starter is granted again.
+        world.handle_msg(spec, C2S::DismissAgent { agent_id: world.agents[rookie].agent_id });
+        assert_eq!(world.owned_agents.get(&character.id), None);
+        world.leave(spec);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        std::mem::forget(_rx);
+        world.join(account.id, character.id, tx, true).unwrap();
+        assert_eq!(world.owned_agents.get(&character.id).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
     fn overlapping_hot_agents_get_pushed_apart() {
         let (mut world, _dir) = test_world();
         let spot = world.nearest_walkable(district_anchor("NEXUS"));
@@ -11466,6 +11695,7 @@ mod tests {
                 agent_detail: None,
                 spectator: false,
                 watch_anchor: None,
+                spectate_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -12061,6 +12291,7 @@ mod tests {
                 agent_detail: None,
                 spectator: false,
                 watch_anchor: None,
+                spectate_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -12257,6 +12488,7 @@ mod tests {
                 agent_detail: None,
                 spectator: false,
                 watch_anchor: None,
+                spectate_anchor: None,
                 last_full_deny: f64::NEG_INFINITY,
                 dirty: true,
             },
@@ -12502,15 +12734,24 @@ mod tests {
         // depth, one candle, one buy print on the tape.
         let watcher = spawn_test_player(&mut world, terminal_pos);
         let state = world
-            .book_state(watcher, venue, Asset::Item(ItemKind::Iron))
+            .book_state(watcher, venue, Asset::Item(ItemKind::Iron), 60)
             .expect("book snapshot");
         assert_eq!(state.last, listing_price);
         assert_eq!(state.asks.iter().map(|&(_, qty)| qty).sum::<u32>(), 20);
         assert_eq!(state.asks[0].0, listing_price);
+        assert_eq!(state.tf_secs, 60);
         assert_eq!(state.candles.len(), 1);
         assert_eq!(state.tape.len(), 1);
         assert_eq!((state.tape[0].price, state.tape[0].qty), (listing_price, 10));
         assert_eq!(state.tape[0].side, SideMsg::Bid);
+        // Sub-minute frames read the 1 s tick series and echo their tf.
+        let tick_state = world
+            .book_state(watcher, venue, Asset::Item(ItemKind::Iron), 1)
+            .expect("tick snapshot");
+        assert_eq!(tick_state.tf_secs, 1);
+        assert_eq!(tick_state.candles.len(), 1);
+        assert_eq!(tick_state.candles[0].close, listing_price);
+        assert_eq!(tick_state.candles[0].t % 1_000, 0);
     }
 
     #[test]

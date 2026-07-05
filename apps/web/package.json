@@ -17,6 +17,7 @@
     "@takram/three-geospatial": "^0.9.1",
     "@tanstack/react-query": "^5.90.5",
     "howler": "^2.2.4",
+    "lightweight-charts": "^5.2.0",
     "postprocessing": "^6.39.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

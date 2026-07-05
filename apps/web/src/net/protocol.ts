@@ -332,7 +332,7 @@ export type C2S =
   | Tagged<"CancelProduction", { building: number; job_id: number }>
   | Tagged<"Exchange", ExchangeActionMsg>
   | Tagged<"MarketsSub", { on: boolean }>
-  | Tagged<"BookSub", { market: BookTarget | null }>
+  | Tagged<"BookSub", { market: BookTarget | null; tf_secs?: number }>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
   | Tagged<"MapIntelSub", { on: boolean }>
@@ -342,6 +342,7 @@ export type C2S =
   | Tagged<"AgentSub", { on: boolean }>
   | Tagged<"AgentDetailSub", { agent_id: string | null }>
   | Tagged<"WatchAgent", { agent_id: string | null }>
+  | Tagged<"SpectateAt", { x: number; z: number }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -415,7 +416,7 @@ export interface BookStatsMsg {
   change_24h_bp: number;
 }
 
-/** One minute OHLCV candle for the price chart. */
+/** One OHLCV candle for the price chart, at the subscription's timeframe. */
 export interface CandleMsg {
   /** Bucket start, unix milliseconds. */
   t: number;
@@ -483,7 +484,9 @@ export interface BookStateMsg {
   /** Most recent trade price here (0 = never traded). */
   last: number;
   stats: BookStatsMsg;
-  /** Minute candles, oldest first (bounded chart window, ~3h). */
+  /** Candle timeframe in seconds (echoes the subscription's tf_secs). */
+  tf_secs: number;
+  /** OHLCV candles at tf_secs resolution, oldest first (newest ~180 buckets). */
   candles: CandleMsg[];
   /** Recent prints, newest first (last ~30). */
   tape: TapeMsg[];

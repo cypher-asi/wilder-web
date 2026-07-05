@@ -323,9 +323,23 @@ impl Exchange {
         self.data.stats(venue, asset, now_ms)
     }
 
-    /// Minute OHLCV candles, oldest first.
+    /// Minute OHLCV candles, oldest first (24 h stats / sparkline source).
     pub fn candles(&self, venue: VenueId, asset: Asset) -> &[Candle] {
         self.data.candles(venue, asset)
+    }
+
+    /// OHLCV candles aggregated to `tf_secs`-second buckets, oldest first,
+    /// bounded to the most recent ~200 buckets before `now_ms`. Sub-minute
+    /// frames come from the 1 s tick series (~1 h of history), minute-and-up
+    /// frames from the minute series (~24 h).
+    pub fn candles_tf(
+        &self,
+        venue: VenueId,
+        asset: Asset,
+        tf_secs: u32,
+        now_ms: u64,
+    ) -> Vec<Candle> {
+        self.data.candles_tf(venue, asset, tf_secs, now_ms)
     }
 
     /// Recent trades, oldest first.
@@ -631,6 +645,8 @@ mod tests {
 
         // Candles/tape/stats survive.
         assert_eq!(back.candles(v0, iron()).len(), 1);
+        assert_eq!(back.candles_tf(v0, iron(), 1, now + 3).len(), 1);
+        assert_eq!(back.candles_tf(v0, iron(), 300, now + 3).len(), 1);
         assert_eq!(back.tape(v0, iron()).len(), 1);
         assert_eq!(back.stats(v0, iron(), now + 3).last_price, Some(5));
         assert_eq!(back.fees_collected(), 1);

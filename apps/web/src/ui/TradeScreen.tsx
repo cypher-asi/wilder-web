@@ -2,20 +2,19 @@
 // the economy dashboard. Two views:
 //  - Markets: searchable/sortable cross-venue ticker table (MarketsSub) with
 //    an expandable per-venue arbitrage breakdown per row.
-//  - Market detail: one (venue, asset) book (BookSub) — candle chart, order
+//  - Market detail: one (venue, asset) book (BookSub) â€” candle chart, order
 //    ladder, trades tape, and a venue-gated order entry panel, plus bottom
 //    tabs for open orders / recent trades / settlement inboxes.
 //
 // Market data is viewable from anywhere; placing/cancelling orders and
 // claiming settlement require standing at the venue's terminal (the server
-// enforces it — the client gating is UX).
+// enforces it â€” the client gating is UX).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
 import {
   AssetMsg,
   BookStateMsg,
-  CandleMsg,
   ItemKind,
   MarketRow,
   OrderMsg,
@@ -26,6 +25,7 @@ import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
 import { fmtCompact, fmtMild, formatAge } from "./format";
 import { FeedIcon, ITEM_INFO, ItemIcon, itemLabel } from "./ItemIcon";
+import { TradeChart } from "./TradeChart";
 import { fmtUsd, useWildUsd } from "./useWildUsd";
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ import { fmtUsd, useWildUsd } from "./useWildUsd";
 
 /** Taker fee (percent, mirror of the server's MARKET_FEE_PCT). */
 const FEE_PCT = 5;
-/** "At the venue terminal" radius (m) — mirrors the server interact range,
+/** "At the venue terminal" radius (m) â€” mirrors the server interact range,
  * with a little slack for the anchor sitting proud of the counter. */
 const AT_VENUE_M = 6;
 
@@ -59,8 +59,18 @@ export function assetTicker(a: AssetMsg): string {
 }
 
 export function AssetGlyph({ asset, size = 18 }: { asset: AssetMsg; size?: number }) {
-  if (asset.t === "Item") return <ItemIcon kind={asset.d} size={size} />;
-  return <FeedIcon kind={asset.t === "Shards" ? "shards" : "energy"} size={size} />;
+  if (asset.t === "Item") return <ItemIcon kind={asset.d} size={size} coin />;
+  // Currencies get the same colored-disc "coin" treatment as items.
+  const color = asset.t === "Shards" ? "#b98be0" : "#f4c430";
+  return (
+    <span
+      className="asset-coin"
+      style={{ width: size, height: size, background: color }}
+      aria-label={assetLabel(asset)}
+    >
+      <FeedIcon kind={asset.t === "Shards" ? "shards" : "energy"} size={Math.round(size * 0.66)} />
+    </span>
+  );
 }
 
 /** Coarse market categories for the filter chips. */
@@ -89,7 +99,7 @@ function changeColor(bp: number): string | undefined {
 
 /** "1,234 MILD" or an em-dash for empty book sides / never-traded markets. */
 function priceOrDash(p: number): string {
-  return p > 0 ? fmtMild(p) : "—";
+  return p > 0 ? fmtMild(p) : "â€”";
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +124,37 @@ function saveFavs(favs: Set<string>): void {
 }
 
 // ---------------------------------------------------------------------------
+// Chart timeframes (persisted)
+// ---------------------------------------------------------------------------
+
+const TF_KEY = "wilder.trade.tf";
+
+/** Candle timeframes the chart offers (mirror of the server's allow-list). */
+const TIMEFRAMES: { label: string; secs: number }[] = [
+  { label: "1s", secs: 1 },
+  { label: "5s", secs: 5 },
+  { label: "15s", secs: 15 },
+  { label: "30s", secs: 30 },
+  { label: "1m", secs: 60 },
+  { label: "5m", secs: 300 },
+  { label: "15m", secs: 900 },
+  { label: "1h", secs: 3600 },
+  { label: "4h", secs: 14400 },
+  { label: "1d", secs: 86400 },
+];
+
+function loadTf(): number {
+  if (typeof localStorage === "undefined") return 60;
+  const secs = Number(localStorage.getItem(TF_KEY));
+  return TIMEFRAMES.some((tf) => tf.secs === secs) ? secs : 60;
+}
+
+function saveTf(secs: number): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(TF_KEY, String(secs));
+}
+
+// ---------------------------------------------------------------------------
 // Venue proximity: which venue terminal (if any) the player is standing at
 // ---------------------------------------------------------------------------
 
@@ -126,7 +167,7 @@ interface VenueProximity {
 
 /**
  * Polls the player's distance to every venue anchor (~2 Hz). Standing "at" a
- * venue means being within interact range of its terminal anchor — or inside
+ * venue means being within interact range of its terminal anchor â€” or inside
  * its walk-in room, which `nearMarket` (ProximityTracker) covers: the anchor
  * sits out on the sidewalk, so the interior check rides that flag as long as
  * this venue is the nearest one.
@@ -253,7 +294,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
   return (
     <div className="map-overlay trade-overlay">
       {markets === null ? (
-        <div className="econ-empty trade-syncing">SYNCING MARKETS…</div>
+        <div className="econ-empty trade-syncing">SYNCING MARKETSâ€¦</div>
       ) : sel === null ? (
         <MarketsView rows={markets.rows} venues={venues} onOpen={openMarket} wildUsd={wildUsd} />
       ) : (
@@ -279,7 +320,7 @@ export function TradeScreen({ connection }: { connection: GameConnection }) {
 type SortKey = "cap" | "price" | "change" | "volume" | "supply";
 
 const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
-  { id: "fav", label: "★ FAVORITES" },
+  { id: "fav", label: "â˜… FAVORITES" },
   { id: "all", label: "ALL" },
   { id: "resource", label: "RESOURCES" },
   { id: "material", label: "MATERIALS" },
@@ -290,7 +331,7 @@ const MARKET_CHIPS: { id: MarketCat | "all" | "fav"; label: string }[] = [
 /** CMC-style 24h sparkline: pure-SVG close-price polyline colored by the
  * row's 24h direction. */
 function Spark({ points, changeBp }: { points: number[]; changeBp: number }) {
-  if (points.length < 2) return <span className="trade-spark-empty">—</span>;
+  if (points.length < 2) return <span className="trade-spark-empty">â€”</span>;
   const w = 104;
   const h = 30;
   const min = Math.min(...points);
@@ -388,21 +429,21 @@ function MarketsView({
   }, [rows, search, chip, favs, sortKey, sortDesc]);
 
   const sortMark = (key: SortKey) =>
-    sortKey === key ? (sortDesc ? " ▼" : " ▲") : "";
+    sortKey === key ? (sortDesc ? " â–¼" : " â–²") : "";
 
   return (
     <div className="econ-panel trade-mkts">
       <div className="econ-panel-title">
         MARKETS
         <span className="econ-panel-sub">
-          {rows.length} TICKERS · {venues.length} VENUES · QUOTED IN MILD
-          {wildUsd !== null && ` · WILD ${fmtUsd(wildUsd)}`}
+          {rows.length} TICKERS Â· {venues.length} VENUES Â· QUOTED IN MILD
+          {wildUsd !== null && ` Â· WILD ${fmtUsd(wildUsd)}`}
         </span>
       </div>
       <div className="trade-toolbar">
         <input
           className="trade-search"
-          placeholder="Search ticker or name…"
+          placeholder="Search ticker or nameâ€¦"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -460,11 +501,11 @@ function MarketsView({
                     toggleFav(key);
                   }}
                 >
-                  {favs.has(key) ? "★" : "☆"}
+                  {favs.has(key) ? "â˜…" : "â˜†"}
                 </span>
                 <span className="num trade-mkt-rank">{rank.get(key)}</span>
                 <span className="trade-mkt-id">
-                  <AssetGlyph asset={r.asset} size={20} />
+                  <AssetGlyph asset={r.asset} size={23} />
                   <span className="trade-mkt-name">{assetLabel(r.asset)}</span>
                   <span className="trade-mkt-ticker">{r.ticker}</span>
                 </span>
@@ -479,10 +520,10 @@ function MarketsView({
                   )}
                 </span>
                 <span className="num" style={{ color: changeColor(r.change_24h_bp) }}>
-                  {r.last > 0 ? fmtBp(r.change_24h_bp) : "—"}
+                  {r.last > 0 ? fmtBp(r.change_24h_bp) : "â€”"}
                 </span>
                 <span className="num trade-cell-2l">
-                  <span>{r.market_cap > 0 ? `${fmtCompact(r.market_cap)} WILD` : "—"}</span>
+                  <span>{r.market_cap > 0 ? `${fmtCompact(r.market_cap)} WILD` : "â€”"}</span>
                   {wildUsd !== null && r.market_cap > 0 && (
                     <span className="trade-cell-sub">{fmtUsd(r.market_cap * wildUsd)}</span>
                   )}
@@ -494,7 +535,7 @@ function MarketsView({
                   )}
                 </span>
                 <span className="num">
-                  {r.supply > 0 ? `${fmtCompact(r.supply)} ${r.ticker}` : "—"}
+                  {r.supply > 0 ? `${fmtCompact(r.supply)} ${r.ticker}` : "â€”"}
                 </span>
                 <span className="num trade-spark-cell">
                   <Spark points={r.spark} changeBp={r.change_24h_bp} />
@@ -507,7 +548,7 @@ function MarketsView({
                     setExpanded(isExpanded ? null : key);
                   }}
                 >
-                  ▾
+                  â–¾
                 </span>
               </div>
               {isExpanded && (
@@ -543,7 +584,7 @@ function MarketsView({
                         {priceOrDash(v.best_ask)}
                       </span>
                       <span className="num">{fmtCompact(v.volume_24h_wild)} MILD</span>
-                      <span className="trade-venue-go">TRADE ›</span>
+                      <span className="trade-venue-go">TRADE â€º</span>
                     </div>
                   ))}
                 </div>
@@ -592,18 +633,26 @@ function MarketDetail({
   const venue = venues.find((v) => v.venue === sel.venue) ?? null;
   const venueName = venue?.name ?? `VENUE ${sel.venue}`;
 
-  // One live book subscription per (venue, asset); swapping markets re-subs.
+  // Chart timeframe, persisted; changing it re-subscribes at the new tf.
+  const [tfSecs, setTfSecs] = useState<number>(loadTf);
+  const pickTf = (secs: number) => {
+    setTfSecs(secs);
+    saveTf(secs);
+  };
+
+  // One live book subscription per (venue, asset, timeframe); swapping
+  // markets or frames re-subs.
   useEffect(() => {
     if (!joined) return;
     connection.send({
       t: "BookSub",
-      d: { market: { venue: sel.venue, asset: sel.asset } },
+      d: { market: { venue: sel.venue, asset: sel.asset }, tf_secs: tfSecs },
     });
     return () => {
-      connection.send({ t: "BookSub", d: { market: null } });
+      connection.send({ t: "BookSub", d: { market: null, tf_secs: tfSecs } });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [joined, connection, sel.venue, selKey]);
+  }, [joined, connection, sel.venue, selKey, tfSecs]);
 
   // Order entry prefill from the ladder (click a level).
   const [prefillPrice, setPrefillPrice] = useState<number | null>(null);
@@ -625,10 +674,10 @@ function MarketDetail({
     <div className="trade-detail">
       <div className="trade-detail-head">
         <button className="trade-back" onClick={onBack} title="Back to markets (ESC)">
-          ‹
+          â€¹
         </button>
         <span className="trade-mkt-id trade-detail-id">
-          <AssetGlyph asset={sel.asset} size={24} />
+          <AssetGlyph asset={sel.asset} size={27} />
           <span className="trade-mkt-ticker">{row?.ticker ?? assetTicker(sel.asset)}</span>
           <span className="trade-mkt-name">{assetLabel(sel.asset)}</span>
         </span>
@@ -643,7 +692,7 @@ function MarketDetail({
                 title={`${v.name}${prox.atId === v.venue ? " (you are here)" : ""}`}
               >
                 <span className="trade-venue-pill-name">
-                  {prox.atId === v.venue ? "◉ " : ""}
+                  {prox.atId === v.venue ? "â—‰ " : ""}
                   {v.name}
                 </span>
                 <span className="trade-venue-pill-last num">{priceOrDash(last)}</span>
@@ -670,7 +719,7 @@ function MarketDetail({
               className="trade-stat-value num"
               style={{ color: changeColor(stats?.change_24h_bp ?? 0) }}
             >
-              {stats ? fmtBp(stats.change_24h_bp) : "—"}
+              {stats ? fmtBp(stats.change_24h_bp) : "â€”"}
             </span>
           </div>
           <div className="trade-stat">
@@ -678,15 +727,15 @@ function MarketDetail({
             <span className="trade-stat-value num">
               {stats && stats.high_24h > 0
                 ? `${fmtMild(stats.high_24h)} / ${fmtMild(stats.low_24h)}`
-                : "—"}
+                : "â€”"}
             </span>
           </div>
           <div className="trade-stat">
             <span className="trade-stat-label">24H VOLUME</span>
             <span className="trade-stat-value num">
-              {stats ? `${fmtCompact(stats.volume_24h_wild)} MILD` : "—"}
+              {stats ? `${fmtCompact(stats.volume_24h_wild)} MILD` : "â€”"}
               {stats && stats.volume_24h_units > 0 && (
-                <span className="trade-stat-sub"> · {fmtCompact(stats.volume_24h_units)} u</span>
+                <span className="trade-stat-sub"> Â· {fmtCompact(stats.volume_24h_units)} u</span>
               )}
             </span>
           </div>
@@ -703,7 +752,7 @@ function MarketDetail({
             <span className="trade-stat-value num">
               {spread !== null
                 ? `${fmtMild(spread)} (${((spread / bestAsk) * 100).toFixed(1)}%)`
-                : "—"}
+                : "â€”"}
             </span>
           </div>
         </div>
@@ -711,11 +760,32 @@ function MarketDetail({
 
       <div className="trade-detail-grid">
         <div className="trade-panel trade-chart-panel">
-          <div className="trade-panel-title">
-            PRICE — {venueName.toUpperCase()}
-            <span className="econ-panel-sub">1M CANDLES · ~3H</span>
+          <div className="trade-panel-title trade-chart-title">
+            <span>
+              PRICE â€” {venueName.toUpperCase()}
+              <span className="econ-panel-sub">
+                {" "}
+                {TIMEFRAMES.find((tf) => tf.secs === tfSecs)?.label.toUpperCase() ?? "1M"}{" "}
+                CANDLES
+              </span>
+            </span>
+            <div className="econ-tabs trade-tf-row">
+              {TIMEFRAMES.map((tf) => (
+                <div
+                  key={tf.secs}
+                  className={`econ-tab${tf.secs === tfSecs ? " active" : ""}`}
+                  onClick={() => pickTf(tf.secs)}
+                >
+                  {tf.label}
+                </div>
+              ))}
+            </div>
           </div>
-          <CandleChart candles={book?.candles ?? []} last={book?.last ?? 0} />
+          <TradeChart
+            candles={book !== null && book.tf_secs === tfSecs ? book.candles : null}
+            tfSecs={tfSecs}
+            resetKey={`${sel.venue}:${selKey}:${tfSecs}`}
+          />
         </div>
         <BookAndTape book={book} onPickPrice={(p) => setPrefillPrice(p)} />
         <OrderPanel
@@ -738,185 +808,6 @@ function MarketDetail({
         prox={prox}
       />
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Candle chart (pure SVG, sibling of EconomyDashboard's PriceChart)
-// ---------------------------------------------------------------------------
-
-function candleClock(t: number): string {
-  return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-}
-
-/**
- * Minute OHLCV candles with a volume strip beneath and a dashed last-price
- * line. Index-scaled x (candles are contiguous minutes), fixed virtual canvas
- * scaled to its container. No chart library.
- */
-function CandleChart({ candles, last }: { candles: CandleMsg[]; last: number }) {
-  const [hover, setHover] = useState<number | null>(null);
-
-  const W = 760;
-  const H = 340;
-  const PAD_T = 12;
-  const PAD_R = 58;
-  const VOL_H = 42;
-  const AXIS_H = 18;
-  const plotW = W - PAD_R;
-  const plotH = H - PAD_T - VOL_H - AXIS_H - 10;
-  const volTop = PAD_T + plotH + 6;
-
-  if (candles.length === 0) {
-    return (
-      <div className="econ-empty econ-chart-empty">No trades at this venue yet.</div>
-    );
-  }
-
-  let yMin = Infinity;
-  let yMax = -Infinity;
-  for (const c of candles) {
-    yMin = Math.min(yMin, c.low);
-    yMax = Math.max(yMax, c.high);
-  }
-  if (last > 0) {
-    yMin = Math.min(yMin, last);
-    yMax = Math.max(yMax, last);
-  }
-  const pad = Math.max((yMax - yMin) * 0.1, Math.max(1, yMax * 0.04));
-  yMin = Math.max(0, yMin - pad);
-  yMax = yMax + pad;
-
-  const n = candles.length;
-  const step = plotW / Math.max(n, 30);
-  const x = (i: number) => plotW - (n - i - 0.5) * step;
-  const y = (v: number) => PAD_T + (1 - (v - yMin) / Math.max(1e-6, yMax - yMin)) * plotH;
-  const bodyW = Math.max(1.5, Math.min(10, step * 0.62));
-
-  const maxVol = Math.max(...candles.map((c) => c.volume_wild), 1);
-  const gridLevels = [0, 1 / 3, 2 / 3, 1].map((f) => yMin + f * (yMax - yMin));
-  const timeMarks = [0, 0.5, 1]
-    .map((f) => Math.min(n - 1, Math.round(f * (n - 1))))
-    .filter((v, i, arr) => arr.indexOf(v) === i);
-  const h = hover !== null ? candles[hover] : null;
-
-  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const vx = ((e.clientX - rect.left) / rect.width) * W;
-    // Invert x(i) = plotW - (n - i - 0.5) * step for the nearest index.
-    const i = Math.round(n - 0.5 - (plotW - vx) / step);
-    setHover(Math.max(0, Math.min(n - 1, i)));
-  };
-
-  return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      className="econ-chart trade-chart"
-      onMouseMove={onMove}
-      onMouseLeave={() => setHover(null)}
-    >
-      {gridLevels.map((v, i) => (
-        <g key={i}>
-          <line
-            x1={0}
-            y1={y(v)}
-            x2={plotW}
-            y2={y(v)}
-            stroke="rgba(159,180,200,0.14)"
-            strokeWidth="1"
-          />
-          <text x={plotW + 8} y={y(v) + 3.5} fill="#7f8ea0" fontSize="11">
-            {Math.round(v).toLocaleString()}
-          </text>
-        </g>
-      ))}
-
-      {/* last-price marker */}
-      {last > 0 && (
-        <g>
-          <line
-            x1={0}
-            y1={y(last)}
-            x2={plotW}
-            y2={y(last)}
-            stroke="rgba(79,195,255,0.5)"
-            strokeWidth="1"
-            strokeDasharray="4 4"
-          />
-          <rect x={plotW + 2} y={y(last) - 8} width={PAD_R - 4} height={16} fill="rgba(8,14,20,0.92)" stroke="rgba(79,195,255,0.5)" strokeWidth="1" />
-          <text x={plotW + 8} y={y(last) + 3.5} fill="#cdeeff" fontSize="11" fontWeight="700">
-            {Math.round(last).toLocaleString()}
-          </text>
-        </g>
-      )}
-
-      {/* candles */}
-      {candles.map((c, i) => {
-        const up = c.close >= c.open;
-        const color = up ? UP : DOWN;
-        const cx = x(i);
-        const top = y(Math.max(c.open, c.close));
-        const bot = y(Math.min(c.open, c.close));
-        return (
-          <g key={c.t} opacity={hover === null || hover === i ? 1 : 0.55}>
-            <line x1={cx} y1={y(c.high)} x2={cx} y2={y(c.low)} stroke={color} strokeWidth="1" />
-            <rect
-              x={cx - bodyW / 2}
-              y={top}
-              width={bodyW}
-              height={Math.max(1, bot - top)}
-              fill={color}
-            />
-            <rect
-              x={cx - bodyW / 2}
-              y={volTop + (1 - c.volume_wild / maxVol) * VOL_H}
-              width={bodyW}
-              height={Math.max(1, (c.volume_wild / maxVol) * VOL_H)}
-              fill={color}
-              opacity="0.45"
-            />
-          </g>
-        );
-      })}
-
-      {/* time axis */}
-      {timeMarks.map((i, k) => (
-        <text
-          key={i}
-          x={Math.min(Math.max(x(i), 4), plotW - 4)}
-          y={H - 4}
-          fill="#7f8ea0"
-          fontSize="11"
-          textAnchor={k === 0 ? "start" : k === timeMarks.length - 1 ? "end" : "middle"}
-        >
-          {candleClock(candles[i].t)}
-        </text>
-      ))}
-
-      {/* hover crosshair + OHLCV readout */}
-      {h && hover !== null && (
-        <g pointerEvents="none">
-          <line
-            x1={x(hover)}
-            y1={PAD_T}
-            x2={x(hover)}
-            y2={volTop + VOL_H}
-            stroke="rgba(234,247,255,0.35)"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-          />
-          <g transform={`translate(${Math.min(Math.max(x(hover) - 105, 2), plotW - 214)}, ${PAD_T})`}>
-            <rect width="212" height="34" rx="2" fill="rgba(8,14,20,0.92)" stroke="rgba(79,195,255,0.35)" strokeWidth="1" />
-            <text x="8" y="14" fill="#eaf7ff" fontSize="11.5" fontWeight="700">
-              O {fmtMild(h.open)}  H {fmtMild(h.high)}  L {fmtMild(h.low)}  C {fmtMild(h.close)}
-            </text>
-            <text x="8" y="27" fill="#7f8ea0" fontSize="10.5">
-              {fmtMild(h.volume_units)} units · {fmtMild(h.volume_wild)} MILD · {candleClock(h.t)}
-            </text>
-          </g>
-        </g>
-      )}
-    </svg>
   );
 }
 
@@ -966,7 +857,7 @@ function BookLadder({
   book: BookStateMsg | null;
   onPickPrice: (price: number) => void;
 }) {
-  if (!book) return <div className="econ-empty">Loading book…</div>;
+  if (!book) return <div className="econ-empty">Loading bookâ€¦</div>;
 
   // Best-first slices; cumulative size accumulates away from the spread.
   const asks = book.asks.slice(0, LADDER_LEVELS);
@@ -1058,7 +949,7 @@ function useNow(): number {
 
 function TapeList({ book }: { book: BookStateMsg | null }) {
   const now = useNow();
-  if (!book) return <div className="econ-empty">Loading trades…</div>;
+  if (!book) return <div className="econ-empty">Loading tradesâ€¦</div>;
   return (
     <div className="trade-tape">
       <div className="trade-book-row trade-book-head">
@@ -1333,7 +1224,7 @@ function OrderPanel({
         </div>
         <div className="trade-summary-row">
           <span>TAKER FEE ({FEE_PCT}%)</span>
-          <span className="num">{marketable ? `${fmtMild(fee)} MILD` : "— (maker)"}</span>
+          <span className="num">{marketable ? `${fmtMild(fee)} MILD` : "â€” (maker)"}</span>
         </div>
         <div className="trade-summary-row trade-summary-total">
           <span>{isBuy ? "TOTAL COST" : "EST. PROCEEDS"}</span>
@@ -1356,7 +1247,7 @@ function OrderPanel({
           <div>
             Travel to <b>{venueName}</b> to trade
             {distToVenue !== undefined && Number.isFinite(distToVenue)
-              ? ` — ${Math.round(distToVenue)}m away`
+              ? ` â€” ${Math.round(distToVenue)}m away`
               : ""}
             .
           </div>
@@ -1509,7 +1400,7 @@ function BottomStrip({
         <div className="trade-bottom-list">
           {inboxes.length === 0 && (
             <div className="econ-empty">
-              Nothing awaiting settlement. Fills credit an inbox at their venue —
+              Nothing awaiting settlement. Fills credit an inbox at their venue â€”
               claim them at that terminal.
             </div>
           )}

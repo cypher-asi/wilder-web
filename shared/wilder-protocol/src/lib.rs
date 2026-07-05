@@ -72,7 +72,13 @@ pub enum C2S {
     /// Watch one (venue, asset) order book. `Some` answers immediately
     /// with a full `BookState` and re-pushes while that book changes;
     /// `None` unsubscribes. Each connection watches at most one book.
-    BookSub { market: Option<BookTarget> },
+    /// `tf_secs` picks the candle timeframe (1 s .. 1 d, defaulting to 1 m
+    /// for older clients); changing frames means re-sending `BookSub`.
+    BookSub {
+        market: Option<BookTarget>,
+        #[serde(default = "default_tf_secs")]
+        tf_secs: u32,
+    },
     /// NPC vendor actions (Armory, Bodega, Bank...). Requires being in reach
     /// of the vendor building.
     Vendor { vendor: EntityId, action: VendorAction },
@@ -104,6 +110,12 @@ pub enum C2S {
     /// tier; `None` clears the anchor. Watching an agent you don't own
     /// answers with an `AgentResult` error.
     WatchAgent { agent_id: Option<AgentId> },
+    /// Spectator free-explore anchor: re-centers this connection's interest
+    /// (chunk streaming + entity replication) on a world position instead of
+    /// the watched agent. Takes precedence over `WatchAgent` while set;
+    /// a subsequent `WatchAgent` re-anchors to the agent and clears it.
+    /// Ignored for embodied (non-spectator) players.
+    SpectateAt { x: f32, z: f32 },
     Chat { text: String },
     Pong { nonce: u32 },
 }
@@ -186,6 +198,12 @@ pub enum SideMsg {
 pub enum OrderKindMsg {
     Limit { price: u32 },
     Market,
+}
+
+/// Default `BookSub::tf_secs`: 1-minute candles (what pre-timeframe
+/// clients always got).
+fn default_tf_secs() -> u32 {
+    60
 }
 
 /// One (venue, asset) order book — the `BookSub` target.
@@ -489,7 +507,7 @@ pub struct BookStatsMsg {
     pub change_24h_bp: i32,
 }
 
-/// One minute OHLCV candle for the price chart.
+/// One OHLCV candle for the price chart, at the subscription's timeframe.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CandleMsg {
     /// Bucket start, unix milliseconds.
@@ -571,7 +589,12 @@ pub struct BookStateMsg {
     /// Most recent trade price here (0 = never traded).
     pub last: u32,
     pub stats: BookStatsMsg,
-    /// Minute candles, oldest first (bounded chart window, ~3 h).
+    /// Candle timeframe in seconds these candles are bucketed at (echoes
+    /// the subscription's `tf_secs`).
+    #[serde(default = "default_tf_secs")]
+    pub tf_secs: u32,
+    /// OHLCV candles at `tf_secs` resolution, oldest first (bounded chart
+    /// window, newest ~180 buckets).
     pub candles: Vec<CandleMsg>,
     /// Recent prints, newest first (last ~30).
     pub tape: Vec<TapeMsg>,
@@ -1109,15 +1132,21 @@ mod tests {
         // BookSub: Some renders the target struct, None renders null.
         let sub = C2S::BookSub {
             market: Some(BookTarget { venue: 1, asset: AssetMsg::Shards }),
+            tf_secs: 5,
         };
         assert_eq!(
             encode(&sub),
-            r#"{"t":"BookSub","d":{"market":{"venue":1,"asset":{"t":"Shards"}}}}"#
+            r#"{"t":"BookSub","d":{"market":{"venue":1,"asset":{"t":"Shards"}},"tf_secs":5}}"#
         );
         assert_eq!(
-            encode(&C2S::BookSub { market: None }),
-            r#"{"t":"BookSub","d":{"market":null}}"#
+            encode(&C2S::BookSub { market: None, tf_secs: 60 }),
+            r#"{"t":"BookSub","d":{"market":null,"tf_secs":60}}"#
         );
+        // Pre-timeframe clients omit tf_secs: it defaults to 1-minute.
+        assert!(matches!(
+            decode::<C2S>(r#"{"t":"BookSub","d":{"market":null}}"#).unwrap(),
+            C2S::BookSub { market: None, tf_secs: 60 }
+        ));
 
         // Depth tuples render as [price, qty] arrays; unit enums as strings.
         let book = S2C::BookState(BookStateMsg {
@@ -1127,6 +1156,7 @@ mod tests {
             asks: vec![],
             last: 5,
             stats: BookStatsMsg::default(),
+            tf_secs: 60,
             candles: vec![],
             tape: vec![TapeMsg { t: 1, price: 5, qty: 2, side: SideMsg::Ask }],
             my_orders: vec![],

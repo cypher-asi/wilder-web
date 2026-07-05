@@ -1036,10 +1036,10 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   return <primitive object={model.scene} />;
 }
 
-// LootCrate resources are shared across all crates (~150 ammo caches can be
-// streamed in at once). The pulse animations are functions of the global
-// clock, identical for every crate, so one shared material per variant is
-// driven by a single useFrame in the first mounted crate that frame.
+// Loot resources are shared across the whole instanced LootField (~150 ammo
+// caches can be streamed in at once). Pulse animations are functions of the
+// global clock, identical for every crate, so shared materials are driven
+// once per frame by LootField's single useFrame.
 const crateBoxGeo = new THREE.BoxGeometry(0.6, 0.55, 0.6);
 const crateCapGeo = new THREE.BoxGeometry(0.5, 0.06, 0.5);
 const crateBodyMat = new THREE.MeshStandardMaterial({
@@ -1051,11 +1051,6 @@ const ammoBodyMat = new THREE.MeshStandardMaterial({
   color: "#323841",
   roughness: 0.6,
   metalness: 0.3,
-});
-const crateCapMat = new THREE.MeshStandardMaterial({
-  color: "#ffffff",
-  emissive: "#e8f2ff",
-  emissiveIntensity: 2,
 });
 const ammoCapMat = new THREE.MeshStandardMaterial({
   color: "#ffffff",
@@ -1071,7 +1066,6 @@ const crateIconHaloMat = new THREE.SpriteMaterial({
   blending: THREE.AdditiveBlending,
   depthWrite: false,
 });
-let cratePulseFrame = -1;
 
 // Small, category-distinct shapes for scattered death-drop pickups (variant 0):
 // each resource/material/currency/etc. reads as its own little object rather
@@ -1116,102 +1110,8 @@ function dotMaterial(color: string): THREE.MeshStandardMaterial {
   return mat;
 }
 
-function LootCrate({ entity }: { entity: GameEntity }) {
-  // Ammo caches (variant 1) stay as a highlighted stockpile crate; death drops
-  // (variant 0) render as a small, spinning, category-shaped pickup.
-  const isAmmo = entity.variant === 1;
-  const cat: ItemCategory | null = entity.item
-    ? (ITEM_INFO[entity.item]?.category ?? null)
-    : null;
-  const icon = useRef<THREE.Group>(null);
-  const spinner = useRef<THREE.Group>(null);
-  const iconBaseY = isAmmo ? 1.02 : 0.66;
-  useFrame(({ clock }) => {
-    perf.begin("shaders.misc");
-    // Shared materials only need one update per frame, not one per crate.
-    if (cratePulseFrame !== clock.elapsedTime) {
-      cratePulseFrame = clock.elapsedTime;
-      const pulse = 1.5 + Math.sin(clock.elapsedTime * 4) * 0.8;
-      crateCapMat.emissiveIntensity = pulse;
-      ammoCapMat.emissiveIntensity = pulse + 1.5;
-    }
-    // Gentle per-crate bob for the floating icon (phase from the entity id).
-    if (icon.current) {
-      icon.current.position.y = iconBaseY + Math.sin(clock.elapsedTime * 1.8 + entity.id) * 0.05;
-    }
-    // Death-drop objects spin + bob so a scattered pile reads as loose items.
-    if (spinner.current) {
-      spinner.current.rotation.y = clock.elapsedTime * 1.8 + entity.id;
-      spinner.current.position.y = 0.32 + Math.sin(clock.elapsedTime * 2 + entity.id) * 0.06;
-    }
-    perf.end("shaders.misc");
-  });
-
-  return (
-    <group
-      onClick={(e) => {
-        e.stopPropagation();
-        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
-      }}
-      onPointerOver={() => (document.body.style.cursor = "pointer")}
-      onPointerOut={() => (document.body.style.cursor = "default")}
-    >
-      {isAmmo ? (
-        <>
-          <mesh position={[0, 0.28, 0]} castShadow geometry={crateBoxGeo} material={ammoBodyMat} />
-          <mesh position={[0, 0.58, 0]} geometry={crateCapGeo} material={ammoCapMat} />
-        </>
-      ) : cat ? (
-        <group ref={spinner}>
-          <mesh
-            geometry={DROP_GEO[cat]}
-            material={dropBodyMat}
-            rotation={cat === "currency" ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
-            castShadow
-          />
-          {/* Category color lives only in this little dot stuck on the body. */}
-          <mesh
-            geometry={PICKUP_DOT_GEO}
-            material={dotMaterial(CATEGORY_TICK[cat])}
-            position={[0, 0.12, 0]}
-          />
-        </group>
-      ) : (
-        // Unknown/iconless drop: fall back to a small generic crate.
-        <mesh position={[0, 0.18, 0]} castShadow geometry={crateBoxGeo} scale={0.55} material={crateBodyMat} />
-      )}
-      {/* Glowing icon of the contents, floating above the pickup: a soft halo
-          behind the item's category-tinted glyph so its type reads at a glance. */}
-      {entity.item && (
-        <group ref={icon} position={[0, iconBaseY, 0]}>
-          <sprite
-            material={crateIconHaloMat}
-            scale={isAmmo ? [0.8, 0.8, 1] : [0.55, 0.55, 1]}
-            raycast={noRaycast}
-          />
-          <sprite
-            material={itemSpriteMaterial(entity.item)}
-            scale={isAmmo ? [0.5, 0.5, 1] : [0.3, 0.3, 1]}
-            raycast={noRaycast}
-          />
-        </group>
-      )}
-      {/* No real pointLight here: with ~150 ammo caches replicated, per-crate
-          lights multiply every material's shading cost (each forward-rendered
-          fragment loops over all scene lights) and force shader recompiles.
-          A flat ground glow marks the pickup instead of a tall beacon beam. */}
-      {isAmmo ? (
-        <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />
-      ) : (
-        <GroundGlow color={SOFT_WHITE} radius={0.55} opacity={0.4} />
-      )}
-    </group>
-  );
-}
-
 // Loose currency pickups spilled on death. Three looks keyed by variant:
 // 0 = MILD (gold coin), 1 = Shards (violet crystal), 2 = Energy (green cell).
-// Shared geometries/materials: dozens can be on screen after a firefight.
 const pickupCoinGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.03, 16);
 const pickupShardGeo = new THREE.OctahedronGeometry(0.12, 0);
 const pickupEnergyGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.18, 8);
@@ -1230,34 +1130,277 @@ const PICKUP_STYLES: PickupStyle[] = [
   { geo: pickupEnergyGeo, dot: "#39ff8e", flat: false },
 ];
 
-function CurrencyPickupView({ entity }: { entity: GameEntity }) {
-  const spinner = useRef<THREE.Group>(null);
-  const style = PICKUP_STYLES[entity.variant] ?? PICKUP_STYLES[0];
-  useFrame(({ clock }) => {
-    if (!spinner.current) return;
+// ---------------------------------------------------------------------------
+// Instanced loot field
+// ---------------------------------------------------------------------------
+// Every loot container and currency pickup used to mount its own React
+// subtree with a dedicated useFrame (bob/spin) plus 3-6 draw calls, so both
+// script cost and draw calls scaled with the pile — and a hub battlefield
+// replicates up to ~160 drops. LootField draws the entire pile from a fixed
+// set of InstancedMeshes (one per body shape, one for category dots, one for
+// ground glows, two for the ammo crate) driven by a single useFrame.
+// Floating item icons can't instance (per-item sprite textures), so a small
+// pooled set goes to the drops nearest the camera.
+
+/** Instance capacity per bucket (server replicates at most ~160 loot). */
+const LOOT_INSTANCE_MAX = 192;
+/** Pooled floating item icons, granted to the nearest drops. */
+const LOOT_ICON_MAX = 32;
+
+const DROP_CATEGORIES = Object.keys(DROP_GEO) as ItemCategory[];
+
+const lootMatrix = new THREE.Matrix4();
+const lootQuat = new THREE.Quaternion();
+const lootPos = new THREE.Vector3();
+const lootScaleV = new THREE.Vector3();
+const lootEuler = new THREE.Euler();
+const lootColor = new THREE.Color();
+
+/** Dot colors read as pure emissive ticks (basic material + instance color). */
+const lootDotMat = new THREE.MeshBasicMaterial({ toneMapped: false });
+
+interface LootBucket {
+  mesh: THREE.InstancedMesh;
+  /** Entity id per live instance slot (maps raycast instanceId → entity). */
+  ids: number[];
+}
+
+function makeLootBucket(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  shadow: boolean,
+): LootBucket {
+  const mesh = new THREE.InstancedMesh(geo, mat, LOOT_INSTANCE_MAX);
+  mesh.count = 0;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.castShadow = shadow;
+  // Instances span the whole view; per-mesh sphere culling would be wrong.
+  mesh.frustumCulled = false;
+  return { mesh, ids: [] };
+}
+
+/** Push one instance into a bucket: composed transform + owning entity id. */
+function pushLootInstance(
+  bucket: LootBucket,
+  id: number,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  flat: boolean,
+  scale: number,
+) {
+  const i = bucket.mesh.count;
+  if (i >= LOOT_INSTANCE_MAX) return;
+  lootEuler.set(flat ? Math.PI / 2 : 0, yaw, 0, "YXZ");
+  lootQuat.setFromEuler(lootEuler);
+  lootPos.set(x, y, z);
+  lootScaleV.setScalar(scale);
+  lootMatrix.compose(lootPos, lootQuat, lootScaleV);
+  bucket.mesh.setMatrixAt(i, lootMatrix);
+  bucket.ids[i] = id;
+  bucket.mesh.count = i + 1;
+}
+
+interface LootIconSlot {
+  group: THREE.Group;
+  halo: THREE.Sprite;
+  icon: THREE.Sprite;
+}
+
+function LootField() {
+  const buckets = useMemo(() => {
+    const drops = {} as Record<ItemCategory, LootBucket>;
+    for (const cat of DROP_CATEGORIES) {
+      drops[cat] = makeLootBucket(DROP_GEO[cat], dropBodyMat, true);
+    }
+    return {
+      drops,
+      /** Unknown/iconless drops fall back to a small generic crate. */
+      generic: makeLootBucket(crateBoxGeo, crateBodyMat, true),
+      currency: PICKUP_STYLES.map((s) => makeLootBucket(s.geo, dropBodyMat, true)),
+      dots: makeLootBucket(PICKUP_DOT_GEO, lootDotMat, false),
+      glows: makeLootBucket(entityGlowGeo, glowMaterial(SOFT_WHITE, 0.4), false),
+      ammoBox: makeLootBucket(crateBoxGeo, ammoBodyMat, true),
+      ammoCap: makeLootBucket(crateCapGeo, ammoCapMat, false),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const iconPool = useMemo<LootIconSlot[]>(
+    () =>
+      Array.from({ length: LOOT_ICON_MAX }, () => {
+        const group = new THREE.Group();
+        group.visible = false;
+        const halo = new THREE.Sprite(crateIconHaloMat);
+        halo.raycast = noRaycast;
+        const icon = new THREE.Sprite();
+        icon.raycast = noRaycast;
+        group.add(halo);
+        group.add(icon);
+        return { group, halo, icon };
+      }),
+    [],
+  );
+  useEffect(
+    () => () => {
+      for (const b of [
+        ...Object.values(buckets.drops),
+        buckets.generic,
+        ...buckets.currency,
+        buckets.dots,
+        buckets.glows,
+        buckets.ammoBox,
+        buckets.ammoCap,
+      ]) {
+        b.mesh.dispose();
+      }
+    },
+    [buckets],
+  );
+
+  // Scratch list of icon candidates, reused across frames.
+  const iconCandidates = useRef<{ id: number; x: number; y: number; z: number; item: NonNullable<GameEntity["item"]>; ammo: boolean; distSq: number }[]>([]);
+
+  useFrame(({ camera, clock }) => {
+    perf.begin("entities.loot");
     const t = clock.elapsedTime;
-    // Bob + spin, phase-offset per entity so a cluster doesn't move in lockstep.
-    spinner.current.position.y = 0.45 + Math.sin(t * 2.2 + entity.id) * 0.08;
-    spinner.current.rotation.y = t * 2.6 + entity.id;
+    // Ammo cap pulse: one shared material update per frame.
+    ammoCapMat.emissiveIntensity = 3.0 + Math.sin(t * 4) * 0.8;
+
+    const all: LootBucket[] = [
+      ...Object.values(buckets.drops),
+      buckets.generic,
+      ...buckets.currency,
+      buckets.dots,
+      buckets.glows,
+      buckets.ammoBox,
+      buckets.ammoCap,
+    ];
+    for (const b of all) b.mesh.count = 0;
+    const cands = iconCandidates.current;
+    cands.length = 0;
+
+    for (const e of game.entities.values()) {
+      const isLoot = e.kind === "LootContainer";
+      const isCurrency = e.kind === "CurrencyPickup";
+      if (!isLoot && !isCurrency) continue;
+      const ground = e.y + groundHeightAt(e.x, e.z);
+
+      if (isLoot && e.variant === 1) {
+        // Ammo cache: static highlighted stockpile crate + wide glow.
+        pushLootInstance(buckets.ammoBox, e.id, e.x, ground + 0.28, e.z, 0, false, 1);
+        pushLootInstance(buckets.ammoCap, e.id, e.x, ground + 0.58, e.z, 0, false, 1);
+        pushLootInstance(buckets.glows, e.id, e.x, ground + 0.03, e.z, 0, false, 2.2);
+        if (e.item) {
+          cands.push({ id: e.id, x: e.x, y: ground + 1.02, z: e.z, item: e.item, ammo: true, distSq: 0 });
+        }
+        continue;
+      }
+
+      if (isLoot) {
+        // Death drop: category-shaped body spinning + bobbing, colored tick
+        // dot riding on top (y-spin keeps the top offset invariant).
+        const cat: ItemCategory | null = e.item
+          ? (ITEM_INFO[e.item]?.category ?? null)
+          : null;
+        const yaw = t * 1.8 + e.id;
+        const bob = ground + 0.32 + Math.sin(t * 2 + e.id) * 0.06;
+        if (cat) {
+          pushLootInstance(buckets.drops[cat], e.id, e.x, bob, e.z, yaw, cat === "currency", 1);
+          const di = buckets.dots.mesh.count;
+          pushLootInstance(buckets.dots, e.id, e.x, bob + 0.12, e.z, 0, false, 1);
+          buckets.dots.mesh.setColorAt(di, lootColor.set(CATEGORY_TICK[cat]));
+        } else {
+          pushLootInstance(buckets.generic, e.id, e.x, ground + 0.18, e.z, 0, false, 0.55);
+        }
+        pushLootInstance(buckets.glows, e.id, e.x, ground + 0.03, e.z, 0, false, 0.55);
+        if (e.item) {
+          cands.push({ id: e.id, x: e.x, y: ground + 0.66, z: e.z, item: e.item, ammo: false, distSq: 0 });
+        }
+        continue;
+      }
+
+      // Currency pickup: bob + spin, phase-offset per entity.
+      const style = PICKUP_STYLES[e.variant] ?? PICKUP_STYLES[0];
+      const bucket = buckets.currency[e.variant] ?? buckets.currency[0];
+      const bob = ground + 0.45 + Math.sin(t * 2.2 + e.id) * 0.08;
+      pushLootInstance(bucket, e.id, e.x, bob, e.z, t * 2.6 + e.id, style.flat, 1);
+      const di = buckets.dots.mesh.count;
+      pushLootInstance(buckets.dots, e.id, e.x, bob + 0.09, e.z, 0, false, 1);
+      buckets.dots.mesh.setColorAt(di, lootColor.set(style.dot));
+      pushLootInstance(buckets.glows, e.id, e.x, ground + 0.03, e.z, 0, false, 0.6);
+    }
+
+    for (const b of all) {
+      b.mesh.instanceMatrix.needsUpdate = true;
+    }
+    if (buckets.dots.mesh.instanceColor) {
+      buckets.dots.mesh.instanceColor.needsUpdate = true;
+    }
+
+    // Floating item icons: the pooled sprites go to the nearest drops. The
+    // icon bob matches the old per-crate animation.
+    for (const c of cands) {
+      const dx = c.x - camera.position.x;
+      const dz = c.z - camera.position.z;
+      c.distSq = dx * dx + dz * dz;
+    }
+    if (cands.length > LOOT_ICON_MAX) {
+      cands.sort((a, b) => a.distSq - b.distSq);
+    }
+    const n = Math.min(cands.length, LOOT_ICON_MAX);
+    for (let i = 0; i < iconPool.length; i++) {
+      const slot = iconPool[i];
+      if (i >= n) {
+        slot.group.visible = false;
+        continue;
+      }
+      const c = cands[i];
+      slot.group.visible = true;
+      slot.group.position.set(c.x, c.y + Math.sin(t * 1.8 + c.id) * 0.05, c.z);
+      slot.halo.scale.set(c.ammo ? 0.8 : 0.55, c.ammo ? 0.8 : 0.55, 1);
+      slot.icon.scale.set(c.ammo ? 0.5 : 0.3, c.ammo ? 0.5 : 0.3, 1);
+      const mat = itemSpriteMaterial(c.item);
+      if (slot.icon.material !== mat) slot.icon.material = mat;
+    }
+    perf.end("entities.loot");
   });
+
+  // Click-to-pickup rides the instanced raycast: instanceId → entity id.
+  const pick = (bucket: LootBucket) => (e: { instanceId?: number; stopPropagation: () => void }) => {
+    e.stopPropagation();
+    const id = e.instanceId !== undefined ? bucket.ids[e.instanceId] : undefined;
+    if (id !== undefined) {
+      game.send?.({ t: "Interact", d: { entity_id: id } });
+    }
+  };
+  const hoverOn = () => (document.body.style.cursor = "pointer");
+  const hoverOff = () => (document.body.style.cursor = "default");
+  const clickable = [
+    ...Object.values(buckets.drops),
+    buckets.generic,
+    ...buckets.currency,
+    buckets.ammoBox,
+    buckets.ammoCap,
+  ];
+
   return (
-    <group>
-      <group ref={spinner}>
-        <mesh
-          geometry={style.geo}
-          material={dropBodyMat}
-          rotation={style.flat ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
-          castShadow
+    <>
+      {clickable.map((b, i) => (
+        <primitive
+          key={i}
+          object={b.mesh}
+          onClick={pick(b)}
+          onPointerOver={hoverOn}
+          onPointerOut={hoverOff}
         />
-        {/* Currency type shows only as this small colored dot on the body. */}
-        <mesh
-          geometry={PICKUP_DOT_GEO}
-          material={dotMaterial(style.dot)}
-          position={[0, 0.09, 0]}
-        />
-      </group>
-      <GroundGlow color={SOFT_WHITE} radius={0.6} opacity={0.4} />
-    </group>
+      ))}
+      <primitive object={buckets.dots.mesh} raycast={noRaycast} />
+      <primitive object={buckets.glows.mesh} raycast={noRaycast} />
+      {iconPool.map((slot, i) => (
+        <primitive key={i} object={slot.group} />
+      ))}
+    </>
   );
 }
 
@@ -1716,11 +1859,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
   let body: React.ReactNode;
   switch (entity.kind) {
     case "LootContainer":
-      body = <LootCrate entity={entity} />;
-      break;
     case "CurrencyPickup":
-      body = <CurrencyPickupView entity={entity} />;
-      break;
+      // Drawn by the instanced LootField, not a per-entity subtree.
+      return null;
     case "ResourceNode":
       body = <ResourceNodeView entity={entity} />;
       break;
@@ -2240,6 +2381,69 @@ function AgentDots() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Sanctuary boundary
+// ---------------------------------------------------------------------------
+// The safe hub is the 3x3 chunk block around the origin (mirror of
+// `is_safe_chunk` / SAFE_RADIUS=1 in wilder-world): no damage in or out.
+// The rule is invisible on the ground, so hostiles ignoring a player two
+// steps inside the line read as broken AI. This paints the actual boundary
+// as a glowing strip so the protection edge is legible in-world.
+const SAFE_MIN = -1 * CHUNK_SIZE;
+const SAFE_MAX = 2 * CHUNK_SIZE;
+const SANCTUARY_RING_COLOR = "#63d8ff";
+
+const sanctuaryRingMat = new THREE.MeshBasicMaterial({
+  color: SANCTUARY_RING_COLOR,
+  transparent: true,
+  opacity: 0.4,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  toneMapped: false,
+  side: THREE.DoubleSide,
+});
+
+function buildSanctuaryRing(): THREE.BufferGeometry {
+  const w = 0.5; // strip width (m)
+  const step = 4; // segment length (m) — follows ground height per vertex
+  const verts: number[] = [];
+  const h = (x: number, z: number) => groundHeightAt(x, z) + 0.06;
+  const quad = (
+    x1: number,
+    z1: number,
+    x2: number,
+    z2: number,
+    x3: number,
+    z3: number,
+    x4: number,
+    z4: number,
+  ) => {
+    // Two triangles: (1,2,3) and (1,3,4), counter-clockwise from above.
+    verts.push(x1, h(x1, z1), z1, x2, h(x2, z2), z2, x3, h(x3, z3), z3);
+    verts.push(x1, h(x1, z1), z1, x3, h(x3, z3), z3, x4, h(x4, z4), z4);
+  };
+  for (let a = SAFE_MIN; a < SAFE_MAX; a += step) {
+    const b = Math.min(a + step, SAFE_MAX);
+    quad(a, SAFE_MIN, b, SAFE_MIN, b, SAFE_MIN + w, a, SAFE_MIN + w); // south
+    quad(a, SAFE_MAX - w, b, SAFE_MAX - w, b, SAFE_MAX, a, SAFE_MAX); // north
+    quad(SAFE_MIN, a, SAFE_MIN + w, a, SAFE_MIN + w, b, SAFE_MIN, b); // west
+    quad(SAFE_MAX - w, a, SAFE_MAX, a, SAFE_MAX, b, SAFE_MAX - w, b); // east
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  return geo;
+}
+
+function SanctuaryBoundary() {
+  // Rebuild when chunk geometry streams in so the strip hugs the ground.
+  const chunkVersion = useGame((s) => s.chunkVersion);
+  const geometry = useMemo(() => buildSanctuaryRing(), [chunkVersion]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return (
+    <mesh geometry={geometry} material={sanctuaryRingMat} raycast={noRaycast} />
+  );
+}
+
 export function Entities() {
   // Mount/unmount entity views the moment the spawn/despawn arrives: the
   // roster version bumps synchronously with the network handler (the old
@@ -2248,9 +2452,15 @@ export function Entities() {
 
   return (
     <>
-      {[...game.entities.values()].map((entity) => (
-        <MemoEntityView key={entity.id} entity={entity} />
-      ))}
+      {[...game.entities.values()]
+        // Loot never mounts a React view: LootField draws every container
+        // and currency pickup from a fixed set of instanced meshes.
+        .filter((e) => e.kind !== "LootContainer" && e.kind !== "CurrencyPickup")
+        .map((entity) => (
+          <MemoEntityView key={entity.id} entity={entity} />
+        ))}
+      <LootField />
+      <SanctuaryBoundary />
       <EntityDriver />
       <AgentLodArbiter />
       <AgentImpostors />

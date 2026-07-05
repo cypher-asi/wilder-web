@@ -309,10 +309,23 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
 
 let entityRosterVersion = 0;
 const entityRosterListeners = new Set<() => void>();
+let rosterNotifyScheduled = false;
 
 export function bumpEntityRoster(): void {
   entityRosterVersion++;
-  for (const listener of entityRosterListeners) listener();
+  // Coalesce notifications to one per frame: a death wave lands as dozens of
+  // separate EntitySpawn/Despawn websocket messages (each its own task), and
+  // notifying per message forced one full React reconciliation of the entity
+  // list per entity. The version above still bumps synchronously, so the
+  // deferred notification flushes every change at once.
+  if (rosterNotifyScheduled) return;
+  rosterNotifyScheduled = true;
+  const flush = () => {
+    rosterNotifyScheduled = false;
+    for (const listener of entityRosterListeners) listener();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+  else setTimeout(flush, 0);
 }
 
 export function subscribeEntityRoster(listener: () => void): () => void {

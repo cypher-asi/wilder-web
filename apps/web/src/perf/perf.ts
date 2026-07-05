@@ -50,6 +50,7 @@ const SECTION_SYSTEM: Record<string, string> = {
   "entities.rig": "rigs",
   "entities.move": "movement",
   "entities.impostors": "movement",
+  "entities.loot": "movement",
   "ocean.tick": "shaders",
   "shaders.misc": "shaders",
   "chunks.build": "world",
